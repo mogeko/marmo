@@ -36,8 +36,6 @@ Source: [SIP022 AEAD-2022 Ciphers](https://github.com/shadowsocks/shadowsocks-or
 - Optional ChaCha20-Poly1305 methods are not implemented; config rejects them.
 - Anti-probing behavior on malformed TCP headers (the spec's "do not reveal
   consumed byte count" requirement) is not implemented.
-- Interoperability tests against a reference implementation are not present.
-  Current tests are self-interop over loopback.
 - The UDP server routes only to a `direct` outbound. Routing a Shadowsocks UDP
   inbound through another outbound would need a per-session outbound
   `PacketConn`, which is not wired yet.
@@ -54,5 +52,6 @@ Source: [SIP022 AEAD-2022 Ciphers](https://github.com/shadowsocks/shadowsocks-or
   inbound -> direct TCP echo.
 - Integration: SOCKS5 UDP ASSOCIATE -> Shadowsocks 2022 UDP outbound ->
   Shadowsocks 2022 UDP server -> direct UDP echo.
-- Fixtures: none yet. Add captured reference transcripts before claiming
-  interop.
+- Reference interop: verified locally against shadowsocks-rust 1.25.0, TCP/UDP
+  in both directions; the harness is intentionally not committed.
+- Fixtures: none yet. Add captured reference transcripts for offline CI.

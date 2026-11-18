@@ -47,16 +47,14 @@ pub const TcpStream = struct {
     ) Stream.WriteError!usize {
         const self: *TcpStream = @ptrCast(@alignCast(ctx));
         var writer = std.Io.net.Stream.Writer.init(self.inner, io, &.{});
-        var total: usize = 0;
-        for (buffers) |buffer| {
-            writer.interface.writeAll(buffer) catch {
-                return writeError(writer.err);
-            };
-            total += buffer.len;
-        }
+        writer.interface.writeVecAll(@constCast(buffers)) catch {
+            return writeError(writer.err);
+        };
         writer.interface.flush() catch {
             return writeError(writer.err);
         };
+        var total: usize = 0;
+        for (buffers) |buffer| total += buffer.len;
         return total;
     }
 

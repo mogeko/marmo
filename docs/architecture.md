@@ -1,9 +1,9 @@
 # Architecture
 
-Status: Phase 1 MVP implemented. The TCP/UDP core, SOCKS5, HTTP CONNECT and
-forward proxying, direct and HTTP CONNECT outbounds, Shadowsocks 2022 TCP/UDP,
-routing, config, and metrics are implemented. Phase 2 is next; protocol-specific
-gaps are tracked in `docs/protocols/`.
+Status: Phase 1 MVP implemented. SS2022 TCP/UDP interop was verified locally
+against shadowsocks-rust 1.25.0 in both directions; the interop harness is not
+part of the repository. Phase 2 is next; protocol-specific gaps are tracked in
+`docs/protocols/`.
 
 ## 1. Purpose
 
@@ -501,7 +501,7 @@ docs/
   architecture.md
   decisions/
   protocols/              per-protocol notes and sources
-tests/                    interop fixtures and loopback integration tests
+tests/                    protocol fixtures and loopback integration tests
 ```
 
 Module boundaries are enforced by review, not by the compiler; do not import

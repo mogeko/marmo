@@ -55,8 +55,9 @@ repository ships the library only: no CLI, daemon, or `app` layer.
 
 ## Commands and tests
 
-- `zig build test` runs the unit, public API, and integration tests (33 tests
-  today).
+- `zig build test` runs the unit, public API, and integration tests (34 tests
+  today). Reference-implementation interop is local-only and not part of this
+  repository or CI.
 - `zig test src/root.zig` runs the module tests directly; use
   `zig test src/net/endpoint.zig --test-filter <name>` for one file or test.
 - `zig fmt build.zig src tests` before finishing; CI runs

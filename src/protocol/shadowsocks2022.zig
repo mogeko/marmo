@@ -163,7 +163,7 @@ pub fn open(
 
 pub fn nonceFromCounter(counter: u64) [nonce_length]u8 {
     var nonce: [nonce_length]u8 = @splat(0);
-    std.mem.writeInt(u64, nonce[4..12], counter, .little);
+    std.mem.writeInt(u64, nonce[0..8], counter, .little);
     return nonce;
 }
 
@@ -1426,6 +1426,19 @@ test "AEAD chunk roundtrip and nonce order" {
         &decrypted,
     );
     try std.testing.expectEqualStrings(plaintext, decrypted[0..len]);
+}
+
+test "TCP nonce is a 12-byte little-endian integer" {
+    const one = nonceFromCounter(1);
+    try std.testing.expectEqual(@as(u8, 1), one[0]);
+    for (one[1..]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+
+    const value = nonceFromCounter(0x0102030405060708);
+    try std.testing.expectEqualSlices(
+        u8,
+        &[_]u8{ 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0, 0, 0, 0 },
+        &value,
+    );
 }
 
 test "sliding window rejects duplicates and old packets" {
