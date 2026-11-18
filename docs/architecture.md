@@ -1,9 +1,9 @@
 # Architecture
 
-Status: Phase 1 MVP implemented. SS2022 TCP/UDP interop was verified locally
-against shadowsocks-rust 1.25.0 in both directions; the interop harness is not
-part of the repository. Phase 2 is next; protocol-specific gaps are tracked in
-`docs/protocols/`.
+Status: Phase 1 MVP implemented; Phase 2 started with outbound selectors.
+SS2022 TCP/UDP interop was verified locally against shadowsocks-rust 1.25.0 in
+both directions; the interop harness is not part of the repository. Protocol and
+Phase 2 gaps are tracked in `docs/protocols/` and §11.
 
 ## 1. Purpose
 
@@ -379,6 +379,10 @@ Health checks are explicit per group: `tcp_connect` to a host:port or
 (`alpha = 0.2`) and a failure counter with exponential backoff. Checks are off
 by default; no traffic is generated unless configured.
 
+Implementation status: `manual`, `round_robin`, `random`, `fallback`, and
+`least_latency` are implemented. Latency is currently measured passively from
+successful connects (EWMA); active health probes and `http_head` are pending.
+
 Per-connection selection is independent. UDP sessions keep the selected node
 for the session lifetime. Selection state is shared across tasks; use atomics
 for counters and a mutex only around node-set replacement (config reload).
@@ -405,9 +409,10 @@ Phasing:
   ASSOCIATE), HTTP/1.1 proxy (CONNECT + forward), HTTP CONNECT outbound, direct
   outbound, Shadowsocks 2022, domain/IP-CIDR/port rules, manual group, JSON
   config, counters.
-- **Phase 2**: VLESS/Trojan/VMess, in-tree TLS 1.3 server, WS/H2 transports,
+- **Phase 2**: VLESS/Trojan/VMess, in-tree TLS 1.3 server and WS/H2 transports,
   sniffing, compiled rule sets, process rules, groups and health checks, DNS
-  cache/DoH.
+  cache/DoH. Outbound selectors are implemented with passive latency; active
+  health probes and the remaining items are next.
 - **Phase 3**: in-tree QUIC, TUIC, Hysteria2, gRPC transport.
 - **Phase 4**: optional TUN/transparent proxying, Windows, transport hardening
   and external audit.

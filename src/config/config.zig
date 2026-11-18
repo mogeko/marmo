@@ -35,9 +35,13 @@ pub const Config = struct {
         server: ?[]const u8 = null,
         method: ?[]const u8 = null,
         password: ?[]const u8 = null,
+        nodes: ?[]const []const u8 = null,
+        strategy: ?Strategy = null,
     };
 
-    pub const OutboundProtocol = enum { direct, http, shadowsocks };
+    pub const OutboundProtocol = enum { direct, http, selector, shadowsocks };
+
+    pub const Strategy = enum { fallback, least_latency, manual, random, round_robin };
 
     pub const Route = struct {
         rules: []const Rule = &.{},
@@ -177,6 +181,10 @@ fn validateOutbounds(
             diagnostic.set("outbounds[{d}].tag: 'reject' is reserved", .{index});
             return error.InvalidConfig;
         }
+        if (std.mem.eql(u8, outbound.tag, "direct") and outbound.protocol != .direct) {
+            diagnostic.set("outbounds[{d}].tag: 'direct' is reserved for direct", .{index});
+            return error.InvalidConfig;
+        }
         for (outbounds[0..index]) |previous| {
             if (std.mem.eql(u8, previous.tag, outbound.tag)) {
                 diagnostic.set("outbounds[{d}].tag: duplicate '{s}'", .{
@@ -191,6 +199,7 @@ fn validateOutbounds(
             .direct => try validateDirect(outbound, index, diagnostic),
             .http => try validateHttp(outbound, index, diagnostic),
             .shadowsocks => try validateShadowsocks(outbound, index, diagnostic),
+            .selector => try validateSelector(outbound, index, outbounds, diagnostic),
         }
     }
 }
@@ -200,6 +209,7 @@ fn validateDirect(
     index: usize,
     diagnostic: *Diagnostic,
 ) ValidationError!void {
+    try rejectSelectorFields(outbound, index, diagnostic);
     if (outbound.server != null or outbound.method != null or outbound.password != null) {
         diagnostic.set("outbounds[{d}]: direct does not take server or credentials", .{index});
         return error.InvalidConfig;
@@ -211,6 +221,7 @@ fn validateHttp(
     index: usize,
     diagnostic: *Diagnostic,
 ) ValidationError!void {
+    try rejectSelectorFields(outbound, index, diagnostic);
     const server = outbound.server orelse {
         diagnostic.set("outbounds[{d}].server: required for http", .{index});
         return error.InvalidConfig;
@@ -233,6 +244,7 @@ fn validateShadowsocks(
     index: usize,
     diagnostic: *Diagnostic,
 ) ValidationError!void {
+    try rejectSelectorFields(outbound, index, diagnostic);
     const server = outbound.server orelse {
         diagnostic.set("outbounds[{d}].server: required for shadowsocks", .{index});
         return error.InvalidConfig;
@@ -263,6 +275,73 @@ fn validateShadowsocks(
         return error.InvalidConfig;
     };
     key.deinit();
+}
+
+fn rejectSelectorFields(
+    outbound: Config.Outbound,
+    index: usize,
+    diagnostic: *Diagnostic,
+) ValidationError!void {
+    if (outbound.nodes != null or outbound.strategy != null) {
+        diagnostic.set("outbounds[{d}]: nodes/strategy only apply to selector", .{index});
+        return error.InvalidConfig;
+    }
+}
+
+fn validateSelector(
+    outbound: Config.Outbound,
+    index: usize,
+    outbounds: []const Config.Outbound,
+    diagnostic: *Diagnostic,
+) ValidationError!void {
+    if (outbound.server != null or outbound.method != null or outbound.password != null) {
+        diagnostic.set("outbounds[{d}]: selector does not take server or credentials", .{index});
+        return error.InvalidConfig;
+    }
+    const nodes = outbound.nodes orelse {
+        diagnostic.set("outbounds[{d}].nodes: required for selector", .{index});
+        return error.InvalidConfig;
+    };
+    if (nodes.len == 0) {
+        diagnostic.set("outbounds[{d}].nodes: must not be empty", .{index});
+        return error.InvalidConfig;
+    }
+    _ = outbound.strategy orelse {
+        diagnostic.set("outbounds[{d}].strategy: required for selector", .{index});
+        return error.InvalidConfig;
+    };
+
+    for (nodes, 0..) |node_tag, node_index| {
+        if (node_tag.len == 0) {
+            diagnostic.set("outbounds[{d}].nodes[{d}]: empty tag", .{ index, node_index });
+            return error.InvalidConfig;
+        }
+        if (std.mem.eql(u8, node_tag, outbound.tag)) {
+            diagnostic.set("outbounds[{d}].nodes[{d}]: refers to itself", .{ index, node_index });
+            return error.InvalidConfig;
+        }
+        var found = false;
+        for (outbounds) |candidate| {
+            if (!std.mem.eql(u8, candidate.tag, node_tag)) continue;
+            if (candidate.protocol == .selector) {
+                diagnostic.set(
+                    "outbounds[{d}].nodes[{d}]: nested selectors are not supported",
+                    .{ index, node_index },
+                );
+                return error.InvalidConfig;
+            }
+            found = true;
+            break;
+        }
+        if (!found) {
+            diagnostic.set("outbounds[{d}].nodes[{d}]: unknown '{s}'", .{
+                index,
+                node_index,
+                node_tag,
+            });
+            return error.InvalidConfig;
+        }
+    }
 }
 
 fn validateRoute(
@@ -382,6 +461,40 @@ test "config rejects unknown fields and duplicate tags" {
     );
     try std.testing.expectEqualStrings(
         "inbounds[1].tag: duplicate 'a'",
+        diagnostic.message(),
+    );
+}
+
+test "selector config validates node references" {
+    var diagnostic: Diagnostic = .{};
+    var parsed = try fromJson(std.testing.allocator,
+        \\{
+        \\  "outbounds": [
+        \\    { "tag": "direct", "protocol": "direct" },
+        \\    { "tag": "auto", "protocol": "selector",
+        \\      "nodes": ["direct"], "strategy": "fallback" }
+        \\  ],
+        \\  "route": { "final": "auto" }
+        \\}
+    );
+    defer parsed.deinit();
+    try validate(parsed.inner.value, &diagnostic);
+
+    var bad = try fromJson(std.testing.allocator,
+        \\{
+        \\  "outbounds": [
+        \\    { "tag": "auto", "protocol": "selector",
+        \\      "nodes": ["missing"], "strategy": "fallback" }
+        \\  ]
+        \\}
+    );
+    defer bad.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(bad.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "outbounds[0].nodes[0]: unknown 'missing'",
         diagnostic.message(),
     );
 }

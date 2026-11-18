@@ -10,6 +10,7 @@ const Endpoint = @import("net/endpoint.zig").Endpoint;
 const Direct = @import("outbound/direct.zig").Direct;
 const HttpConnect = @import("outbound/http_connect.zig").HttpConnect;
 const Shadowsocks = @import("outbound/shadowsocks.zig").Shadowsocks;
+const Selector = @import("outbound/selector.zig").Selector;
 const Outbound = @import("outbound/outbound.zig").Outbound;
 const s2022 = @import("protocol/shadowsocks2022.zig");
 const ss_inbound = @import("inbound/shadowsocks.zig");
@@ -399,76 +400,141 @@ fn compileOutbounds(
 
     const count = configs.len + @intFromBool(!has_direct);
     const outbounds = try allocator.alloc(Outbound, count);
-    var index: usize = 0;
-
-    for (configs) |config| {
-        outbounds[index] = switch (config.protocol) {
-            .direct => .{
-                .tag = config.tag,
-                .dialer = direct.dialer(),
-                .supports_udp = true,
-            },
-            .http => blk: {
-                const server_text = config.server orelse return error.InvalidConfig;
-                const server = Endpoint.parse(server_text) catch return error.InvalidConfig;
-                const http = try allocator.create(HttpConnect);
-                http.* = .{ .gpa = gpa, .server = server, .dialer = direct.dialer() };
-                break :blk .{
-                    .tag = config.tag,
-                    .dialer = http.asDialer(),
-                    .supports_udp = false,
-                };
-            },
-            .shadowsocks => blk: {
-                const server_text = config.server orelse return error.InvalidConfig;
-                const server = Endpoint.parse(server_text) catch return error.InvalidConfig;
-                const method_text = config.method orelse return error.InvalidConfig;
-                const method = s2022.Method.parse(method_text) orelse {
-                    diagnostic.set(
-                        "outbounds: unsupported shadowsocks method '{s}'",
-                        .{method_text},
-                    );
-                    return error.InvalidConfig;
-                };
-                const password = config.password orelse return error.InvalidConfig;
-                var key = s2022.Key.parse(method, password) catch {
-                    diagnostic.set("outbounds: invalid shadowsocks key", .{});
-                    return error.InvalidConfig;
-                };
-
-                const shadowsocks = allocator.create(Shadowsocks) catch {
-                    key.deinit();
-                    return error.OutOfMemory;
-                };
-                shadowsocks.* = .{
-                    .gpa = gpa,
-                    .server = server,
-                    .method = method,
-                    .key = key,
-                    .direct_dialer = direct.dialer(),
-                };
-                key.deinit();
-
-                break :blk .{
-                    .tag = config.tag,
-                    .dialer = shadowsocks.asDialer(),
-                    .supports_udp = true,
-                    .cleanup = cleanupShadowsocks,
-                    .cleanup_ctx = shadowsocks,
-                };
-            },
-        };
-        index += 1;
-    }
+    var filled: usize = 0;
 
     if (!has_direct) {
-        outbounds[index] = .{
+        outbounds[filled] = .{
             .tag = "direct",
             .dialer = direct.dialer(),
             .supports_udp = true,
         };
+        filled += 1;
     }
+
+    for (configs) |config| {
+        if (config.protocol == .selector) continue;
+        outbounds[filled] = try compileNonSelector(
+            allocator,
+            gpa,
+            direct,
+            config,
+            diagnostic,
+        );
+        filled += 1;
+    }
+
+    for (configs) |config| {
+        if (config.protocol != .selector) continue;
+        outbounds[filled] = try compileSelector(
+            allocator,
+            config,
+            outbounds[0..filled],
+            diagnostic,
+        );
+        filled += 1;
+    }
+
+    std.debug.assert(filled == count);
     return outbounds;
+}
+
+fn compileNonSelector(
+    allocator: std.mem.Allocator,
+    gpa: std.mem.Allocator,
+    direct: *Direct,
+    config: Config.Outbound,
+    diagnostic: *Diagnostic,
+) InitError!Outbound {
+    return switch (config.protocol) {
+        .direct => .{
+            .tag = config.tag,
+            .dialer = direct.dialer(),
+            .supports_udp = true,
+        },
+        .http => blk: {
+            const server_text = config.server orelse return error.InvalidConfig;
+            const server = Endpoint.parse(server_text) catch return error.InvalidConfig;
+            const http = try allocator.create(HttpConnect);
+            http.* = .{ .gpa = gpa, .server = server, .dialer = direct.dialer() };
+            break :blk .{
+                .tag = config.tag,
+                .dialer = http.asDialer(),
+                .supports_udp = false,
+            };
+        },
+        .shadowsocks => blk: {
+            const server_text = config.server orelse return error.InvalidConfig;
+            const server = Endpoint.parse(server_text) catch return error.InvalidConfig;
+            const method_text = config.method orelse return error.InvalidConfig;
+            const method = s2022.Method.parse(method_text) orelse {
+                diagnostic.set(
+                    "outbounds: unsupported shadowsocks method '{s}'",
+                    .{method_text},
+                );
+                return error.InvalidConfig;
+            };
+            const password = config.password orelse return error.InvalidConfig;
+            var key = s2022.Key.parse(method, password) catch {
+                diagnostic.set("outbounds: invalid shadowsocks key", .{});
+                return error.InvalidConfig;
+            };
+
+            const shadowsocks = allocator.create(Shadowsocks) catch {
+                key.deinit();
+                return error.OutOfMemory;
+            };
+            shadowsocks.* = .{
+                .gpa = gpa,
+                .server = server,
+                .method = method,
+                .key = key,
+                .direct_dialer = direct.dialer(),
+            };
+            key.deinit();
+
+            break :blk .{
+                .tag = config.tag,
+                .dialer = shadowsocks.asDialer(),
+                .supports_udp = true,
+                .cleanup = cleanupShadowsocks,
+                .cleanup_ctx = shadowsocks,
+            };
+        },
+        .selector => unreachable,
+    };
+}
+
+fn compileSelector(
+    allocator: std.mem.Allocator,
+    config: Config.Outbound,
+    pool: []Outbound,
+    diagnostic: *Diagnostic,
+) InitError!Outbound {
+    const node_tags = config.nodes orelse return error.InvalidConfig;
+    const strategy = config.strategy orelse return error.InvalidConfig;
+
+    const nodes = try allocator.alloc(*const Outbound, node_tags.len);
+    for (node_tags, 0..) |tag, index| {
+        var found: ?*const Outbound = null;
+        for (pool) |*candidate| {
+            if (!std.mem.eql(u8, candidate.tag, tag)) continue;
+            found = candidate;
+            break;
+        }
+        if (found == null) {
+            diagnostic.set("outbounds: selector node '{s}' not found", .{tag});
+            return error.InvalidConfig;
+        }
+        nodes[index] = found.?;
+    }
+
+    const selector = Selector.init(allocator, nodes, strategy) catch
+        return error.OutOfMemory;
+    return .{
+        .tag = config.tag,
+        .dialer = selector.asDialer(),
+        .supports_udp = selector.supportsUdp(),
+    };
 }
 
 fn compileInbounds(

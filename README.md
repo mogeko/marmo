@@ -5,10 +5,12 @@ protocols, rule-based routing, and latency-aware node selection.
 
 **Version:** 0.0.1 (Not production-ready; API is unstable and may change without notice.)
 
-**Status:** Phase 1 MVP implemented. Includes strict JSON config, direct TCP/UDP
-and HTTP CONNECT outbounds, SOCKS5 inbound (CONNECT + UDP ASSOCIATE), HTTP
-CONNECT and forward proxying, Shadowsocks 2022 TCP/UDP (AES-128/256-GCM),
-domain/IP-CIDR/port routing, relay, and metrics.
+**Status:** Phase 1 MVP implemented; Phase 2 has started with outbound selectors
+(manual, round-robin, random, fallback, least-latency using passive latency
+samples). Includes strict JSON config, direct TCP/UDP and HTTP CONNECT
+outbounds, SOCKS5 inbound (CONNECT + UDP ASSOCIATE), HTTP CONNECT and forward
+proxying, Shadowsocks 2022 TCP/UDP (AES-128/256-GCM), domain/IP-CIDR/port
+routing, relay, and metrics.
 
 **Transport status:** plaintext TCP is implemented; the TLS client is available
 in `std` but not wired into a transport yet. The in-tree TLS 1.3 server, QUIC,

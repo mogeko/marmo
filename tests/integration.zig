@@ -710,3 +710,79 @@ test "HTTP forward proxy rewrites absolute-form requests" {
     instance.stop();
     _ = origin_future.await(io);
 }
+
+test "selector fallback skips a failing outbound" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var dead_bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var dead_server = try dead_bind.listen(io, .{ .reuse_address = true });
+    const dead_port = dead_server.socket.address.getPort();
+    dead_server.deinit(io);
+
+    var dead_buffer: [32]u8 = undefined;
+    const dead_text = try std.fmt.bufPrint(
+        &dead_buffer,
+        "127.0.0.1:{d}",
+        .{dead_port},
+    );
+
+    var echo_bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var echo_server = try echo_bind.listen(io, .{ .reuse_address = true });
+    defer echo_server.deinit(io);
+    var echo_future = io.async(echoLoopOnce, .{ io, &echo_server });
+
+    var diagnostic: marmo.Diagnostic = .{};
+    const config: marmo.Config = .{
+        .inbounds = &.{
+            .{ .tag = "socks", .protocol = .socks5, .listen = "127.0.0.1:0" },
+        },
+        .outbounds = &.{
+            .{ .tag = "dead", .protocol = .http, .server = dead_text },
+            .{ .tag = "direct", .protocol = .direct },
+            .{
+                .tag = "auto",
+                .protocol = .selector,
+                .nodes = &.{ "dead", "direct" },
+                .strategy = .fallback,
+            },
+        },
+        .route = .{ .final = "auto" },
+    };
+    var instance = try marmo.Instance.init(allocator, io, config, &diagnostic);
+    defer instance.deinit();
+    try instance.start();
+
+    const socks_endpoint = instance.inboundEndpoint("socks") orelse
+        return error.TestUnexpectedResult;
+    const socks_address = switch (socks_endpoint) {
+        .ip => |ip| ip,
+        .domain => return error.TestUnexpectedResult,
+    };
+    const client = try std.Io.net.IpAddress.connect(
+        &socks_address,
+        io,
+        .{ .mode = .stream },
+    );
+    defer client.close(io);
+
+    try socksNegotiate(io, client);
+    const echo_port = echo_server.socket.address.getPort();
+    try tcpWrite(io, client, &[_]u8{
+        5,                        1,                          0, 1, 127, 0, 0, 1,
+        @intCast(echo_port >> 8), @intCast(echo_port & 0xff),
+    });
+
+    var reply: [10]u8 = undefined;
+    try tcpReadExact(io, client, &reply);
+    try std.testing.expectEqual(@as(u8, 0), reply[1]);
+
+    try tcpWrite(io, client, "fallback");
+    var echoed: [8]u8 = undefined;
+    try tcpReadExact(io, client, &echoed);
+    try std.testing.expectEqualStrings("fallback", &echoed);
+
+    instance.stop();
+    _ = echo_future.await(io);
+}
