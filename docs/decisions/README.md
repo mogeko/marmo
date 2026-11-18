@@ -7,7 +7,7 @@ date.
 
 ## Process
 
-1. Copy `0000-template.md` (or run `.opencode/skills/adr/scripts/new-adr.sh <slug>`).
+1. Copy `0000-template.md` (or run `.agents/skills/adr/scripts/new-adr.sh <slug>`).
 2. Set `Status: Proposed`, name the options, and state a recommendation.
 3. Add a row to the index below and link the ADR from
    [`docs/architecture.md`](../architecture.md) when it affects the design.

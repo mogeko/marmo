@@ -10,13 +10,9 @@ repository ships the library only: no CLI, daemon, or `app` layer.
   ADR is not approved: do not implement it. Use the `adr` skill to record a
   decision and wait for the user.
 - Accepted ADRs are immutable; supersede them with a new ADR instead of editing.
-- Keep `docs/architecture.md`, the ADR index, and this file in sync with
-  behavior changes.
+- Keep `docs/architecture.md`, the ADR index, and this file in sync.
 - `Instance` is the composition root; do not add an application layer, CLI, or
-  process-level signal handling to the library.
-- Follow `.opencode/instructions/zig-style.md` (loaded through
-  `.opencode/opencode.json`); it is the enforceable Zig style for this
-  repository.
+  process-level signal handling.
 
 ## Repo state
 
@@ -40,19 +36,126 @@ repository ships the library only: no CLI, daemon, or `app` layer.
   there are no optional backends.
 - Every allocating API takes an explicit allocator; no globals or thread-locals.
 
-## Hard rules
+## Zig style
 
-- English only: code, comments, docs, commit messages.
-- Default build is std-only: no C toolchain, no network access, no optional
-  backends, no vendored crypto. Never implement crypto primitives by hand.
-- No third-party TLS/QUIC/HTTP2/WebSocket packages: implement missing
-  transports in-tree (ADR-0007). They are std-first stopgaps: when a Zig
-  upgrade adds the primitive, switch to `std` and delete the in-tree code.
-- LGPL-2.1. Never copy code from sing-box/Xray/v2ray (GPL/AGPL/MPL); implement
-  from specs and record sources in `docs/protocols/<protocol>.md` (ADR-0009).
-- Parsers see untrusted bytes: bounded reads, typed errors, no panics, and a
-  fuzz target for every decoder.
-- Never log payloads, passwords, UUIDs, private keys, or tokens.
+Adapted from TigerBeetle's
+[`TIGER_STYLE.md`](https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md)
+(Apache-2.0). This is the enforceable Zig style for this repository.
+
+### Priorities
+
+- Safety first, then performance, then developer experience. When they
+  conflict, safety wins; when in doubt, choose the simpler design.
+- Zero technical debt: fix known flaws now. Missing features are acceptable;
+  incorrect code is not. Fewest abstractions that fit the domain.
+- Prefer explicit, boring code. Style is design; make correctness visible.
+
+### Safety and bounds
+
+- Untrusted bytes never cause a panic, undefined behavior, an unbounded read,
+  or unbounded allocation. Return typed errors.
+- Every loop, queue, buffer, cache, and rule set has a fixed upper bound chosen
+  at initialization. If a loop cannot terminate (relay, accept), assert the
+  invariant that lets it run.
+- No recursion. Use a bounded stack or queue for nested protocols.
+- No allocation on the per-byte or per-packet path. Long-lived state belongs in
+  `Instance.init`; per-connection state comes from a bounded arena.
+- English only in code, comments, docs, and commit messages.
+
+### Assertions and errors
+
+- Assertions detect programmer errors; input validation uses typed errors.
+  `assert` is removed in `ReleaseFast`; never rely on it for security.
+- Target two meaningful assertions per non-trivial function. Pair them at
+  boundaries: before write/after read, encode/decode, state transitions.
+  Assert compile-time wire sizes and limits.
+- Split compound assertions and conditions. Assert the positive and negative
+  space; use `if (condition) assert(invariant);`.
+- Handle or propagate every error. No `catch {}` or silent fallback. Public
+  APIs use typed error sets; diagnostics stay separate from errors.
+- `unreachable` only for impossible states proven by types or prior checks;
+  never on network data, never `catch unreachable` on I/O.
+
+### Memory and wire data
+
+- Thread allocators explicitly. `gpa` is long-lived; `arena` is
+  connection/session-lived. Never use a global allocator or
+  `std.heap.page_allocator` in library code.
+- `errdefer` partial initialization; group allocation/deallocation to expose
+  leaks. Handle allocation failure at the call site.
+- Fixed relay buffers (default 32 KiB), zero-initialized before send. No buffer
+  bleeds; no per-read allocation.
+- Zeroize secrets with `std.crypto.secureZero`; compare passwords, tokens, and
+  tags with `std.crypto.timing_safe.eql`.
+- Use fixed-width wire types and explicit `std.mem.readInt`/`writeInt`. Never
+  pointer-cast network data. Check before `@intCast`; never `@truncate` a
+  hostile length.
+- Treat every length as hostile until bounded by the remaining input. Parse
+  field by field; do not rely on struct layout. Keep `index`, `count`, and
+  `size` distinct.
+
+### Shape and naming
+
+- Hard limits: 70 lines per function (excluding signature/comments), 100
+  columns, four-space indentation. `zig fmt` decides layout.
+- Prefer simple signatures/returns; pass values over 16 bytes as `*const`;
+  initialize large structs in place; declare variables at the smallest scope.
+- File order: important declarations first, then fields, types, methods. There
+  is no executable entrypoint.
+- Files `snake_case.zig`; types `CamelCase`; functions/variables/fields
+  `snake_case`. No abbreviations except `io`, `tcp`, `udp`, `tls`, `dns`,
+  `http`, `sni`, `gpa`, `arena`, `ctx`, `id`.
+- Put units/qualifiers last (`latency_ms_max`); align related names (`source`,
+  `target`). Options structs when arguments can be mixed up; callbacks last.
+- Comments explain why, invariants, and surprises. Cite ADRs for non-obvious
+  choices. Delete dead code; TODOs name an issue or ADR and owner.
+- Commit messages: imperative subject, why in the body, one logical change.
+
+### I/O and performance
+
+- Every I/O operation takes `io: std.Io`; pure helpers do not. `close` must
+  unblock pending I/O; cancellation is cooperative.
+- No pointer into a buffer across a suspension point. Re-check invariants after
+  I/O. Use `Io.Group` for structured shutdown.
+- Atomics for counters; a mutex only for config/state swaps. No locks in the
+  relay loop.
+- Sketch network, disk, memory, and CPU costs before a hot path. Separate
+  control plane (config/rules/health) from data plane (relay/parsing).
+- Measure before optimizing; prefer one copy and vectored I/O. Do not rely on
+  the compiler to fix a bad data layout.
+
+### Testing and dependencies
+
+- Every bug fix adds a regression test; every decoder has a fuzz target. Test
+  zero/max length, truncation, overflow, and invalid transitions.
+- Use fixtures in `tests/fixtures/<protocol>/`; loopback port 0; deterministic
+  timeouts and `std.Io`. Never use live third-party servers in tests.
+- `zig fmt` and `zig build test` before finishing. Run one file with
+  `zig test src/net/endpoint.zig --test-filter <name>`.
+- Zero dependencies: no C, no third-party packages, no vendored crypto. No
+  optional transport backends; implement missing transports in-tree (ADR-0007).
+- std-first: when a Zig upgrade provides the primitive, switch to `std` and
+  delete in-tree code.
+- LGPL-2.1: never copy GPL/AGPL/MPL code. Implement from specs and record sources
+  in `docs/protocols/<protocol>.md` (ADR-0009).
+
+### Security
+
+- Never log payloads, passwords, UUIDs, private keys, or tokens; redact them in
+  `Debug` output and diagnostics.
+- Bound pre-authentication state and buffers; do not allocate unbounded memory
+  before a peer completes its handshake.
+- Compare secrets in constant time; do not branch on secret data. Keep parsers
+  and handshakes fuzzable and free of TOCTOU gaps.
+
+### Review checklist
+
+- Bounds on every loop, queue, buffer, and cache.
+- No allocation or panic on the packet path.
+- Input validation uses errors; invariants use assertions.
+- Endianness and casts explicit; secrets zeroized and constant-time compared.
+- Functions ≤70 lines, lines ≤100 columns, `zig fmt` clean, negative-space
+  tests present; architectural changes cite or update an ADR.
 
 ## Commands and tests
 

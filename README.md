@@ -19,8 +19,7 @@ HTTP/2, WebSocket, and gRPC are not implemented (ADR-0007).
 - [Architecture](docs/architecture.md)
 - [Architecture decisions](docs/decisions/)
 - [Shadowsocks 2022 example](examples/shadowsocks2022/)
-- [Zig code style](.opencode/instructions/zig-style.md)
-- [Agent instructions](AGENTS.md)
+- [Agent instructions and Zig style](AGENTS.md)
 
 ## Design highlights
 
