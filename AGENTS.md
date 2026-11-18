@@ -14,6 +14,8 @@ repository ships the library only: no CLI, daemon, or `app` layer.
   behavior changes.
 - `Instance` is the composition root; do not add an application layer, CLI, or
   process-level signal handling to the library.
+- Follow `.agents/instructions/zig-style.md` (loaded through `opencode.json`);
+  it is the enforceable Zig style for this repository.
 
 ## Repo state
 
@@ -54,4 +56,5 @@ repository ships the library only: no CLI, daemon, or `app` layer.
   `zig test <file> --test-filter <name>`.
 - After scaffolding, put the verified `zig build test` invocation here and add a
   `test` step; integration tests use loopback port 0 and never live servers.
+- Run `zig fmt` and the documented tests before finishing.
 - Protocol tests use captured fixtures under `tests/fixtures/<protocol>/`.
