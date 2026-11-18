@@ -25,6 +25,8 @@ repository ships the library only: no CLI, daemon, or `app` layer.
   proxying, Shadowsocks 2022 TCP/UDP (AES-128/256-GCM), domain/IP-CIDR/port
   routing, relay, and metrics. Phase 2 is next; SIP022 gaps are listed in
   `docs/protocols/shadowsocks.md`.
+- `examples/shadowsocks2022/` is standalone: it has its own `build.zig` and
+  `build.zig.zon` and is not part of the root build.
 - ADR-0001–0009 are accepted; new architecture decisions need a new ADR.
 - Snell is deferred and WireGuard is out of scope (ADR-0002).
 

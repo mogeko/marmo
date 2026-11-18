@@ -497,6 +497,7 @@ src/routing/              rules, rule sets, sniffer
 src/dns/                  resolver, cache
 src/instance.zig          public facade: config, wiring, metrics
 src/config/               schema, JSON, validation
+examples/shadowsocks2022/ standalone SS2022 example
 docs/
   architecture.md
   decisions/
