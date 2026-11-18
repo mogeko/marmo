@@ -67,6 +67,29 @@ fn udpEchoOnce(io: std.Io, socket: *std.Io.net.Socket) void {
     socket.send(io, &message.from, message.data) catch return;
 }
 
+fn originHttpLoop(io: std.Io, server: *std.Io.net.Server, expected_host: []const u8) void {
+    const stream = server.accept(io) catch return;
+
+    var headers: [4096]u8 = undefined;
+    const request = tcpReadHeaders(io, stream, &headers) catch {
+        stream.close(io);
+        return;
+    };
+
+    const valid = std.mem.startsWith(u8, request, "GET /hello HTTP/1.1\r\n") and
+        std.mem.find(u8, request, expected_host) != null and
+        std.mem.find(u8, request, "Connection: close\r\n") != null and
+        std.mem.find(u8, request, "Proxy-Connection") == null;
+
+    const response = if (valid)
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+    else
+        "HTTP/1.1 400 Bad Request\r\nContent-Length: 3\r\nConnection: close\r\n\r\nbad";
+
+    tcpWrite(io, stream, response) catch {};
+    stream.close(io);
+}
+
 fn echoConnection(io: std.Io, stream: std.Io.net.Stream) void {
     var buffer: [1024]u8 = undefined;
     while (true) {
@@ -454,7 +477,12 @@ test "Shadowsocks 2022 TCP outbound and inbound" {
         },
         .route = .{ .final = "ss-out" },
     };
-    var client_instance = marmo.Instance.init(allocator, io, client_config, &diagnostic) catch |err| {
+    var client_instance = marmo.Instance.init(
+        allocator,
+        io,
+        client_config,
+        &diagnostic,
+    ) catch |err| {
         std.debug.print("ss client init: {s}\n", .{diagnostic.message()});
         return err;
     };
@@ -493,4 +521,192 @@ test "Shadowsocks 2022 TCP outbound and inbound" {
     client_instance.stop();
     server.stop();
     _ = echo_future.await(io);
+}
+
+test "Shadowsocks 2022 UDP outbound and inbound" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var echo_bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var echo_socket = try echo_bind.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer echo_socket.close(io);
+    var echo_future = io.async(udpEchoOnce, .{ io, &echo_socket });
+
+    const method = "2022-blake3-aes-128-gcm";
+    const password = "MDEyMzQ1Njc4OWFiY2RlZg==";
+
+    var diagnostic: marmo.Diagnostic = .{};
+    const server_config: marmo.Config = .{
+        .inbounds = &.{
+            .{
+                .tag = "ss-in",
+                .protocol = .shadowsocks,
+                .listen = "127.0.0.1:0",
+                .method = method,
+                .password = password,
+            },
+        },
+        .route = .{ .final = "direct" },
+    };
+    var server = marmo.Instance.init(allocator, io, server_config, &diagnostic) catch |err| {
+        std.debug.print("ss udp server init: {s}\n", .{diagnostic.message()});
+        return err;
+    };
+    defer server.deinit();
+    try server.start();
+
+    const ss_endpoint = server.inboundEndpoint("ss-in") orelse
+        return error.TestUnexpectedResult;
+    var endpoint_buffer: [32]u8 = undefined;
+    const endpoint_text = try std.fmt.bufPrint(
+        &endpoint_buffer,
+        "127.0.0.1:{d}",
+        .{ss_endpoint.port()},
+    );
+
+    const client_config: marmo.Config = .{
+        .inbounds = &.{
+            .{ .tag = "socks", .protocol = .socks5, .listen = "127.0.0.1:0" },
+        },
+        .outbounds = &.{
+            .{
+                .tag = "ss-out",
+                .protocol = .shadowsocks,
+                .server = endpoint_text,
+                .method = method,
+                .password = password,
+            },
+        },
+        .route = .{ .final = "ss-out" },
+    };
+    var client_instance = marmo.Instance.init(
+        allocator,
+        io,
+        client_config,
+        &diagnostic,
+    ) catch |err| {
+        std.debug.print("ss udp client init: {s}\n", .{diagnostic.message()});
+        return err;
+    };
+    defer client_instance.deinit();
+    try client_instance.start();
+
+    const socks_endpoint = client_instance.inboundEndpoint("socks") orelse
+        return error.TestUnexpectedResult;
+    const socks_address = switch (socks_endpoint) {
+        .ip => |ip| ip,
+        .domain => return error.TestUnexpectedResult,
+    };
+    const control = try std.Io.net.IpAddress.connect(
+        &socks_address,
+        io,
+        .{ .mode = .stream },
+    );
+    defer control.close(io);
+
+    try socksNegotiate(io, control);
+    try tcpWrite(io, control, &[_]u8{ 5, 3, 0, 1, 0, 0, 0, 0, 0, 0 });
+
+    var reply: [10]u8 = undefined;
+    try tcpReadExact(io, control, &reply);
+    try std.testing.expectEqual(@as(u8, 0), reply[1]);
+    const bnd_port = (@as(u16, reply[8]) << 8) | reply[9];
+    const bnd_address: std.Io.net.IpAddress = .{ .ip4 = .{
+        .bytes = .{ 127, 0, 0, 1 },
+        .port = bnd_port,
+    } };
+
+    var local_bind: std.Io.net.IpAddress = .{ .ip4 = .unspecified(0) };
+    const udp_socket = try local_bind.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer udp_socket.close(io);
+
+    const echo_port = echo_socket.address.getPort();
+    var packet: [15]u8 = undefined;
+    packet[0] = 0;
+    packet[1] = 0;
+    packet[2] = 0;
+    packet[3] = 1;
+    @memcpy(packet[4..8], &[_]u8{ 127, 0, 0, 1 });
+    packet[8] = @intCast(echo_port >> 8);
+    packet[9] = @intCast(echo_port & 0xff);
+    @memcpy(packet[10..15], "hello");
+    try udp_socket.send(io, &bnd_address, &packet);
+
+    var receive_buffer: [1500]u8 = undefined;
+    const message = try udp_socket.receive(io, &receive_buffer);
+    try std.testing.expectEqual(@as(usize, 15), message.data.len);
+    try std.testing.expectEqual(@as(u8, 1), message.data[3]);
+    try std.testing.expectEqualStrings("hello", message.data[10..15]);
+
+    client_instance.stop();
+    server.stop();
+    _ = echo_future.await(io);
+}
+
+test "HTTP forward proxy rewrites absolute-form requests" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var origin_bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var origin_server = try origin_bind.listen(io, .{ .reuse_address = true });
+    defer origin_server.deinit(io);
+
+    var host_buffer: [64]u8 = undefined;
+    const expected_host = try std.fmt.bufPrint(
+        &host_buffer,
+        "Host: 127.0.0.1:{d}\r\n",
+        .{origin_server.socket.address.getPort()},
+    );
+    var origin_future = io.concurrent(
+        originHttpLoop,
+        .{ io, &origin_server, expected_host },
+    ) catch return error.TestUnexpectedResult;
+
+    var diagnostic: marmo.Diagnostic = .{};
+    const config: marmo.Config = .{
+        .inbounds = &.{
+            .{ .tag = "http", .protocol = .http, .listen = "127.0.0.1:0" },
+        },
+        .route = .{ .final = "direct" },
+    };
+    var instance = try marmo.Instance.init(allocator, io, config, &diagnostic);
+    defer instance.deinit();
+    try instance.start();
+
+    const http_endpoint = instance.inboundEndpoint("http") orelse
+        return error.TestUnexpectedResult;
+    const http_address = switch (http_endpoint) {
+        .ip => |ip| ip,
+        .domain => return error.TestUnexpectedResult,
+    };
+    const client = try std.Io.net.IpAddress.connect(
+        &http_address,
+        io,
+        .{ .mode = .stream },
+    );
+    defer client.close(io);
+
+    var request_buffer: [512]u8 = undefined;
+    const request = try std.fmt.bufPrint(
+        &request_buffer,
+        "GET http://127.0.0.1:{d}/hello HTTP/1.1\r\n" ++
+            "Host: ignored.example\r\n" ++
+            "Proxy-Connection: keep-alive\r\n" ++
+            "X-Test: yes\r\n\r\n",
+        .{origin_server.socket.address.getPort()},
+    );
+    try tcpWrite(io, client, request);
+
+    var response_buffer: [512]u8 = undefined;
+    const response = try tcpReadHeaders(io, client, &response_buffer);
+    try std.testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 200"));
+
+    var body: [2]u8 = undefined;
+    try tcpReadExact(io, client, &body);
+    try std.testing.expectEqualStrings("ok", &body);
+
+    instance.stop();
+    _ = origin_future.await(io);
 }

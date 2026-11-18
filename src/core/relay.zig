@@ -31,7 +31,15 @@ pub fn relay(io: std.Io, client: Stream, remote: Stream, metrics: *Metrics) Erro
         .remote_buffer = remote_buffer[0..],
     };
 
-    var upstream = io.async(copyWrapper, .{ &context, Direction.client_to_remote });
+    var upstream = io.concurrent(
+        copyWrapper,
+        .{ &context, Direction.client_to_remote },
+    ) catch |err| switch (err) {
+        error.ConcurrencyUnavailable => {
+            abortBoth(&context);
+            return error.Unexpected;
+        },
+    };
     const downstream_result = copy(&context, Direction.remote_to_client);
 
     if (downstream_result) |_| {

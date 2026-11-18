@@ -4,6 +4,7 @@ const std = @import("std");
 const Endpoint = @import("../net/endpoint.zig").Endpoint;
 const s2022 = @import("../protocol/shadowsocks2022.zig");
 const Dialer = @import("../transport/dialer.zig").Dialer;
+const PacketConn = @import("../transport/packet.zig").PacketConn;
 const Stream = @import("../transport/stream.zig").Stream;
 
 pub const Shadowsocks = struct {
@@ -47,5 +48,30 @@ pub const Shadowsocks = struct {
         return client.stream();
     }
 
-    const vtable: Dialer.VTable = .{ .connect = connect };
+    fn connectPacket(
+        ctx: *anyopaque,
+        io: std.Io,
+        target: Endpoint,
+    ) Dialer.ConnectError!PacketConn {
+        _ = target;
+        const self: *Shadowsocks = @ptrCast(@alignCast(ctx));
+        const inner = try self.direct_dialer.connect_packet(io, self.server);
+        const client = s2022.UdpClient.create(
+            io,
+            self.gpa,
+            inner,
+            self.method,
+            &self.key,
+            self.server,
+        ) catch {
+            inner.close(io);
+            return error.ProtocolViolation;
+        };
+        return client.packetConn();
+    }
+
+    const vtable: Dialer.VTable = .{
+        .connect = connect,
+        .connect_packet = connectPacket,
+    };
 };

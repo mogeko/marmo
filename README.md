@@ -3,10 +3,10 @@
 A TCP/UDP proxy library written in Zig: L4/L7 inbounds, multiple proxy
 protocols, rule-based routing, and latency-aware node selection.
 
-**Status:** Phase 1 in progress. Implemented: strict JSON config, direct TCP/UDP
-and HTTP CONNECT outbounds, SOCKS5 (CONNECT + UDP ASSOCIATE), HTTP CONNECT
-inbound, Shadowsocks 2022 TCP (AES-128/256-GCM), domain/IP-CIDR/port routing,
-relay, and metrics. Pending: Shadowsocks 2022 UDP and HTTP forward proxying.
+**Status:** Phase 1 MVP implemented. Includes strict JSON config, direct TCP/UDP
+and HTTP CONNECT outbounds, SOCKS5 (CONNECT + UDP ASSOCIATE), HTTP CONNECT and
+forward proxying, Shadowsocks 2022 TCP/UDP (AES-128/256-GCM),
+domain/IP-CIDR/port routing, relay, and metrics.
 
 **Transport status:** only the design exists. TLS client comes from `std`; the
 in-tree TLS 1.3 server, QUIC, HTTP/2, WebSocket, and gRPC are not implemented

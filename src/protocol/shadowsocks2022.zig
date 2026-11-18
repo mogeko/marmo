@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const Endpoint = @import("../net/endpoint.zig").Endpoint;
+const PacketConn = @import("../transport/packet.zig").PacketConn;
 const Stream = @import("../transport/stream.zig").Stream;
 
 pub const tag_length = 16;
@@ -333,7 +334,7 @@ pub fn nowSeconds(io: std.Io) i64 {
     return std.Io.Timestamp.now(io, .real).toSeconds();
 }
 
-fn timestampNow(io: std.Io) !u64 {
+pub fn timestampNow(io: std.Io) !u64 {
     const seconds = nowSeconds(io);
     if (seconds < 0) return error.InvalidTimestamp;
     return @intCast(seconds);
@@ -368,6 +369,361 @@ fn writeU16(bytes: []u8, value: u16) void {
     bytes[0] = @intCast(value >> 8);
     bytes[1] = @intCast(value & 0xff);
 }
+
+pub const UdpDirection = enum { client_to_server, server_to_client };
+
+pub const Window = struct {
+    initialized: bool = false,
+    max_id: u64 = 0,
+    bitmap: u64 = 0,
+
+    /// Returns false for duplicates and packets older than the window.
+    pub fn accept(self: *Window, packet_id: u64) bool {
+        if (!self.initialized) {
+            self.initialized = true;
+            self.max_id = packet_id;
+            self.bitmap = 1;
+            return true;
+        }
+        if (packet_id == self.max_id) return false;
+        if (packet_id > self.max_id) {
+            const shift = packet_id - self.max_id;
+            self.bitmap = if (shift >= 64) 1 else (self.bitmap << @intCast(shift)) | 1;
+            self.max_id = packet_id;
+            return true;
+        }
+
+        const delta = self.max_id - packet_id;
+        if (delta >= 64) return false;
+        const bit = @as(u64, 1) << @intCast(delta);
+        if (self.bitmap & bit != 0) return false;
+        self.bitmap |= bit;
+        return true;
+    }
+};
+
+pub const UdpDecoded = struct {
+    session_id: [8]u8,
+    packet_id: u64,
+    client_session_id: ?[8]u8,
+    source: Endpoint,
+    payload: []const u8,
+};
+
+pub fn encodeUdpPacketWithTime(
+    method: Method,
+    psk: []const u8,
+    session_id: [8]u8,
+    packet_id: u64,
+    direction: UdpDirection,
+    client_session_id: ?[8]u8,
+    destination: Endpoint,
+    payload: []const u8,
+    padding_len: u16,
+    timestamp_s: u64,
+    out: []u8,
+) !usize {
+    var body: [max_payload]u8 = undefined;
+    var offset: usize = 0;
+
+    body[offset] = switch (direction) {
+        .client_to_server => 0,
+        .server_to_client => 1,
+    };
+    offset += 1;
+    std.mem.writeInt(u64, body[offset..][0..8], timestamp_s, .big);
+    offset += 8;
+
+    if (direction == .server_to_client) {
+        const id = client_session_id orelse return error.MissingClientSession;
+        @memcpy(body[offset..][0..8], &id);
+        offset += 8;
+    }
+
+    writeU16(body[offset..], padding_len);
+    offset += 2;
+    if (offset + padding_len > body.len) return error.NoSpace;
+    @memset(body[offset .. offset + padding_len], 0);
+    offset += padding_len;
+
+    offset += try encodeAddress(destination, body[offset..]);
+    if (payload.len > body.len - offset) return error.NoSpace;
+    @memcpy(body[offset .. offset + payload.len], payload);
+    offset += payload.len;
+
+    if (out.len < 16 + offset + tag_length) return error.NoSpace;
+
+    var separate_plain: [16]u8 = undefined;
+    @memcpy(separate_plain[0..8], &session_id);
+    std.mem.writeInt(u64, separate_plain[8..16], packet_id, .big);
+    aesBlockEncrypt(method, psk, &separate_plain, out[0..16]);
+
+    var subkey: [32]u8 = @splat(0);
+    deriveSubkey(method, psk, &session_id, &subkey);
+    const nonce: [nonce_length]u8 = separate_plain[4..16].*;
+    seal(method, &subkey, nonce, body[0..offset], out[16..]);
+    std.crypto.secureZero(u8, &subkey);
+    return 16 + offset + tag_length;
+}
+
+pub fn decodeUdpPacket(
+    io: std.Io,
+    method: Method,
+    psk: []const u8,
+    packet: []const u8,
+    expected_direction: UdpDirection,
+    expected_client_session: ?[8]u8,
+    plaintext: []u8,
+) !UdpDecoded {
+    if (packet.len < 16 + tag_length + 3) return error.MalformedPacket;
+
+    var separate_plain: [16]u8 = undefined;
+    aesBlockDecrypt(method, psk, packet[0..16], &separate_plain);
+
+    const session_id: [8]u8 = separate_plain[0..8].*;
+    const packet_id = std.mem.readInt(u64, separate_plain[8..16], .big);
+
+    var subkey: [32]u8 = @splat(0);
+    deriveSubkey(method, psk, &session_id, &subkey);
+    const nonce: [nonce_length]u8 = separate_plain[4..16].*;
+    const body_len = open(
+        method,
+        &subkey,
+        nonce,
+        packet[16..],
+        plaintext,
+    ) catch {
+        std.crypto.secureZero(u8, &subkey);
+        return error.AuthenticationFailed;
+    };
+    std.crypto.secureZero(u8, &subkey);
+
+    var offset: usize = 0;
+    if (body_len < 11) return error.MalformedPacket;
+
+    const expected_type: u8 = switch (expected_direction) {
+        .client_to_server => 0,
+        .server_to_client => 1,
+    };
+    if (plaintext[0] != expected_type) return error.ProtocolViolation;
+    offset += 1;
+
+    try validateTimestamp(io, std.mem.readInt(u64, plaintext[offset..][0..8], .big));
+    offset += 8;
+
+    var client_session_id: ?[8]u8 = null;
+    if (expected_direction == .server_to_client) {
+        if (offset + 8 > body_len) return error.MalformedPacket;
+        client_session_id = plaintext[offset..][0..8].*;
+        offset += 8;
+        if (expected_client_session) |expected| {
+            if (!std.mem.eql(u8, &client_session_id.?, &expected)) {
+                return error.ProtocolViolation;
+            }
+        }
+    }
+
+    if (offset + 2 > body_len) return error.MalformedPacket;
+    const padding_len = readU16(plaintext[offset..][0..2]);
+    offset += 2;
+    if (offset + padding_len > body_len) return error.MalformedPacket;
+    offset += padding_len;
+
+    const decoded = try decodeAddress(plaintext[0..body_len], offset);
+    return .{
+        .session_id = session_id,
+        .packet_id = packet_id,
+        .client_session_id = client_session_id,
+        .source = decoded.endpoint,
+        .payload = plaintext[decoded.next..body_len],
+    };
+}
+
+fn aesBlockEncrypt(method: Method, psk: []const u8, input: *const [16]u8, out: *[16]u8) void {
+    switch (method) {
+        .aes_128_gcm => {
+            var key: [16]u8 = undefined;
+            @memcpy(&key, psk[0..16]);
+            var context = std.crypto.core.aes.Aes128.initEnc(key);
+            context.encrypt(out, input);
+        },
+        .aes_256_gcm => {
+            var key: [32]u8 = undefined;
+            @memcpy(&key, psk[0..32]);
+            var context = std.crypto.core.aes.Aes256.initEnc(key);
+            context.encrypt(out, input);
+        },
+    }
+}
+
+fn aesBlockDecrypt(method: Method, psk: []const u8, input: []const u8, out: *[16]u8) void {
+    var input_block: [16]u8 = undefined;
+    @memcpy(&input_block, input[0..16]);
+    switch (method) {
+        .aes_128_gcm => {
+            var key: [16]u8 = undefined;
+            @memcpy(&key, psk[0..16]);
+            var context = std.crypto.core.aes.Aes128.initDec(key);
+            context.decrypt(out, &input_block);
+        },
+        .aes_256_gcm => {
+            var key: [32]u8 = undefined;
+            @memcpy(&key, psk[0..32]);
+            var context = std.crypto.core.aes.Aes256.initDec(key);
+            context.decrypt(out, &input_block);
+        },
+    }
+}
+
+pub const UdpClient = struct {
+    gpa: std.mem.Allocator,
+    inner: PacketConn,
+    server: Endpoint,
+    method: Method,
+    psk: Key,
+    session_id: [8]u8 = @splat(0),
+    packet_counter: u64 = 0,
+    server_session_id: ?[8]u8 = null,
+    window: Window = .{},
+    closed: std.atomic.Value(bool) = .init(false),
+
+    pub fn create(
+        io: std.Io,
+        gpa: std.mem.Allocator,
+        inner: PacketConn,
+        method: Method,
+        psk: *const Key,
+        server: Endpoint,
+    ) !*UdpClient {
+        const self = try gpa.create(UdpClient);
+        self.* = .{
+            .gpa = gpa,
+            .inner = inner,
+            .server = server,
+            .method = method,
+            .psk = psk.*,
+        };
+        std.Io.randomSecure(io, &self.session_id) catch {
+            gpa.destroy(self);
+            return error.RandomFailed;
+        };
+        return self;
+    }
+
+    pub fn packetConn(self: *UdpClient) PacketConn {
+        return .{ .ctx = self, .vtable = &vtable };
+    }
+
+    fn sendTo(
+        ctx: *anyopaque,
+        io: std.Io,
+        destination: Endpoint,
+        data: []const u8,
+    ) PacketConn.SendError!void {
+        const self: *UdpClient = @ptrCast(@alignCast(ctx));
+        const inner_max = self.inner.max_datagram_size();
+        const max_size = if (inner_max > 128) inner_max - 128 else 0;
+        if (data.len > max_size) return error.MessageTooBig;
+
+        const packet_id = nextCounter(&self.packet_counter) catch
+            return error.ProtocolViolation;
+        const timestamp = timestampNow(io) catch return error.ProtocolViolation;
+        var packet: [max_payload]u8 = undefined;
+        const packet_len = encodeUdpPacketWithTime(
+            self.method,
+            self.psk.slice(),
+            self.session_id,
+            packet_id,
+            .client_to_server,
+            null,
+            destination,
+            data,
+            0,
+            timestamp,
+            &packet,
+        ) catch |err| switch (err) {
+            error.NoSpace => return error.MessageTooBig,
+            else => return error.ProtocolViolation,
+        };
+        self.inner.send_to(io, self.server, packet[0..packet_len]) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            error.MessageTooBig => return error.MessageTooBig,
+            error.ProtocolViolation => return error.ProtocolViolation,
+            else => return error.Unexpected,
+        };
+    }
+
+    fn receive(
+        ctx: *anyopaque,
+        io: std.Io,
+        buffer: []u8,
+    ) PacketConn.ReceiveError!PacketConn.Received {
+        const self: *UdpClient = @ptrCast(@alignCast(ctx));
+        var attempts: usize = 0;
+        while (attempts < 8) : (attempts += 1) {
+            var packet: [max_payload]u8 = undefined;
+            const message = self.inner.receive(io, &packet) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                error.MessageTooBig => return error.MessageTooBig,
+                error.ProtocolViolation => return error.ProtocolViolation,
+                else => return error.Unexpected,
+            };
+
+            var plaintext: [max_payload]u8 = undefined;
+            const decoded = decodeUdpPacket(
+                io,
+                self.method,
+                self.psk.slice(),
+                packet[0..message.data_len],
+                .server_to_client,
+                self.session_id,
+                &plaintext,
+            ) catch |err| switch (err) {
+                else => continue,
+            };
+
+            if (self.server_session_id) |server_session| {
+                if (!std.mem.eql(u8, &server_session, &decoded.session_id)) {
+                    self.server_session_id = decoded.session_id;
+                    self.window = .{};
+                }
+            } else {
+                self.server_session_id = decoded.session_id;
+            }
+
+            if (!self.window.accept(decoded.packet_id)) continue;
+            if (decoded.payload.len > buffer.len) return error.MessageTooBig;
+            @memcpy(buffer[0..decoded.payload.len], decoded.payload);
+            return .{
+                .data_len = decoded.payload.len,
+                .source = decoded.source,
+            };
+        }
+        return error.ProtocolViolation;
+    }
+
+    fn maxDatagramSize(ctx: *anyopaque) usize {
+        const self: *UdpClient = @ptrCast(@alignCast(ctx));
+        const inner_max = self.inner.max_datagram_size();
+        return if (inner_max > 128) inner_max - 128 else 0;
+    }
+
+    fn close(ctx: *anyopaque, io: std.Io) void {
+        const self: *UdpClient = @ptrCast(@alignCast(ctx));
+        if (self.closed.swap(true, .acq_rel)) return;
+        self.inner.close(io);
+        std.crypto.secureZero(u8, &self.session_id);
+        self.psk.deinit();
+        self.gpa.destroy(self);
+    }
+
+    const vtable: PacketConn.VTable = .{
+        .send_to = sendTo,
+        .receive = receive,
+        .max_datagram_size = maxDatagramSize,
+        .close = close,
+    };
+};
 
 pub const ClientStream = struct {
     gpa: std.mem.Allocator,
@@ -1070,4 +1426,18 @@ test "AEAD chunk roundtrip and nonce order" {
         &decrypted,
     );
     try std.testing.expectEqualStrings(plaintext, decrypted[0..len]);
+}
+
+test "sliding window rejects duplicates and old packets" {
+    var window: Window = .{};
+    try std.testing.expect(window.accept(5));
+    try std.testing.expect(!window.accept(5));
+    try std.testing.expect(window.accept(8));
+    try std.testing.expect(window.accept(6));
+    try std.testing.expect(!window.accept(6));
+    try std.testing.expect(window.accept(0));
+    try std.testing.expect(!window.accept(0));
+    try std.testing.expect(window.accept(100));
+    try std.testing.expect(!window.accept(5));
+    try std.testing.expect(window.accept(99));
 }

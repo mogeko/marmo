@@ -122,7 +122,10 @@ fn validateInbounds(
         switch (inbound.protocol) {
             .socks5, .http => {
                 if (inbound.method != null or inbound.password != null) {
-                    diagnostic.set("inbounds[{d}]: credentials only apply to shadowsocks", .{index});
+                    diagnostic.set(
+                        "inbounds[{d}]: credentials only apply to shadowsocks",
+                        .{index},
+                    );
                     return error.InvalidConfig;
                 }
             },

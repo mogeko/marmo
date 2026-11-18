@@ -1,9 +1,9 @@
 # Architecture
 
-Status: Phase 1 in progress. The TCP/UDP core, SOCKS5, HTTP CONNECT inbound,
-direct and HTTP CONNECT outbounds, Shadowsocks 2022 TCP, routing, config, and
-metrics are implemented. Shadowsocks 2022 UDP and HTTP forward proxying are
-pending.
+Status: Phase 1 MVP implemented. The TCP/UDP core, SOCKS5, HTTP CONNECT and
+forward proxying, direct and HTTP CONNECT outbounds, Shadowsocks 2022 TCP/UDP,
+routing, config, and metrics are implemented. Phase 2 is next; protocol-specific
+gaps are tracked in `docs/protocols/`.
 
 ## 1. Purpose
 
@@ -315,7 +315,10 @@ depth, and idle timeout. No unbounded per-packet allocation is allowed.
 
 - `CONNECT host:port` becomes a TCP relay; the response is sent only after the
   outbound connects.
-- Forward-proxy requests keep their absolute URI; HTTP/1.1 only in phase 1.
+- Forward-proxy requests are rewritten from absolute-form to origin-form, with
+  `Host` taken from the URI authority and hop-by-hop headers stripped. Upstream
+  is forced to `Connection: close`; v1 handles one request per connection.
+- HTTP/1.1 only; no request rewriting beyond the request line and headers.
 - No request rewriting, caching, or authentication beyond optional inbound
   credentials.
 - L7 transports (WebSocket, HTTP/2, gRPC) are implemented as `transport`
@@ -386,8 +389,8 @@ for counters and a mutex only around node-set replacement (config reload).
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Direct | any | yes | yes | — | yes | 1 | system resolver |
 | SOCKS5 | TCP (+UDP ASSOCIATE) | yes | yes | yes | yes | 1 | RFC 1928/1929 |
-| HTTP proxy | TCP | yes | no | yes | yes | 1 | CONNECT implemented; forward pending |
-| Shadowsocks | TCP/UDP | yes | yes | yes | yes | 1 | 2022 TCP implemented; UDP pending |
+| HTTP proxy | TCP | yes | no | yes | yes | 1 | CONNECT + forward implemented |
+| Shadowsocks | TCP/UDP | yes | yes | yes | yes | 1 | 2022 TCP + UDP implemented |
 | Trojan | TLS | yes | yes | yes | yes | 2 | inbound needs in-tree TLS server |
 | VLESS | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | XTLS Vision later; gRPC in phase 3 |
 | VMess | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | legacy CFB not planned; gRPC in phase 3 |
@@ -412,10 +415,9 @@ Phasing:
 Hysteria v1 is not planned; Hysteria2 is the target. Snell is deferred and
 WireGuard is explicitly out of scope (ADR-0002).
 
-Implementation status: Phase 1 implements direct TCP/UDP, HTTP CONNECT in both
-directions, SOCKS5 CONNECT + UDP ASSOCIATE, Shadowsocks 2022 TCP
-(AES-128/256-GCM), domain/IP-CIDR/port rules, strict JSON config, and metrics.
-Shadowsocks 2022 UDP and HTTP forward proxying remain.
+Implementation status: Phase 1 MVP is implemented. See
+[`docs/protocols/shadowsocks.md`](protocols/shadowsocks.md) for the remaining
+SIP022 hardening and interoperability gaps.
 
 ## 13. Dependencies and in-tree transports
 

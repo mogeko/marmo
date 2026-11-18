@@ -7,6 +7,7 @@ const Endpoint = @import("../net/endpoint.zig").Endpoint;
 const Metadata = @import("../routing/metadata.zig").Metadata;
 const Dialer = @import("../transport/dialer.zig").Dialer;
 const Stream = @import("../transport/stream.zig").Stream;
+const PacketConn = @import("../transport/packet.zig").PacketConn;
 
 const version = 5;
 const method_no_auth = 0;
@@ -15,10 +16,14 @@ const command_udp_associate = 3;
 
 const UdpContext = struct {
     io: std.Io,
-    socket: std.Io.net.Socket,
+    client_socket: std.Io.net.Socket,
     dispatch: Dispatch,
     tcp_client_ip: ?std.Io.net.IpAddress,
     inbound_tag: []const u8,
+    client_address: ?std.Io.net.IpAddress = null,
+    outbound: ?PacketConn = null,
+    outbound_tag: []const u8 = "",
+    reply_future: ?std.Io.Future(void) = null,
 };
 
 const UdpRequest = struct {
@@ -222,12 +227,14 @@ fn handleUdpAssociate(
 
     var context: UdpContext = .{
         .io = io,
-        .socket = socket,
+        .client_socket = socket,
         .dispatch = dispatch,
         .tcp_client_ip = tcp_client_ip,
         .inbound_tag = inbound_tag,
     };
-    var relay_future = io.async(udpRelay, .{&context});
+    var relay_future = io.concurrent(udpRelay, .{&context}) catch |err| switch (err) {
+        error.ConcurrencyUnavailable => return error.ConcurrencyUnavailable,
+    };
 
     var byte: [1]u8 = undefined;
     while (true) {
@@ -237,39 +244,31 @@ fn handleUdpAssociate(
     }
 
     _ = relay_future.cancel(io);
+    if (context.reply_future) |*future| _ = future.cancel(io);
+    if (context.outbound) |outbound| outbound.close(io);
     socket.close(io);
 }
 
 fn udpRelay(context: *UdpContext) void {
     var buffer: [65535]u8 = undefined;
-    var client_address: ?std.Io.net.IpAddress = null;
 
     while (true) {
-        const message = context.socket.receive(context.io, &buffer) catch return;
+        const message = context.client_socket.receive(context.io, &buffer) catch return;
 
-        if (client_address == null) {
+        if (context.client_address == null) {
             if (context.tcp_client_ip) |expected| {
                 if (!sameIp(message.from, expected)) continue;
             }
-            client_address = message.from;
+            context.client_address = message.from;
+        } else if (!std.Io.net.IpAddress.eql(&message.from, &context.client_address.?)) {
+            continue;
         }
 
-        if (std.Io.net.IpAddress.eql(&message.from, &client_address.?)) {
-            handleUdpRequest(context, client_address.?, message.data) catch continue;
-        } else {
-            sendUdpReply(
-                context.io,
-                context.socket,
-                client_address.?,
-                message.from,
-                message.data,
-            ) catch continue;
-            context.dispatch.metrics().addToClient(message.data.len);
-        }
+        handleClientDatagram(context, message.from, message.data) catch continue;
     }
 }
 
-fn handleUdpRequest(
+fn handleClientDatagram(
     context: *UdpContext,
     client: std.Io.net.IpAddress,
     packet: []const u8,
@@ -292,11 +291,53 @@ fn handleUdpRequest(
         .direct => "direct",
         .reject, .hijack_dns => return,
     };
-    if (!std.mem.eql(u8, tag, "direct")) return;
 
-    const address = request.target.resolve(context.io) catch return;
-    try context.socket.send(context.io, &address, request.payload);
+    if (context.outbound == null) {
+        const outbound = try context.dispatch.connect_packet(
+            context.io,
+            tag,
+            request.target,
+        );
+        context.outbound = outbound;
+        context.outbound_tag = tag;
+        context.reply_future = io_concurrent_reply(context) catch {
+            outbound.close(context.io);
+            context.outbound = null;
+            return error.ConcurrencyUnavailable;
+        };
+    } else if (!std.mem.eql(u8, tag, context.outbound_tag)) {
+        return;
+    }
+
+    const outbound = context.outbound orelse return;
+    try outbound.send_to(context.io, request.target, request.payload);
     context.dispatch.metrics().addToRemote(request.payload.len);
+}
+
+fn io_concurrent_reply(context: *UdpContext) !std.Io.Future(void) {
+    return std.Io.concurrent(context.io, udpReply, .{context});
+}
+
+fn udpReply(context: *UdpContext) void {
+    const outbound = context.outbound orelse return;
+    var buffer: [65535]u8 = undefined;
+
+    while (true) {
+        const message = outbound.receive(context.io, &buffer) catch return;
+        const client = context.client_address orelse return;
+        const source = switch (message.source) {
+            .ip => |ip| ip,
+            .domain => return,
+        };
+        sendUdpReply(
+            context.io,
+            context.client_socket,
+            client,
+            source,
+            buffer[0..message.data_len],
+        ) catch return;
+        context.dispatch.metrics().addToClient(message.data_len);
+    }
 }
 
 fn parseUdpRequest(packet: []const u8) !UdpRequest {

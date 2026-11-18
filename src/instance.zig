@@ -13,6 +13,7 @@ const Shadowsocks = @import("outbound/shadowsocks.zig").Shadowsocks;
 const Outbound = @import("outbound/outbound.zig").Outbound;
 const s2022 = @import("protocol/shadowsocks2022.zig");
 const ss_inbound = @import("inbound/shadowsocks.zig");
+const ss_udp = @import("inbound/shadowsocks_udp.zig");
 const Metadata = @import("routing/metadata.zig").Metadata;
 const RuleSet = @import("routing/rules.zig").RuleSet;
 const Action = @import("routing/router.zig").Action;
@@ -48,6 +49,7 @@ const BoundInbound = struct {
     ip: std.Io.net.IpAddress,
     server: ?std.Io.net.Server = null,
     shadowsocks: ?*ss_inbound.Context = null,
+    udp_server: ?*ss_udp.Server = null,
 };
 
 const ConnContext = struct {
@@ -131,6 +133,7 @@ pub const Instance = struct {
                 .{ .reuse_address = true },
             ) catch {
                 self.closeServers();
+                self.shutdownUdpServers();
                 return error.BindFailed;
             };
             inbound.server = server;
@@ -139,6 +142,14 @@ pub const Instance = struct {
                 inbound.tag,
                 inbound.listen,
             });
+
+            if (inbound.protocol == .shadowsocks) {
+                self.bindShadowsocksUdp(inbound) catch |err| {
+                    self.closeServers();
+                    self.shutdownUdpServers();
+                    return err;
+                };
+            }
         }
 
         self.running = true;
@@ -147,9 +158,21 @@ pub const Instance = struct {
                 self.stopping = true;
                 self.group.cancel(self.io);
                 self.closeServers();
+                self.shutdownUdpServers();
                 self.running = false;
                 return err;
             };
+            if (inbound.udp_server) |udp_server| {
+                self.spawnTask(ss_udp.Server.loopWrapper, .{udp_server}) catch |err| {
+                    self.stopping = true;
+                    self.group.cancel(self.io);
+                    udp_server.shutdown(self.io);
+                    self.closeServers();
+                    self.shutdownUdpServers();
+                    self.running = false;
+                    return err;
+                };
+            }
         }
     }
 
@@ -171,6 +194,7 @@ pub const Instance = struct {
         self.stop_event.set(self.io);
         self.group.cancel(self.io);
         self.closeServers();
+        for (self.inbounds) |*inbound| inbound.udp_server = null;
         self.running = false;
         std.log.scoped(.marmo).info("instance stopped", .{});
     }
@@ -233,6 +257,44 @@ pub const Instance = struct {
             if (inbound.server) |*server| {
                 server.deinit(self.io);
                 inbound.server = null;
+            }
+        }
+    }
+
+    fn bindShadowsocksUdp(self: *Instance, inbound: *BoundInbound) StartError!void {
+        const context = inbound.shadowsocks orelse return error.BindFailed;
+        var address = switch (inbound.listen) {
+            .ip => |ip| ip,
+            .domain => return error.BindFailed,
+        };
+        address.setPort(inbound.listen.port());
+
+        const socket = std.Io.net.IpAddress.bind(
+            &address,
+            self.io,
+            .{ .mode = .dgram, .protocol = .udp },
+        ) catch return error.BindFailed;
+
+        const server = ss_udp.Server.create(
+            self.arena.allocator(),
+            self.io,
+            context.method,
+            &context.key,
+            socket,
+            self.dispatch(),
+            inbound.tag,
+        ) catch {
+            socket.close(self.io);
+            return error.OutOfMemory;
+        };
+        inbound.udp_server = server;
+    }
+
+    fn shutdownUdpServers(self: *Instance) void {
+        for (self.inbounds) |*inbound| {
+            if (inbound.udp_server) |server| {
+                server.shutdown(self.io);
+                inbound.udp_server = null;
             }
         }
     }
@@ -362,7 +424,10 @@ fn compileOutbounds(
                 const server = Endpoint.parse(server_text) catch return error.InvalidConfig;
                 const method_text = config.method orelse return error.InvalidConfig;
                 const method = s2022.Method.parse(method_text) orelse {
-                    diagnostic.set("outbounds: unsupported shadowsocks method '{s}'", .{method_text});
+                    diagnostic.set(
+                        "outbounds: unsupported shadowsocks method '{s}'",
+                        .{method_text},
+                    );
                     return error.InvalidConfig;
                 };
                 const password = config.password orelse return error.InvalidConfig;
@@ -387,7 +452,7 @@ fn compileOutbounds(
                 break :blk .{
                     .tag = config.tag,
                     .dialer = shadowsocks.asDialer(),
-                    .supports_udp = false,
+                    .supports_udp = true,
                     .cleanup = cleanupShadowsocks,
                     .cleanup_ctx = shadowsocks,
                 };
