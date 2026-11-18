@@ -6,6 +6,12 @@
 const std = @import("std");
 
 pub const Endpoint = @import("net/endpoint.zig").Endpoint;
+pub const Cidr = @import("net/cidr.zig").Cidr;
+
+pub const Config = @import("config/config.zig").Config;
+pub const ParsedConfig = @import("config/config.zig").Parsed;
+pub const Diagnostic = @import("core/diagnostic.zig").Diagnostic;
+pub const Metrics = @import("core/metrics.zig").Metrics;
 
 pub const Metadata = @import("routing/metadata.zig").Metadata;
 pub const Network = @import("routing/metadata.zig").Network;
@@ -15,6 +21,7 @@ pub const SniffedProtocol = @import("routing/metadata.zig").SniffedProtocol;
 pub const Action = @import("routing/router.zig").Action;
 pub const RejectReason = @import("routing/router.zig").RejectReason;
 pub const Router = @import("routing/router.zig").Router;
+pub const RuleSet = @import("routing/rules.zig").RuleSet;
 
 pub const Dialer = @import("transport/dialer.zig").Dialer;
 pub const ConnectError = Dialer.ConnectError;
@@ -22,8 +29,14 @@ pub const PacketConn = @import("transport/packet.zig").PacketConn;
 pub const Received = PacketConn.Received;
 pub const Stream = @import("transport/stream.zig").Stream;
 pub const ShutdownHow = Stream.ShutdownHow;
+pub const TcpStream = @import("transport/tcp.zig").TcpStream;
+pub const UdpPacketConn = @import("transport/udp.zig").UdpPacketConn;
 
 pub const Outbound = @import("outbound/outbound.zig").Outbound;
+pub const Direct = @import("outbound/direct.zig").Direct;
+pub const HttpConnect = @import("outbound/http_connect.zig").HttpConnect;
+
+pub const Instance = @import("instance.zig").Instance;
 
 pub const Connection = @import("inbound/connection.zig").Connection;
 pub const Inbound = @import("inbound/inbound.zig").Inbound;

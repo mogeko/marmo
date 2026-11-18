@@ -23,6 +23,27 @@ pub const Endpoint = union(enum) {
         MissingPort,
     };
 
+    pub const ResolveError = error{
+        Canceled,
+        ResolveFailed,
+    };
+
+    /// Resolve a domain through the system resolver, or return an IP endpoint
+    /// unchanged. Resolution is only needed for outbound dials and IP rules.
+    pub fn resolve(self: Endpoint, io: std.Io) ResolveError!std.Io.net.IpAddress {
+        return switch (self) {
+            .ip => |ip| ip,
+            .domain => |domain| std.Io.net.IpAddress.resolve(
+                io,
+                domain.name,
+                domain.port,
+            ) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return error.ResolveFailed,
+            },
+        };
+    }
+
     /// Parse `host:port`, `1.2.3.4:port`, or `[::1]:port`.
     ///
     /// Unbracketed IPv6 is rejected because the port separator is ambiguous.

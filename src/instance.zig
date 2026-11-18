@@ -1,0 +1,418 @@
+//! Instance: configuration, listeners, outbounds, and connection dispatch.
+
+const std = @import("std");
+const config_module = @import("config/config.zig");
+const Config = config_module.Config;
+const Diagnostic = @import("core/diagnostic.zig").Diagnostic;
+const Dispatch = @import("core/dispatch.zig").Dispatch;
+const Metrics = @import("core/metrics.zig").Metrics;
+const Endpoint = @import("net/endpoint.zig").Endpoint;
+const Direct = @import("outbound/direct.zig").Direct;
+const HttpConnect = @import("outbound/http_connect.zig").HttpConnect;
+const Outbound = @import("outbound/outbound.zig").Outbound;
+const Metadata = @import("routing/metadata.zig").Metadata;
+const RuleSet = @import("routing/rules.zig").RuleSet;
+const Action = @import("routing/router.zig").Action;
+const Router = @import("routing/router.zig").Router;
+const Dialer = @import("transport/dialer.zig").Dialer;
+const PacketConn = @import("transport/packet.zig").PacketConn;
+const Stream = @import("transport/stream.zig").Stream;
+const TcpStream = @import("transport/tcp.zig").TcpStream;
+const socks5 = @import("inbound/socks5.zig");
+const http_inbound = @import("inbound/http.zig");
+
+pub const InitError = error{ InvalidConfig, OutOfMemory };
+pub const StartError = error{
+    AlreadyRunning,
+    BindFailed,
+    Canceled,
+    ConcurrencyUnavailable,
+    OutOfMemory,
+    Stopped,
+};
+pub const WaitError = error{Canceled};
+
+const SpawnError = error{
+    Canceled,
+    ConcurrencyUnavailable,
+    Stopped,
+};
+
+const BoundInbound = struct {
+    tag: []const u8,
+    protocol: Config.InboundProtocol,
+    listen: Endpoint,
+    ip: std.Io.net.IpAddress,
+    server: ?std.Io.net.Server = null,
+};
+
+const ConnContext = struct {
+    instance: *Instance,
+    stream: Stream,
+    inbound: *BoundInbound,
+};
+
+pub const Instance = struct {
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    arena: std.heap.ArenaAllocator,
+    outbounds: []Outbound,
+    inbounds: []BoundInbound,
+    rules: RuleSet,
+    metrics: Metrics,
+    group: std.Io.Group = .init,
+    spawn_mutex: std.Io.Mutex = .init,
+    stop_event: std.Io.Event = .unset,
+    running: bool = false,
+    stopping: bool = false,
+
+    /// `config` is borrowed: the caller must keep it and any parsed JSON arena
+    /// alive for the lifetime of the instance.
+    pub fn init(
+        gpa: std.mem.Allocator,
+        io: std.Io,
+        config: Config,
+        diagnostic: *Diagnostic,
+    ) InitError!Instance {
+        config_module.validate(config, diagnostic) catch |err| switch (err) {
+            error.InvalidConfig => return error.InvalidConfig,
+        };
+
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        errdefer arena.deinit();
+        const allocator = arena.allocator();
+
+        const rules = RuleSet.compile(
+            allocator,
+            config.route,
+            diagnostic,
+        ) catch |err| switch (err) {
+            error.InvalidConfig => return error.InvalidConfig,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+
+        const direct = try allocator.create(Direct);
+        direct.* = Direct.init(gpa);
+
+        const outbounds = try compileOutbounds(
+            allocator,
+            gpa,
+            direct,
+            config.outbounds,
+            diagnostic,
+        );
+        const inbounds = try compileInbounds(allocator, config.inbounds);
+
+        return .{
+            .gpa = gpa,
+            .io = io,
+            .arena = arena,
+            .outbounds = outbounds,
+            .inbounds = inbounds,
+            .rules = rules,
+            .metrics = .{},
+        };
+    }
+
+    pub fn start(self: *Instance) StartError!void {
+        if (self.running) return error.AlreadyRunning;
+
+        self.stopping = false;
+        self.stop_event = .unset;
+
+        for (self.inbounds) |*inbound| {
+            const server = std.Io.net.IpAddress.listen(
+                &inbound.ip,
+                self.io,
+                .{ .reuse_address = true },
+            ) catch {
+                self.closeServers();
+                return error.BindFailed;
+            };
+            inbound.server = server;
+            inbound.listen = .{ .ip = server.socket.address };
+            std.log.scoped(.marmo).info("inbound '{s}' listening on {f}", .{
+                inbound.tag,
+                inbound.listen,
+            });
+        }
+
+        self.running = true;
+        for (self.inbounds) |*inbound| {
+            self.spawnTask(acceptLoopWrapper, .{ self, inbound }) catch |err| {
+                self.stopping = true;
+                self.group.cancel(self.io);
+                self.closeServers();
+                self.running = false;
+                return err;
+            };
+        }
+    }
+
+    pub fn wait(self: *Instance) WaitError!void {
+        self.stop_event.wait(self.io) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+        };
+    }
+
+    pub fn stop(self: *Instance) void {
+        if (!self.running) return;
+
+        self.spawn_mutex.lockUncancelable(self.io);
+        const already_stopping = self.stopping;
+        self.stopping = true;
+        self.spawn_mutex.unlock(self.io);
+        if (already_stopping) return;
+
+        self.stop_event.set(self.io);
+        self.group.cancel(self.io);
+        self.closeServers();
+        self.running = false;
+        std.log.scoped(.marmo).info("instance stopped", .{});
+    }
+
+    pub fn deinit(self: *Instance) void {
+        if (self.running) self.stop();
+        self.group.cancel(self.io);
+        self.arena.deinit();
+        self.* = undefined;
+    }
+
+    pub fn router(self: *Instance) Router {
+        return .{ .ctx = self, .vtable = &router_vtable };
+    }
+
+    pub fn dispatch(self: *Instance) Dispatch {
+        return .{ .ctx = self, .vtable = &dispatch_vtable };
+    }
+
+    pub fn metricsSnapshot(self: *const Instance) Metrics.Snapshot {
+        return self.metrics.snapshot();
+    }
+
+    pub fn inboundEndpoint(self: *const Instance, tag: []const u8) ?Endpoint {
+        for (self.inbounds) |inbound| {
+            if (std.mem.eql(u8, inbound.tag, tag)) return inbound.listen;
+        }
+        return null;
+    }
+
+    fn findOutbound(self: *Instance, tag: []const u8) ?*Outbound {
+        for (self.outbounds) |*outbound| {
+            if (std.mem.eql(u8, outbound.tag, tag)) return outbound;
+        }
+        return null;
+    }
+
+    fn spawnTask(self: *Instance, function: anytype, args: anytype) SpawnError!void {
+        self.spawn_mutex.lock(self.io) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+        };
+        defer self.spawn_mutex.unlock(self.io);
+
+        if (self.stopping) return error.Stopped;
+        self.group.concurrent(self.io, function, args) catch |err| switch (err) {
+            error.ConcurrencyUnavailable => return error.ConcurrencyUnavailable,
+        };
+    }
+
+    fn closeServers(self: *Instance) void {
+        for (self.inbounds) |*inbound| {
+            if (inbound.server) |*server| {
+                server.deinit(self.io);
+                inbound.server = null;
+            }
+        }
+    }
+
+    fn acceptLoop(self: *Instance, inbound: *BoundInbound) void {
+        const server = if (inbound.server) |*server| server else return;
+
+        while (true) {
+            const accepted = server.accept(self.io) catch |err| switch (err) {
+                error.Canceled, error.SocketNotListening => return,
+                else => {
+                    std.log.scoped(.marmo).warn("accept failed: {s}", .{@errorName(err)});
+                    continue;
+                },
+            };
+            self.acceptConnection(inbound, accepted);
+        }
+    }
+
+    fn acceptConnection(self: *Instance, inbound: *BoundInbound, accepted: std.Io.net.Stream) void {
+        const remote: Endpoint = .{ .ip = accepted.socket.address };
+        const tcp = TcpStream.create(self.gpa, accepted, inbound.listen, remote) catch {
+            accepted.close(self.io);
+            return;
+        };
+        const stream = tcp.stream();
+
+        const context = self.gpa.create(ConnContext) catch {
+            stream.close(self.io);
+            return;
+        };
+        context.* = .{ .instance = self, .stream = stream, .inbound = inbound };
+
+        self.metrics.connectionOpened();
+        self.spawnTask(connectionWrapper, .{context}) catch |err| {
+            self.metrics.connectionClosed();
+            stream.close(self.io);
+            self.gpa.destroy(context);
+            std.log.scoped(.marmo).warn("spawn failed: {s}", .{@errorName(err)});
+        };
+    }
+};
+
+fn acceptLoopWrapper(self: *Instance, inbound: *BoundInbound) std.Io.Cancelable!void {
+    self.acceptLoop(inbound);
+}
+
+fn connectionWrapper(context: *ConnContext) std.Io.Cancelable!void {
+    handleConnection(context) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => std.log.scoped(.marmo).warn("connection failed: {s}", .{@errorName(err)}),
+    };
+}
+
+fn handleConnection(context: *ConnContext) !void {
+    const self = context.instance;
+    defer self.gpa.destroy(context);
+    defer context.stream.close(self.io);
+    defer self.metrics.connectionClosed();
+
+    var arena = std.heap.ArenaAllocator.init(self.gpa);
+    defer arena.deinit();
+
+    const dispatch = self.dispatch();
+    switch (context.inbound.protocol) {
+        .socks5 => try socks5.handle(
+            self.io,
+            context.stream,
+            context.inbound.tag,
+            dispatch,
+            arena.allocator(),
+        ),
+        .http => try http_inbound.handle(
+            self.io,
+            context.stream,
+            context.inbound.tag,
+            dispatch,
+            arena.allocator(),
+        ),
+    }
+}
+
+fn compileOutbounds(
+    allocator: std.mem.Allocator,
+    gpa: std.mem.Allocator,
+    direct: *Direct,
+    configs: []const Config.Outbound,
+    diagnostic: *Diagnostic,
+) InitError![]Outbound {
+    var has_direct = false;
+    for (configs) |outbound| {
+        if (std.mem.eql(u8, outbound.tag, "direct")) has_direct = true;
+    }
+
+    const count = configs.len + @intFromBool(!has_direct);
+    const outbounds = try allocator.alloc(Outbound, count);
+    var index: usize = 0;
+
+    for (configs) |config| {
+        outbounds[index] = switch (config.protocol) {
+            .direct => .{
+                .tag = config.tag,
+                .dialer = direct.dialer(),
+                .supports_udp = true,
+            },
+            .http => blk: {
+                const server_text = config.server orelse return error.InvalidConfig;
+                const server = Endpoint.parse(server_text) catch return error.InvalidConfig;
+                const http = try allocator.create(HttpConnect);
+                http.* = .{ .gpa = gpa, .server = server, .dialer = direct.dialer() };
+                break :blk .{
+                    .tag = config.tag,
+                    .dialer = http.asDialer(),
+                    .supports_udp = false,
+                };
+            },
+            .shadowsocks => {
+                diagnostic.set("outbounds: shadowsocks is not implemented yet", .{});
+                return error.InvalidConfig;
+            },
+        };
+        index += 1;
+    }
+
+    if (!has_direct) {
+        outbounds[index] = .{
+            .tag = "direct",
+            .dialer = direct.dialer(),
+            .supports_udp = true,
+        };
+    }
+    return outbounds;
+}
+
+fn compileInbounds(
+    allocator: std.mem.Allocator,
+    configs: []const Config.Inbound,
+) InitError![]BoundInbound {
+    const inbounds = try allocator.alloc(BoundInbound, configs.len);
+    for (configs, 0..) |config, index| {
+        const endpoint = Endpoint.parse(config.listen) catch return error.InvalidConfig;
+        const ip = switch (endpoint) {
+            .ip => |ip| ip,
+            .domain => return error.InvalidConfig,
+        };
+        inbounds[index] = .{
+            .tag = config.tag,
+            .protocol = config.protocol,
+            .listen = endpoint,
+            .ip = ip,
+        };
+    }
+    return inbounds;
+}
+
+fn routeVtable(ctx: *anyopaque, metadata: *const Metadata) Action {
+    const self: *Instance = @ptrCast(@alignCast(ctx));
+    return self.rules.match(metadata);
+}
+
+fn connectVtable(
+    ctx: *anyopaque,
+    io: std.Io,
+    tag: []const u8,
+    target: Endpoint,
+) Dialer.ConnectError!Stream {
+    const self: *Instance = @ptrCast(@alignCast(ctx));
+    const outbound = self.findOutbound(tag) orelse return error.Unsupported;
+    return outbound.connect(io, target);
+}
+
+fn connectPacketVtable(
+    ctx: *anyopaque,
+    io: std.Io,
+    tag: []const u8,
+    target: Endpoint,
+) Dialer.ConnectError!PacketConn {
+    const self: *Instance = @ptrCast(@alignCast(ctx));
+    const outbound = self.findOutbound(tag) orelse return error.Unsupported;
+    return outbound.connect_packet(io, target);
+}
+
+fn metricsVtable(ctx: *anyopaque) *Metrics {
+    const self: *Instance = @ptrCast(@alignCast(ctx));
+    return &self.metrics;
+}
+
+const router_vtable: Router.VTable = .{ .match = routeVtable };
+
+const dispatch_vtable: Dispatch.VTable = .{
+    .route = routeVtable,
+    .connect = connectVtable,
+    .connect_packet = connectPacketVtable,
+    .metrics = metricsVtable,
+};

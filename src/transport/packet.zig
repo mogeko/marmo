@@ -19,6 +19,7 @@ pub const PacketConn = struct {
 
     pub const ReceiveError = error{
         Canceled,
+        MessageTooBig,
         Unexpected,
     };
 
