@@ -14,7 +14,7 @@ yet (ADR-0007).
 
 - [Architecture](docs/architecture.md)
 - [Architecture decisions](docs/decisions/)
-- [Zig code style](.agents/instructions/zig-style.md)
+- [Zig code style](.opencode/instructions/zig-style.md)
 - [Agent instructions](AGENTS.md)
 
 ## Design highlights

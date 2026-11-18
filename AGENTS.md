@@ -14,8 +14,9 @@ repository ships the library only: no CLI, daemon, or `app` layer.
   behavior changes.
 - `Instance` is the composition root; do not add an application layer, CLI, or
   process-level signal handling to the library.
-- Follow `.agents/instructions/zig-style.md` (loaded through `opencode.json`);
-  it is the enforceable Zig style for this repository.
+- Follow `.opencode/instructions/zig-style.md` (loaded through
+  `.opencode/opencode.json`); it is the enforceable Zig style for this
+  repository.
 
 ## Repo state
 

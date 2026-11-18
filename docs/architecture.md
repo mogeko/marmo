@@ -477,9 +477,9 @@ their own signal handlers. `Instance` is the only composition root.
 ## 15. Repository layout (current and planned)
 
 ```
-opencode.json             OpenCode config; loads the Zig style guide
-.agents/instructions/zig-style.md  enforceable Zig style
-.agents/skills/           OpenCode skills, including the ADR workflow
+.opencode/opencode.json  OpenCode config; loads the Zig style guide
+.opencode/instructions/zig-style.md  enforceable Zig style
+.opencode/skills/        OpenCode skills, including the ADR workflow
 build.zig
 build.zig.zon
 src/root.zig              public API re-exports
