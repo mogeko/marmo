@@ -22,6 +22,7 @@ pub const Action = @import("routing/router.zig").Action;
 pub const RejectReason = @import("routing/router.zig").RejectReason;
 pub const Router = @import("routing/router.zig").Router;
 pub const RuleSet = @import("routing/rules.zig").RuleSet;
+pub const Shadowsocks2022 = @import("protocol/shadowsocks2022.zig");
 
 pub const Dialer = @import("transport/dialer.zig").Dialer;
 pub const ConnectError = Dialer.ConnectError;

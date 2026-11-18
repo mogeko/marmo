@@ -396,3 +396,101 @@ test "SOCKS5 UDP ASSOCIATE relays a datagram to a direct target" {
     instance.stop();
     _ = echo_future.await(io);
 }
+
+test "Shadowsocks 2022 TCP outbound and inbound" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var echo_address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var echo_server = try echo_address.listen(io, .{ .reuse_address = true });
+    defer echo_server.deinit(io);
+    var echo_future = io.async(echoLoopOnce, .{ io, &echo_server });
+
+    const method = "2022-blake3-aes-128-gcm";
+    const password = "MDEyMzQ1Njc4OWFiY2RlZg==";
+
+    var diagnostic: marmo.Diagnostic = .{};
+    const server_config: marmo.Config = .{
+        .inbounds = &.{
+            .{
+                .tag = "ss-in",
+                .protocol = .shadowsocks,
+                .listen = "127.0.0.1:0",
+                .method = method,
+                .password = password,
+            },
+        },
+        .route = .{ .final = "direct" },
+    };
+    var server = marmo.Instance.init(allocator, io, server_config, &diagnostic) catch |err| {
+        std.debug.print("ss server init: {s}\n", .{diagnostic.message()});
+        return err;
+    };
+    defer server.deinit();
+    try server.start();
+
+    const ss_endpoint = server.inboundEndpoint("ss-in") orelse
+        return error.TestUnexpectedResult;
+    var endpoint_buffer: [32]u8 = undefined;
+    const endpoint_text = try std.fmt.bufPrint(
+        &endpoint_buffer,
+        "127.0.0.1:{d}",
+        .{ss_endpoint.port()},
+    );
+
+    const client_config: marmo.Config = .{
+        .inbounds = &.{
+            .{ .tag = "socks", .protocol = .socks5, .listen = "127.0.0.1:0" },
+        },
+        .outbounds = &.{
+            .{
+                .tag = "ss-out",
+                .protocol = .shadowsocks,
+                .server = endpoint_text,
+                .method = method,
+                .password = password,
+            },
+        },
+        .route = .{ .final = "ss-out" },
+    };
+    var client_instance = marmo.Instance.init(allocator, io, client_config, &diagnostic) catch |err| {
+        std.debug.print("ss client init: {s}\n", .{diagnostic.message()});
+        return err;
+    };
+    defer client_instance.deinit();
+    try client_instance.start();
+
+    const socks_endpoint = client_instance.inboundEndpoint("socks") orelse
+        return error.TestUnexpectedResult;
+    const socks_address = switch (socks_endpoint) {
+        .ip => |ip| ip,
+        .domain => return error.TestUnexpectedResult,
+    };
+    const client = try std.Io.net.IpAddress.connect(
+        &socks_address,
+        io,
+        .{ .mode = .stream },
+    );
+    defer client.close(io);
+
+    try socksNegotiate(io, client);
+    const echo_port = echo_server.socket.address.getPort();
+    try tcpWrite(io, client, &.{
+        5,                        1,                          0, 1, 127, 0, 0, 1,
+        @intCast(echo_port >> 8), @intCast(echo_port & 0xff),
+    });
+
+    var reply: [10]u8 = undefined;
+    try tcpReadExact(io, client, &reply);
+    try std.testing.expectEqual(@as(u8, 0), reply[1]);
+
+    try tcpWrite(io, client, "hello shadowsocks");
+    var echoed: [17]u8 = undefined;
+    try tcpReadExact(io, client, &echoed);
+    try std.testing.expectEqualStrings("hello shadowsocks", &echoed);
+
+    client_instance.stop();
+    server.stop();
+    _ = echo_future.await(io);
+}

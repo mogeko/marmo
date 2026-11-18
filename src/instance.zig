@@ -9,7 +9,10 @@ const Metrics = @import("core/metrics.zig").Metrics;
 const Endpoint = @import("net/endpoint.zig").Endpoint;
 const Direct = @import("outbound/direct.zig").Direct;
 const HttpConnect = @import("outbound/http_connect.zig").HttpConnect;
+const Shadowsocks = @import("outbound/shadowsocks.zig").Shadowsocks;
 const Outbound = @import("outbound/outbound.zig").Outbound;
+const s2022 = @import("protocol/shadowsocks2022.zig");
+const ss_inbound = @import("inbound/shadowsocks.zig");
 const Metadata = @import("routing/metadata.zig").Metadata;
 const RuleSet = @import("routing/rules.zig").RuleSet;
 const Action = @import("routing/router.zig").Action;
@@ -44,6 +47,7 @@ const BoundInbound = struct {
     listen: Endpoint,
     ip: std.Io.net.IpAddress,
     server: ?std.Io.net.Server = null,
+    shadowsocks: ?*ss_inbound.Context = null,
 };
 
 const ConnContext = struct {
@@ -101,7 +105,7 @@ pub const Instance = struct {
             config.outbounds,
             diagnostic,
         );
-        const inbounds = try compileInbounds(allocator, config.inbounds);
+        const inbounds = try compileInbounds(allocator, config.inbounds, diagnostic);
 
         return .{
             .gpa = gpa,
@@ -174,6 +178,14 @@ pub const Instance = struct {
     pub fn deinit(self: *Instance) void {
         if (self.running) self.stop();
         self.group.cancel(self.io);
+
+        for (self.inbounds) |*inbound| {
+            if (inbound.shadowsocks) |context| context.deinit();
+        }
+        for (self.outbounds) |*outbound| {
+            if (outbound.cleanup) |cleanup| cleanup(outbound.cleanup_ctx.?);
+        }
+
         self.arena.deinit();
         self.* = undefined;
     }
@@ -300,6 +312,14 @@ fn handleConnection(context: *ConnContext) !void {
             dispatch,
             arena.allocator(),
         ),
+        .shadowsocks => try ss_inbound.handle(
+            self.io,
+            self.gpa,
+            context.stream,
+            context.inbound.tag,
+            dispatch,
+            context.inbound.shadowsocks orelse return error.InvalidConfig,
+        ),
     }
 }
 
@@ -337,9 +357,40 @@ fn compileOutbounds(
                     .supports_udp = false,
                 };
             },
-            .shadowsocks => {
-                diagnostic.set("outbounds: shadowsocks is not implemented yet", .{});
-                return error.InvalidConfig;
+            .shadowsocks => blk: {
+                const server_text = config.server orelse return error.InvalidConfig;
+                const server = Endpoint.parse(server_text) catch return error.InvalidConfig;
+                const method_text = config.method orelse return error.InvalidConfig;
+                const method = s2022.Method.parse(method_text) orelse {
+                    diagnostic.set("outbounds: unsupported shadowsocks method '{s}'", .{method_text});
+                    return error.InvalidConfig;
+                };
+                const password = config.password orelse return error.InvalidConfig;
+                var key = s2022.Key.parse(method, password) catch {
+                    diagnostic.set("outbounds: invalid shadowsocks key", .{});
+                    return error.InvalidConfig;
+                };
+
+                const shadowsocks = allocator.create(Shadowsocks) catch {
+                    key.deinit();
+                    return error.OutOfMemory;
+                };
+                shadowsocks.* = .{
+                    .gpa = gpa,
+                    .server = server,
+                    .method = method,
+                    .key = key,
+                    .direct_dialer = direct.dialer(),
+                };
+                key.deinit();
+
+                break :blk .{
+                    .tag = config.tag,
+                    .dialer = shadowsocks.asDialer(),
+                    .supports_udp = false,
+                    .cleanup = cleanupShadowsocks,
+                    .cleanup_ctx = shadowsocks,
+                };
             },
         };
         index += 1;
@@ -358,6 +409,7 @@ fn compileOutbounds(
 fn compileInbounds(
     allocator: std.mem.Allocator,
     configs: []const Config.Inbound,
+    diagnostic: *Diagnostic,
 ) InitError![]BoundInbound {
     const inbounds = try allocator.alloc(BoundInbound, configs.len);
     for (configs, 0..) |config, index| {
@@ -372,8 +424,35 @@ fn compileInbounds(
             .listen = endpoint,
             .ip = ip,
         };
+
+        switch (config.protocol) {
+            .shadowsocks => {
+                const method_text = config.method orelse return error.InvalidConfig;
+                const method = s2022.Method.parse(method_text) orelse {
+                    diagnostic.set("inbounds[{d}]: unsupported shadowsocks method", .{index});
+                    return error.InvalidConfig;
+                };
+                const password = config.password orelse return error.InvalidConfig;
+                var key = s2022.Key.parse(method, password) catch {
+                    diagnostic.set("inbounds[{d}]: invalid shadowsocks key", .{index});
+                    return error.InvalidConfig;
+                };
+                const context = ss_inbound.Context.init(allocator, method, key) catch {
+                    key.deinit();
+                    return error.OutOfMemory;
+                };
+                key.deinit();
+                inbounds[index].shadowsocks = context;
+            },
+            .http, .socks5 => {},
+        }
     }
     return inbounds;
+}
+
+fn cleanupShadowsocks(ctx: *anyopaque) void {
+    const self: *Shadowsocks = @ptrCast(@alignCast(ctx));
+    self.deinit();
 }
 
 fn routeVtable(ctx: *anyopaque, metadata: *const Metadata) Action {

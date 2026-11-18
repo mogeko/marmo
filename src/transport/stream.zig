@@ -13,12 +13,14 @@ pub const Stream = struct {
     pub const ReadError = error{
         Canceled,
         ConnectionReset,
+        ProtocolViolation,
         Unexpected,
     };
 
     pub const WriteError = error{
         BrokenPipe,
         Canceled,
+        ProtocolViolation,
         Unexpected,
     };
 

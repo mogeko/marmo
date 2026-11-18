@@ -12,6 +12,8 @@ pub const Outbound = struct {
     tag: []const u8,
     dialer: Dialer,
     supports_udp: bool = false,
+    cleanup: ?*const fn (ctx: *anyopaque) void = null,
+    cleanup_ctx: ?*anyopaque = null,
 
     pub fn connect(
         self: *const Outbound,

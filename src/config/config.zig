@@ -5,6 +5,7 @@ const Diagnostic = @import("../core/diagnostic.zig").Diagnostic;
 const Endpoint = @import("../net/endpoint.zig").Endpoint;
 const Cidr = @import("../net/cidr.zig").Cidr;
 const Network = @import("../routing/metadata.zig").Network;
+const s2022 = @import("../protocol/shadowsocks2022.zig");
 
 pub const Config = struct {
     version: u8 = 1,
@@ -16,9 +17,11 @@ pub const Config = struct {
         tag: []const u8,
         protocol: InboundProtocol,
         listen: []const u8,
+        method: ?[]const u8 = null,
+        password: ?[]const u8 = null,
     };
 
-    pub const InboundProtocol = enum { socks5, http };
+    pub const InboundProtocol = enum { http, shadowsocks, socks5 };
 
     pub const Outbound = struct {
         tag: []const u8,
@@ -115,7 +118,41 @@ fn validateInbounds(
                 return error.InvalidConfig;
             },
         }
+
+        switch (inbound.protocol) {
+            .socks5, .http => {
+                if (inbound.method != null or inbound.password != null) {
+                    diagnostic.set("inbounds[{d}]: credentials only apply to shadowsocks", .{index});
+                    return error.InvalidConfig;
+                }
+            },
+            .shadowsocks => try validateShadowsocksInbound(inbound, index, diagnostic),
+        }
     }
+}
+
+fn validateShadowsocksInbound(
+    inbound: Config.Inbound,
+    index: usize,
+    diagnostic: *Diagnostic,
+) ValidationError!void {
+    const method_text = inbound.method orelse {
+        diagnostic.set("inbounds[{d}].method: required for shadowsocks", .{index});
+        return error.InvalidConfig;
+    };
+    const method = s2022.Method.parse(method_text) orelse {
+        diagnostic.set("inbounds[{d}].method: unsupported '{s}'", .{ index, method_text });
+        return error.InvalidConfig;
+    };
+    const password = inbound.password orelse {
+        diagnostic.set("inbounds[{d}].password: required for shadowsocks", .{index});
+        return error.InvalidConfig;
+    };
+    var key = s2022.Key.parse(method, password) catch {
+        diagnostic.set("inbounds[{d}].password: invalid base64 or key length", .{index});
+        return error.InvalidConfig;
+    };
+    key.deinit();
 }
 
 fn validateOutbounds(
@@ -199,12 +236,12 @@ fn validateShadowsocks(
         return error.InvalidConfig;
     };
 
-    const method = outbound.method orelse {
+    const method_text = outbound.method orelse {
         diagnostic.set("outbounds[{d}].method: required for shadowsocks", .{index});
         return error.InvalidConfig;
     };
-    const key_len = shadowsocksKeyLength(method) orelse {
-        diagnostic.set("outbounds[{d}].method: unsupported '{s}'", .{ index, method });
+    const method = s2022.Method.parse(method_text) orelse {
+        diagnostic.set("outbounds[{d}].method: unsupported '{s}'", .{ index, method_text });
         return error.InvalidConfig;
     };
 
@@ -212,37 +249,11 @@ fn validateShadowsocks(
         diagnostic.set("outbounds[{d}].password: required for shadowsocks", .{index});
         return error.InvalidConfig;
     };
-    if (password.len == 0) {
-        diagnostic.set("outbounds[{d}].password: must not be empty", .{index});
-        return error.InvalidConfig;
-    }
-
-    const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(password) catch {
-        diagnostic.set("outbounds[{d}].password: invalid base64", .{index});
+    var key = s2022.Key.parse(method, password) catch {
+        diagnostic.set("outbounds[{d}].password: invalid base64 or key length", .{index});
         return error.InvalidConfig;
     };
-    if (decoded_len != key_len) {
-        diagnostic.set("outbounds[{d}].password: wrong key length for {s}", .{
-            index,
-            method,
-        });
-        return error.InvalidConfig;
-    }
-    var key_buffer: [32]u8 = undefined;
-    std.base64.standard.Decoder.decode(
-        key_buffer[0..decoded_len],
-        password,
-    ) catch {
-        diagnostic.set("outbounds[{d}].password: invalid base64", .{index});
-        return error.InvalidConfig;
-    };
-}
-
-fn shadowsocksKeyLength(method: []const u8) ?usize {
-    if (std.mem.eql(u8, method, "2022-blake3-aes-128-gcm")) return 16;
-    if (std.mem.eql(u8, method, "2022-blake3-aes-256-gcm")) return 32;
-    if (std.mem.eql(u8, method, "2022-blake3-chacha20-poly1305")) return 32;
-    return null;
+    key.deinit();
 }
 
 fn validateRoute(

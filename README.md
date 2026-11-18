@@ -5,8 +5,8 @@ protocols, rule-based routing, and latency-aware node selection.
 
 **Status:** Phase 1 in progress. Implemented: strict JSON config, direct TCP/UDP
 and HTTP CONNECT outbounds, SOCKS5 (CONNECT + UDP ASSOCIATE), HTTP CONNECT
-inbound, domain/IP-CIDR/port routing, relay, and metrics. Pending: Shadowsocks
-2022 and HTTP forward proxying.
+inbound, Shadowsocks 2022 TCP (AES-128/256-GCM), domain/IP-CIDR/port routing,
+relay, and metrics. Pending: Shadowsocks 2022 UDP and HTTP forward proxying.
 
 **Transport status:** only the design exists. TLS client comes from `std`; the
 in-tree TLS 1.3 server, QUIC, HTTP/2, WebSocket, and gRPC are not implemented

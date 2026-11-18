@@ -22,8 +22,9 @@ repository ships the library only: no CLI, daemon, or `app` layer.
 
 - Phase 1 is in progress. Implemented: strict JSON config, direct TCP/UDP and
   HTTP CONNECT outbounds, SOCKS5 (CONNECT + UDP ASSOCIATE), HTTP CONNECT
-  inbound, domain/IP-CIDR/port routing, relay, and metrics. Pending:
-  Shadowsocks 2022 and HTTP forward proxying; do not claim them as working.
+  inbound, Shadowsocks 2022 TCP (AES-128/256-GCM), domain/IP-CIDR/port routing,
+  relay, and metrics. Pending: Shadowsocks 2022 UDP and HTTP forward proxying;
+  do not claim them as working.
 - ADR-0001–0009 are accepted; new architecture decisions need a new ADR.
 - Snell is deferred and WireGuard is out of scope (ADR-0002).
 
@@ -54,7 +55,7 @@ repository ships the library only: no CLI, daemon, or `app` layer.
 
 ## Commands and tests
 
-- `zig build test` runs the unit, public API, and integration tests (25 tests
+- `zig build test` runs the unit, public API, and integration tests (30 tests
   today).
 - `zig test src/root.zig` runs the module tests directly; use
   `zig test src/net/endpoint.zig --test-filter <name>` for one file or test.

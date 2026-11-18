@@ -1,8 +1,9 @@
 # Architecture
 
 Status: Phase 1 in progress. The TCP/UDP core, SOCKS5, HTTP CONNECT inbound,
-direct and HTTP CONNECT outbounds, routing, config, and metrics are implemented.
-Shadowsocks 2022 and HTTP forward proxying are pending.
+direct and HTTP CONNECT outbounds, Shadowsocks 2022 TCP, routing, config, and
+metrics are implemented. Shadowsocks 2022 UDP and HTTP forward proxying are
+pending.
 
 ## 1. Purpose
 
@@ -386,7 +387,7 @@ for counters and a mutex only around node-set replacement (config reload).
 | Direct | any | yes | yes | — | yes | 1 | system resolver |
 | SOCKS5 | TCP (+UDP ASSOCIATE) | yes | yes | yes | yes | 1 | RFC 1928/1929 |
 | HTTP proxy | TCP | yes | no | yes | yes | 1 | CONNECT implemented; forward pending |
-| Shadowsocks | TCP/UDP | yes | yes | yes | yes | 1 | 2022 pending |
+| Shadowsocks | TCP/UDP | yes | yes | yes | yes | 1 | 2022 TCP implemented; UDP pending |
 | Trojan | TLS | yes | yes | yes | yes | 2 | inbound needs in-tree TLS server |
 | VLESS | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | XTLS Vision later; gRPC in phase 3 |
 | VMess | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | legacy CFB not planned; gRPC in phase 3 |
@@ -412,8 +413,9 @@ Hysteria v1 is not planned; Hysteria2 is the target. Snell is deferred and
 WireGuard is explicitly out of scope (ADR-0002).
 
 Implementation status: Phase 1 implements direct TCP/UDP, HTTP CONNECT in both
-directions, SOCKS5 CONNECT + UDP ASSOCIATE, domain/IP-CIDR/port rules, strict
-JSON config, and metrics. Shadowsocks 2022 and HTTP forward proxying remain.
+directions, SOCKS5 CONNECT + UDP ASSOCIATE, Shadowsocks 2022 TCP
+(AES-128/256-GCM), domain/IP-CIDR/port rules, strict JSON config, and metrics.
+Shadowsocks 2022 UDP and HTTP forward proxying remain.
 
 ## 13. Dependencies and in-tree transports
 
