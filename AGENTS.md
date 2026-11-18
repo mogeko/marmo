@@ -14,14 +14,19 @@ repository ships the library only: no CLI, daemon, or `app` layer.
   behavior changes.
 - `Instance` is the composition root; do not add an application layer, CLI, or
   process-level signal handling to the library.
-- Follow `.agents/instructions/zig-style.md` (loaded through `opencode.json`);
-  it is the enforceable Zig style for this repository.
+- Follow `.opencode/instructions/zig-style.md` (loaded through
+  `.opencode/opencode.json`); it is the enforceable Zig style for this
+  repository.
 
 ## Repo state
 
-- Phase 0 scaffold is in place: `build.zig`, `src/root.zig`, core interfaces,
-  and CI. Phase 1 (sockets, protocols, config, `Instance`) is not started; do
-  not implement it until the user moves on.
+- Phase 1 MVP is implemented: strict JSON config, direct TCP/UDP and HTTP
+  CONNECT outbounds, SOCKS5 inbound (CONNECT + UDP ASSOCIATE), HTTP CONNECT +
+  forward proxying, Shadowsocks 2022 TCP/UDP (AES-128/256-GCM),
+  domain/IP-CIDR/port routing, relay, and metrics. Phase 2 is next; SIP022 gaps
+  are listed in `docs/protocols/shadowsocks.md`.
+- `examples/shadowsocks2022/` is standalone: it has its own `build.zig` and
+  `build.zig.zon` and is not part of the root build.
 - ADR-0001–0009 are accepted; new architecture decisions need a new ADR.
 - Snell is deferred and WireGuard is out of scope (ADR-0002).
 
@@ -52,7 +57,9 @@ repository ships the library only: no CLI, daemon, or `app` layer.
 
 ## Commands and tests
 
-- `zig build test` runs the unit and public API tests (10 tests today).
+- `zig build test` runs the unit, public API, and integration tests (35 tests
+  today). Reference-implementation interop is local-only and not part of this
+  repository or CI.
 - `zig test src/root.zig` runs the module tests directly; use
   `zig test src/net/endpoint.zig --test-filter <name>` for one file or test.
 - `zig fmt build.zig src tests` before finishing; CI runs

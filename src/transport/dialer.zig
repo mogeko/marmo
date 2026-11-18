@@ -18,6 +18,7 @@ pub const Dialer = struct {
         Canceled,
         ConnectionRefused,
         HostUnreachable,
+        ProtocolViolation,
         TimedOut,
         Unexpected,
         Unsupported,

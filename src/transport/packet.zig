@@ -14,11 +14,14 @@ pub const PacketConn = struct {
     pub const SendError = error{
         Canceled,
         MessageTooBig,
+        ProtocolViolation,
         Unexpected,
     };
 
     pub const ReceiveError = error{
         Canceled,
+        MessageTooBig,
+        ProtocolViolation,
         Unexpected,
     };
 

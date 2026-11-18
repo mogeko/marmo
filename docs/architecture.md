@@ -1,6 +1,9 @@
 # Architecture
 
-Status: Phase 0 scaffold in place. ADR-0001–0009 are accepted; Phase 1 is next.
+Status: Phase 1 MVP implemented. SS2022 TCP/UDP interop was verified locally
+against shadowsocks-rust 1.25.0 in both directions; the interop harness is not
+part of the repository. Phase 2 is next; protocol-specific gaps are tracked in
+`docs/protocols/`.
 
 ## 1. Purpose
 
@@ -19,8 +22,8 @@ handling, and configuration storage.
   by proxy protocols (TLS, WebSocket, HTTP/2, gRPC, QUIC).
 - Inbounds: SOCKS5, HTTP, mixed, Shadowsocks, Trojan, VLESS, VMess, TUIC,
   Hysteria2; TUN later.
-- Outbounds: direct, SOCKS5, HTTP CONNECT, Shadowsocks, VMess, VLESS, Trojan,
-  TUIC, Hysteria2.
+- Outbounds: direct, HTTP CONNECT, Shadowsocks, VMess, VLESS, Trojan, TUIC,
+  Hysteria2; SOCKS5 outbound is later work.
 - Rule-based routing on domain, IP/CIDR, GEOIP/GEOSITE, port, network,
   inbound, and process.
 - Outbound groups with manual, round-robin, random, fallback, and
@@ -312,7 +315,10 @@ depth, and idle timeout. No unbounded per-packet allocation is allowed.
 
 - `CONNECT host:port` becomes a TCP relay; the response is sent only after the
   outbound connects.
-- Forward-proxy requests keep their absolute URI; HTTP/1.1 only in phase 1.
+- Forward-proxy requests are rewritten from absolute-form to origin-form, with
+  `Host` taken from the URI authority and hop-by-hop headers stripped. Upstream
+  is forced to `Connection: close`; v1 handles one request per connection.
+- HTTP/1.1 only; no request rewriting beyond the request line and headers.
 - No request rewriting, caching, or authentication beyond optional inbound
   credentials.
 - L7 transports (WebSocket, HTTP/2, gRPC) are implemented as `transport`
@@ -382,9 +388,9 @@ for counters and a mutex only around node-set replacement (config reload).
 | Protocol | Transport | TCP | UDP | Inbound | Outbound | Phase | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Direct | any | yes | yes | — | yes | 1 | system resolver |
-| SOCKS5 | TCP (+UDP ASSOCIATE) | yes | yes | yes | yes | 1 | RFC 1928/1929 |
-| HTTP proxy | TCP | yes | no | yes | yes | 1 | CONNECT + forward |
-| Shadowsocks | TCP/UDP | yes | yes | yes | yes | 1 | AEAD + 2022 (BLAKE3) |
+| SOCKS5 | TCP (+UDP ASSOCIATE) | yes | yes | yes | no | 1 | inbound only |
+| HTTP proxy | TCP | yes | no | yes | yes | 1 | CONNECT + forward implemented |
+| Shadowsocks | TCP/UDP | yes | yes | yes | yes | 1 | 2022 TCP + UDP implemented |
 | Trojan | TLS | yes | yes | yes | yes | 2 | inbound needs in-tree TLS server |
 | VLESS | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | XTLS Vision later; gRPC in phase 3 |
 | VMess | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | legacy CFB not planned; gRPC in phase 3 |
@@ -408,6 +414,10 @@ Phasing:
 
 Hysteria v1 is not planned; Hysteria2 is the target. Snell is deferred and
 WireGuard is explicitly out of scope (ADR-0002).
+
+Implementation status: Phase 1 MVP is implemented. See
+[`docs/protocols/shadowsocks.md`](protocols/shadowsocks.md) for the remaining
+SIP022 hardening and interoperability gaps.
 
 ## 13. Dependencies and in-tree transports
 
@@ -471,9 +481,9 @@ their own signal handlers. `Instance` is the only composition root.
 ## 15. Repository layout (current and planned)
 
 ```
-opencode.json             OpenCode config; loads the Zig style guide
-.agents/instructions/zig-style.md  enforceable Zig style
-.agents/skills/           OpenCode skills, including the ADR workflow
+.opencode/opencode.json  OpenCode config; loads the Zig style guide
+.opencode/instructions/zig-style.md  enforceable Zig style
+.opencode/skills/        OpenCode skills, including the ADR workflow
 build.zig
 build.zig.zon
 src/root.zig              public API re-exports
@@ -487,11 +497,12 @@ src/routing/              rules, rule sets, sniffer
 src/dns/                  resolver, cache
 src/instance.zig          public facade: config, wiring, metrics
 src/config/               schema, JSON, validation
+examples/shadowsocks2022/ standalone SS2022 example
 docs/
   architecture.md
   decisions/
   protocols/              per-protocol notes and sources
-tests/                    interop fixtures and loopback integration tests
+tests/                    protocol fixtures and loopback integration tests
 ```
 
 Module boundaries are enforced by review, not by the compiler; do not import

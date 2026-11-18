@@ -1,6 +1,6 @@
 .{
     .name = .marmo,
-    .version = "0.0.0",
+    .version = "0.0.1",
     .fingerprint = 0x7e31019a076a735f,
     .minimum_zig_version = "0.17.1",
     .dependencies = .{},
