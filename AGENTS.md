@@ -19,10 +19,10 @@ repository ships the library only: no CLI, daemon, or `app` layer.
 
 ## Repo state
 
-- Design-only right now: no `build.zig` or `src/` yet. Don't invent module work
-  or run `zig build` until the Phase 0 scaffold exists (architecture §12/§15).
+- Phase 0 scaffold is in place: `build.zig`, `src/root.zig`, core interfaces,
+  and CI. Phase 1 (sockets, protocols, config, `Instance`) is not started; do
+  not implement it until the user moves on.
 - ADR-0001–0009 are accepted; new architecture decisions need a new ADR.
-  Implement Phase 1 only until the user moves on.
 - Snell is deferred and WireGuard is out of scope (ADR-0002).
 
 ## Toolchain gotchas (verified Zig 0.17.1)
@@ -34,7 +34,7 @@ repository ships the library only: no CLI, daemon, or `app` layer.
 - `std` has a TLS **client** only. No TLS server, no QUIC, no HTTP/2, no
   WebSocket client. ADR-0007 requires implementing missing transports in-tree;
   there are no optional backends.
-- Every API takes an explicit allocator; no globals or thread-locals.
+- Every allocating API takes an explicit allocator; no globals or thread-locals.
 
 ## Hard rules
 
@@ -52,9 +52,10 @@ repository ships the library only: no CLI, daemon, or `app` layer.
 
 ## Commands and tests
 
-- No build commands exist yet. A single test file can be run directly with
-  `zig test <file> --test-filter <name>`.
-- After scaffolding, put the verified `zig build test` invocation here and add a
-  `test` step; integration tests use loopback port 0 and never live servers.
-- Run `zig fmt` and the documented tests before finishing.
+- `zig build test` runs the unit and public API tests (10 tests today).
+- `zig test src/root.zig` runs the module tests directly; use
+  `zig test src/net/endpoint.zig --test-filter <name>` for one file or test.
+- `zig fmt build.zig src tests` before finishing; CI runs
+  `zig fmt --check build.zig src tests`.
+- Integration tests will use loopback port 0 and never live servers.
 - Protocol tests use captured fixtures under `tests/fixtures/<protocol>/`.

@@ -3,8 +3,8 @@
 A TCP/UDP proxy library written in Zig: L4/L7 inbounds, multiple proxy
 protocols, rule-based routing, and latency-aware node selection.
 
-**Status: Phase 1 design.** ADR-0001–0009 are accepted; no code or build
-scaffold exists yet.
+**Status:** Phase 0 scaffold in place. Build, core interfaces, tests, and CI are
+in place; Phase 1 is next.
 
 **Transport status:** only the design exists. TLS client comes from `std`; the
 in-tree TLS 1.3 server, QUIC, HTTP/2, WebSocket, and gRPC are not implemented

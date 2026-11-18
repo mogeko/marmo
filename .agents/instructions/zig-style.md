@@ -201,10 +201,8 @@ library, and the differences are deliberate:
   third-party servers.
 - Integration tests bind loopback port 0; no fixed ports.
 - Tests are deterministic. No arbitrary sleeps; use timeouts and `std.Io`.
-- Run the documented test command before finishing: `zig test <file>` today,
-  `zig build test` once the scaffold exists. Keep `AGENTS.md` in sync with the
-  verified command.
-- Run a single test file with `zig test <file> --test-filter <name>`.
+- Run `zig build test` before finishing. Run one file with
+  `zig test src/net/endpoint.zig --test-filter <name>`.
 
 ## Tooling and dependencies
 

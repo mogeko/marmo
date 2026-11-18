@@ -1,0 +1,17 @@
+name: Build & Test
+
+on:
+  push:
+    branches: [master, dev]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+      - run: zig fmt --check build.zig src tests
+      - run: zig build --summary all
+      - run: zig build test --summary all

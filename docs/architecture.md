@@ -1,6 +1,6 @@
 # Architecture
 
-Status: Phase 1 design. ADR-0001–0009 are accepted; implement Phase 1 only.
+Status: Phase 0 scaffold in place. ADR-0001–0009 are accepted; Phase 1 is next.
 
 ## 1. Purpose
 
@@ -393,7 +393,8 @@ for counters and a mutex only around node-set replacement (config reload).
 
 Phasing:
 
-- **Phase 0**: docs, ADRs, build scaffold, CI, core interfaces, public facade.
+- **Phase 0**: docs, ADRs, build scaffold, CI, core interfaces, public API
+  surface.
 - **Phase 1 (MVP)**: `std.Io` core, TCP/UDP relay, SOCKS5 (CONNECT + UDP
   ASSOCIATE), HTTP/1.1 proxy (CONNECT + forward), HTTP CONNECT outbound, direct
   outbound, Shadowsocks 2022, domain/IP-CIDR/port rules, manual group, JSON
@@ -467,7 +468,7 @@ There is no CLI, daemon, or `app` layer in this repository. Embedders create
 `Io.Threaded` (or `Io.Evented`), decide how to wait and shut down, and install
 their own signal handlers. `Instance` is the only composition root.
 
-## 15. Repository layout (planned)
+## 15. Repository layout (current and planned)
 
 ```
 opencode.json             OpenCode config; loads the Zig style guide
