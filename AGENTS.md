@@ -21,10 +21,10 @@ repository ships the library only: no CLI, daemon, or `app` layer.
 ## Repo state
 
 - Phase 1 MVP is implemented: strict JSON config, direct TCP/UDP and HTTP
-  CONNECT outbounds, SOCKS5 (CONNECT + UDP ASSOCIATE), HTTP CONNECT + forward
-  proxying, Shadowsocks 2022 TCP/UDP (AES-128/256-GCM), domain/IP-CIDR/port
-  routing, relay, and metrics. Phase 2 is next; SIP022 gaps are listed in
-  `docs/protocols/shadowsocks.md`.
+  CONNECT outbounds, SOCKS5 inbound (CONNECT + UDP ASSOCIATE), HTTP CONNECT +
+  forward proxying, Shadowsocks 2022 TCP/UDP (AES-128/256-GCM),
+  domain/IP-CIDR/port routing, relay, and metrics. Phase 2 is next; SIP022 gaps
+  are listed in `docs/protocols/shadowsocks.md`.
 - `examples/shadowsocks2022/` is standalone: it has its own `build.zig` and
   `build.zig.zon` and is not part of the root build.
 - ADR-0001–0009 are accepted; new architecture decisions need a new ADR.
@@ -57,7 +57,7 @@ repository ships the library only: no CLI, daemon, or `app` layer.
 
 ## Commands and tests
 
-- `zig build test` runs the unit, public API, and integration tests (34 tests
+- `zig build test` runs the unit, public API, and integration tests (35 tests
   today). Reference-implementation interop is local-only and not part of this
   repository or CI.
 - `zig test src/root.zig` runs the module tests directly; use

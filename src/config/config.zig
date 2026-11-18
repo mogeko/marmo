@@ -13,6 +13,12 @@ pub const Config = struct {
     outbounds: []const Outbound = &.{},
     route: Route = .{},
 
+    /// Parse strict JSON. Keep the returned `Parsed` alive for as long as the
+    /// config is used; the instance borrows all slices.
+    pub fn parseJson(gpa: std.mem.Allocator, text: []const u8) ParseError!Parsed {
+        return fromJson(gpa, text);
+    }
+
     pub const Inbound = struct {
         tag: []const u8,
         protocol: InboundProtocol,

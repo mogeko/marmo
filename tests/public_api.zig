@@ -28,3 +28,11 @@ test "public API exposes fixed relay limits" {
         marmo.limits.relay_buffer_size_default <= marmo.limits.relay_buffer_size_max,
     );
 }
+
+test "public API parses JSON config" {
+    var parsed = try marmo.Config.parseJson(std.testing.allocator,
+        \\{ "route": { "final": "direct" } }
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("direct", parsed.config().route.final);
+}

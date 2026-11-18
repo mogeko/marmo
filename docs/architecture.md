@@ -22,8 +22,8 @@ handling, and configuration storage.
   by proxy protocols (TLS, WebSocket, HTTP/2, gRPC, QUIC).
 - Inbounds: SOCKS5, HTTP, mixed, Shadowsocks, Trojan, VLESS, VMess, TUIC,
   Hysteria2; TUN later.
-- Outbounds: direct, SOCKS5, HTTP CONNECT, Shadowsocks, VMess, VLESS, Trojan,
-  TUIC, Hysteria2.
+- Outbounds: direct, HTTP CONNECT, Shadowsocks, VMess, VLESS, Trojan, TUIC,
+  Hysteria2; SOCKS5 outbound is later work.
 - Rule-based routing on domain, IP/CIDR, GEOIP/GEOSITE, port, network,
   inbound, and process.
 - Outbound groups with manual, round-robin, random, fallback, and
@@ -388,7 +388,7 @@ for counters and a mutex only around node-set replacement (config reload).
 | Protocol | Transport | TCP | UDP | Inbound | Outbound | Phase | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Direct | any | yes | yes | — | yes | 1 | system resolver |
-| SOCKS5 | TCP (+UDP ASSOCIATE) | yes | yes | yes | yes | 1 | RFC 1928/1929 |
+| SOCKS5 | TCP (+UDP ASSOCIATE) | yes | yes | yes | no | 1 | inbound only |
 | HTTP proxy | TCP | yes | no | yes | yes | 1 | CONNECT + forward implemented |
 | Shadowsocks | TCP/UDP | yes | yes | yes | yes | 1 | 2022 TCP + UDP implemented |
 | Trojan | TLS | yes | yes | yes | yes | 2 | inbound needs in-tree TLS server |
