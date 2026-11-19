@@ -68,7 +68,7 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(test_step);
 
     const examples_step = b.step("examples", "Build all examples");
-    for ([_][]const u8{"shadowsocks2022"}) |name| {
+    for ([_][]const u8{ "shadowsocks2022", "vless" }) |name| {
         const run = b.addSystemCommand(&.{ b.graph.zig_exe, "build" });
         run.setCwd(b.path(b.fmt("examples/{s}", .{name})));
         examples_step.dependOn(&run.step);

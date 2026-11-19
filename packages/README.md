@@ -3,6 +3,12 @@
 First-party packages live under `packages/<name>/`. They are consumed by the
 root package through path dependencies declared in the root `build.zig.zon`.
 
+## Index
+
+| Package | Purpose |
+| --- | --- |
+| [tls13](tls13/) | TLS client and in-tree TLS 1.3 server |
+
 ## Required layout
 
 ```text

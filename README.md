@@ -21,8 +21,8 @@ WebSocket, and gRPC are not implemented (ADR-0007).
 
 - [Architecture](docs/architecture.md)
 - [Architecture decisions](docs/decisions/)
-- [TLS 1.3 package](packages/tls13/)
-- [Shadowsocks 2022 example](examples/shadowsocks2022/)
+- [Packages](packages/)
+- [Examples](examples/)
 - [Agent instructions and Zig style](AGENTS.md)
 
 ## Workspace

@@ -30,8 +30,8 @@ repository ships the library only: no CLI, daemon, or `app` layer.
   framing. Package rules are in
   `packages/README.md`; root `build.zig` aggregates package tests and exposes
   `check` and `examples` steps.
-- `examples/shadowsocks2022/` is standalone: it has its own `build.zig` and
-  `build.zig.zon` and is not part of the root build.
+- `examples/shadowsocks2022/` and `examples/vless/` are standalone: each has
+  its own `build.zig` and `build.zig.zon` and is not part of the root build.
 - ADR-0001–0010 are accepted; new architecture decisions need a new ADR.
 - Snell is deferred and WireGuard is out of scope (ADR-0002).
 
