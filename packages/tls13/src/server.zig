@@ -517,25 +517,27 @@ pub const Server = struct {
     }
 };
 
-fn validateOptions(options: ServerOptions) Error!void {
-    if (options.read_buffer.len == 0 or options.write_buffer.len == 0) {
-        return error.HandshakeFailed;
-    }
-    if (options.certificate_chain.len == 0 or
-        options.certificate_chain.len > handshake.max_chain_certs)
+/// Checks chain bounds, the leaf key algorithm, and that the key pair matches
+/// the leaf certificate. Useful for config validation before a listener starts.
+pub fn validateCredentials(
+    certificate_chain: []const []const u8,
+    private_key: Ecdsa.KeyPair,
+) Error!void {
+    if (certificate_chain.len == 0 or
+        certificate_chain.len > handshake.max_chain_certs)
     {
         return error.HandshakeFailed;
     }
 
     var total: usize = 1 + 3;
-    for (options.certificate_chain) |cert| {
+    for (certificate_chain) |cert| {
         if (cert.len == 0) return error.HandshakeFailed;
         total += 3 + cert.len + 2;
     }
     if (total + 4 > handshake.max_handshake) return error.HandshakeFailed;
 
     const leaf: std.crypto.Certificate = .{
-        .buffer = options.certificate_chain[0],
+        .buffer = certificate_chain[0],
         .index = 0,
     };
     const parsed = leaf.parse() catch return error.HandshakeFailed;
@@ -544,10 +546,17 @@ fn validateOptions(options: ServerOptions) Error!void {
         else => false,
     };
     if (!is_p256) return error.HandshakeFailed;
-    const expected = options.private_key.public_key.toUncompressedSec1();
+    const expected = private_key.public_key.toUncompressedSec1();
     if (!std.mem.eql(u8, parsed.pubKey(), &expected)) {
         return error.HandshakeFailed;
     }
+}
+
+fn validateOptions(options: ServerOptions) Error!void {
+    if (options.read_buffer.len == 0 or options.write_buffer.len == 0) {
+        return error.HandshakeFailed;
+    }
+    try validateCredentials(options.certificate_chain, options.private_key);
 }
 
 fn readerStream(

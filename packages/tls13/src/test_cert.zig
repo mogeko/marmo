@@ -215,3 +215,87 @@ fn concat(
     }
     return list.toOwnedSlice(gpa);
 }
+
+/// PEM-encoded DER certificate chain (one certificate).
+pub fn certificatePem(gpa: std.mem.Allocator, der: []const u8) ![]u8 {
+    return pemEncode(gpa, "CERTIFICATE", der);
+}
+
+/// PEM-encoded PKCS#8 ECDSA P-256 private key.
+pub fn privateKeyPem(
+    gpa: std.mem.Allocator,
+    key_pair: Ecdsa.KeyPair,
+) ![]u8 {
+    const der = try buildPkcs8(gpa, key_pair);
+    defer gpa.free(der);
+    return pemEncode(gpa, "PRIVATE KEY", der);
+}
+
+fn buildPkcs8(
+    gpa: std.mem.Allocator,
+    key_pair: Ecdsa.KeyPair,
+) ![]u8 {
+    const version = try tlv(gpa, 0x02, &.{0});
+    defer gpa.free(version);
+    const ec_oid = try tlv(
+        gpa,
+        0x06,
+        &.{ 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01 },
+    );
+    defer gpa.free(ec_oid);
+    const p256_oid = try tlv(
+        gpa,
+        0x06,
+        &.{ 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07 },
+    );
+    defer gpa.free(p256_oid);
+    const alg_content = try concat(gpa, &.{ ec_oid, p256_oid });
+    defer gpa.free(alg_content);
+    const alg = try tlv(gpa, 0x30, alg_content);
+    defer gpa.free(alg);
+
+    const ec_version = try tlv(gpa, 0x02, &.{1});
+    defer gpa.free(ec_version);
+    const scalar = key_pair.secret_key.toBytes();
+    const scalar_octet = try tlv(gpa, 0x04, &scalar);
+    defer gpa.free(scalar_octet);
+    const ec_content = try concat(gpa, &.{ ec_version, scalar_octet });
+    defer gpa.free(ec_content);
+    const ec = try tlv(gpa, 0x30, ec_content);
+    defer gpa.free(ec);
+    const private_key_octet = try tlv(gpa, 0x04, ec);
+    defer gpa.free(private_key_octet);
+
+    const pki_content = try concat(gpa, &.{ version, alg, private_key_octet });
+    defer gpa.free(pki_content);
+    return tlv(gpa, 0x30, pki_content);
+}
+
+fn pemEncode(
+    gpa: std.mem.Allocator,
+    label: []const u8,
+    der: []const u8,
+) ![]u8 {
+    var list: std.ArrayList(u8) = .empty;
+    errdefer list.deinit(gpa);
+    try list.appendSlice(gpa, "-----BEGIN ");
+    try list.appendSlice(gpa, label);
+    try list.appendSlice(gpa, "-----\n");
+
+    const encoded_len = std.base64.standard.Encoder.calcSize(der.len);
+    const encoded = try gpa.alloc(u8, encoded_len);
+    defer gpa.free(encoded);
+    _ = std.base64.standard.Encoder.encode(encoded, der);
+    var offset: usize = 0;
+    while (offset < encoded.len) {
+        const count = @min(64, encoded.len - offset);
+        try list.appendSlice(gpa, encoded[offset..][0..count]);
+        try list.append(gpa, '\n');
+        offset += count;
+    }
+
+    try list.appendSlice(gpa, "-----END ");
+    try list.appendSlice(gpa, label);
+    try list.appendSlice(gpa, "-----\n");
+    return list.toOwnedSlice(gpa);
+}

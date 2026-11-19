@@ -68,6 +68,11 @@ pub const Server = struct {
 pub fn readSome(reader: *std.Io.Reader, buffers: [][]u8)
     std.Io.Reader.ShortError!usize;
 
+pub fn validateCredentials(
+    certificate_chain: []const []const u8,
+    private_key: std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair,
+) Error!void;
+
 pub const min_buffer_len: usize;
 ```
 
@@ -83,13 +88,17 @@ buffers.
 plaintext buffers, the certificate chain, and the private key; keep them alive
 through the handshake. `Server.end` sends `close_notify`; `deinit` does not.
 
+`validateCredentials` checks chain bounds, the leaf key algorithm, and that the
+key pair matches the leaf. It is used by config loading before a listener
+starts.
+
 `readSome` reads only what is already available. Use it instead of
 `Reader.readVec` for proxy streams: `readVec` tries to fill the caller's whole
 buffer and may block waiting for more data than the peer sent.
 
 A replacement package must provide the same exports and semantics:
-`Client`, `Options`, `Ca`, `Server`, `ServerOptions`, `readSome`, and
-`min_buffer_len`.
+`Client`, `Options`, `Ca`, `Server`, `ServerOptions`, `validateCredentials`,
+`readSome`, and `min_buffer_len`.
 
 ## Server scope
 

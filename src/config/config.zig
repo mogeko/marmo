@@ -26,9 +26,18 @@ pub const Config = struct {
         listen: []const u8,
         method: ?[]const u8 = null,
         password: ?[]const u8 = null,
+        uuid: ?[]const u8 = null,
+        tls: ?InboundTls = null,
     };
 
-    pub const InboundProtocol = enum { http, shadowsocks, socks5 };
+    pub const InboundProtocol = enum { http, shadowsocks, socks5, vless };
+
+    pub const InboundTls = struct {
+        /// PEM or DER certificate chain file, leaf first.
+        certificate: []const u8,
+        /// PEM or DER ECDSA P-256 private key file.
+        private_key: []const u8,
+    };
 
     pub const Outbound = struct {
         tag: []const u8,
@@ -146,15 +155,18 @@ fn validateInbounds(
 
         switch (inbound.protocol) {
             .socks5, .http => {
-                if (inbound.method != null or inbound.password != null) {
+                if (inbound.method != null or inbound.password != null or
+                    inbound.uuid != null or inbound.tls != null)
+                {
                     diagnostic.set(
-                        "inbounds[{d}]: credentials only apply to shadowsocks",
+                        "inbounds[{d}]: socks5/http do not take credentials or TLS",
                         .{index},
                     );
                     return error.InvalidConfig;
                 }
             },
             .shadowsocks => try validateShadowsocksInbound(inbound, index, diagnostic),
+            .vless => try validateVlessInbound(inbound, index, diagnostic),
         }
     }
 }
@@ -164,6 +176,10 @@ fn validateShadowsocksInbound(
     index: usize,
     diagnostic: *Diagnostic,
 ) ValidationError!void {
+    if (inbound.uuid != null or inbound.tls != null) {
+        diagnostic.set("inbounds[{d}]: uuid/tls only apply to vless", .{index});
+        return error.InvalidConfig;
+    }
     const method_text = inbound.method orelse {
         diagnostic.set("inbounds[{d}].method: required for shadowsocks", .{index});
         return error.InvalidConfig;
@@ -181,6 +197,37 @@ fn validateShadowsocksInbound(
         return error.InvalidConfig;
     };
     key.deinit();
+}
+
+fn validateVlessInbound(
+    inbound: Config.Inbound,
+    index: usize,
+    diagnostic: *Diagnostic,
+) ValidationError!void {
+    if (inbound.method != null or inbound.password != null) {
+        diagnostic.set("inbounds[{d}]: vless does not take method or password", .{index});
+        return error.InvalidConfig;
+    }
+    const uuid_text = inbound.uuid orelse {
+        diagnostic.set("inbounds[{d}].uuid: required for vless", .{index});
+        return error.InvalidConfig;
+    };
+    _ = vless.parseUuid(uuid_text) catch {
+        diagnostic.set("inbounds[{d}].uuid: invalid UUID", .{index});
+        return error.InvalidConfig;
+    };
+    const tls = inbound.tls orelse {
+        diagnostic.set("inbounds[{d}].tls: required for vless", .{index});
+        return error.InvalidConfig;
+    };
+    if (tls.certificate.len == 0) {
+        diagnostic.set("inbounds[{d}].tls.certificate: must not be empty", .{index});
+        return error.InvalidConfig;
+    }
+    if (tls.private_key.len == 0) {
+        diagnostic.set("inbounds[{d}].tls.private_key: must not be empty", .{index});
+        return error.InvalidConfig;
+    }
 }
 
 fn validateOutbounds(
@@ -694,6 +741,59 @@ test "config rejects domain listen addresses and bad CIDRs" {
     );
     try std.testing.expectEqualStrings(
         "inbounds[0].listen: must be an IP endpoint",
+        diagnostic.message(),
+    );
+}
+
+test "config validates VLESS inbound TLS fields" {
+    var diagnostic: Diagnostic = .{};
+    var valid = try fromJson(std.testing.allocator,
+        \\{
+        \\  "inbounds": [
+        \\    { "tag": "vless", "protocol": "vless", "listen": "127.0.0.1:443",
+        \\      "uuid": "00112233-4455-6677-8899-aabbccddeeff",
+        \\      "tls": { "certificate": "cert.pem",
+        \\               "private_key": "key.pem" } }
+        \\  ]
+        \\}
+    );
+    defer valid.deinit();
+    try validate(valid.inner.value, &diagnostic);
+
+    var missing_tls = try fromJson(std.testing.allocator,
+        \\{
+        \\  "inbounds": [
+        \\    { "tag": "vless", "protocol": "vless", "listen": "127.0.0.1:443",
+        \\      "uuid": "00112233445566778899aabbccddeeff" }
+        \\  ]
+        \\}
+    );
+    defer missing_tls.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(missing_tls.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "inbounds[0].tls: required for vless",
+        diagnostic.message(),
+    );
+
+    var bad_uuid = try fromJson(std.testing.allocator,
+        \\{
+        \\  "inbounds": [
+        \\    { "tag": "vless", "protocol": "vless", "listen": "127.0.0.1:443",
+        \\      "uuid": "nope",
+        \\      "tls": { "certificate": "cert.pem", "private_key": "key.pem" } }
+        \\  ]
+        \\}
+    );
+    defer bad_uuid.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(bad_uuid.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "inbounds[0].uuid: invalid UUID",
         diagnostic.message(),
     );
 }

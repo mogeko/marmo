@@ -1154,3 +1154,143 @@ test "TLS 1.3 adapters exchange application data" {
     _ = server_future.await(io);
     if (context.error_code) |err| return err;
 }
+
+fn streamReadExact(io: std.Io, stream: marmo.Stream, buffer: []u8) !void {
+    var offset: usize = 0;
+    while (offset < buffer.len) {
+        var buffers = [_][]u8{buffer[offset..]};
+        const read_len = try stream.read(io, &buffers);
+        if (read_len == 0) return error.EndOfStream;
+        offset += read_len;
+    }
+}
+
+test "VLESS inbound over TLS proxies to a direct target" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var echo_bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var echo_server = try echo_bind.listen(io, .{ .reuse_address = true });
+    defer echo_server.deinit(io);
+    var echo_future = io.async(echoLoopOnce, .{ io, &echo_server });
+
+    var cert = try tls13.test_cert.generate(allocator, io);
+    defer cert.deinit(allocator);
+    const cert_pem = try tls13.test_cert.certificatePem(allocator, cert.der);
+    defer allocator.free(cert_pem);
+    const key_pem = try tls13.test_cert.privateKeyPem(allocator, cert.key_pair);
+    defer {
+        std.crypto.secureZero(u8, key_pem);
+        allocator.free(key_pem);
+    }
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "cert.pem", .data = cert_pem });
+    try tmp.dir.writeFile(io, .{ .sub_path = "key.pem", .data = key_pem });
+
+    var cert_path_buffer: [128]u8 = undefined;
+    const cert_path = try std.fmt.bufPrint(
+        &cert_path_buffer,
+        ".zig-cache/tmp/{s}/cert.pem",
+        .{tmp.sub_path},
+    );
+    var key_path_buffer: [128]u8 = undefined;
+    const key_path = try std.fmt.bufPrint(
+        &key_path_buffer,
+        ".zig-cache/tmp/{s}/key.pem",
+        .{tmp.sub_path},
+    );
+
+    var diagnostic: marmo.Diagnostic = .{};
+    const config: marmo.Config = .{
+        .inbounds = &.{
+            .{
+                .tag = "vless",
+                .protocol = .vless,
+                .listen = "127.0.0.1:0",
+                .uuid = vless_test_uuid_text,
+                .tls = .{
+                    .certificate = cert_path,
+                    .private_key = key_path,
+                },
+            },
+        },
+        .outbounds = &.{
+            .{ .tag = "direct", .protocol = .direct },
+        },
+        .route = .{ .final = "direct" },
+    };
+    var instance = marmo.Instance.init(allocator, io, config, &diagnostic) catch |err| {
+        std.debug.print("init failed: {s}\n", .{diagnostic.message()});
+        return err;
+    };
+    defer instance.deinit();
+    try instance.start();
+
+    const vless_endpoint = instance.inboundEndpoint("vless") orelse
+        return error.TestUnexpectedResult;
+    const vless_address = switch (vless_endpoint) {
+        .ip => |ip| ip,
+        .domain => return error.TestUnexpectedResult,
+    };
+    const net_stream = try std.Io.net.IpAddress.connect(
+        &vless_address,
+        io,
+        .{ .mode = .stream },
+    );
+    const remote: marmo.Endpoint = .{ .ip = net_stream.socket.address };
+    const tcp = try marmo.TcpStream.create(
+        allocator,
+        net_stream,
+        vless_endpoint,
+        remote,
+    );
+    const tls = marmo.TlsClientStream.create(
+        io,
+        allocator,
+        tcp.stream(),
+        .{
+            .server_name = "localhost",
+            .insecure = true,
+        },
+    ) catch |err| {
+        tcp.stream().close(io);
+        return err;
+    };
+    const stream = tls.stream();
+    defer stream.close(io);
+
+    const target_port = echo_server.socket.address.getPort();
+    var target_text_buffer: [32]u8 = undefined;
+    const target_text = try std.fmt.bufPrint(
+        &target_text_buffer,
+        "127.0.0.1:{d}",
+        .{target_port},
+    );
+    const target = try marmo.Endpoint.parse(target_text);
+    var header: [marmo.VlessProtocol.request_header_max]u8 = undefined;
+    const header_len = try marmo.VlessProtocol.encodeRequest(
+        &header,
+        &vless_test_uuid,
+        target,
+    );
+    _ = try stream.write(io, &.{header[0..header_len]});
+    _ = try stream.write(io, &.{"hello"});
+
+    var response_header: [2]u8 = undefined;
+    try streamReadExact(io, stream, &response_header);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0 }, &response_header);
+
+    var echoed: [5]u8 = undefined;
+    try streamReadExact(io, stream, &echoed);
+    try std.testing.expectEqualStrings("hello", &echoed);
+
+    stream.shutdown(io, .both) catch |err| switch (err) {
+        error.NotConnected => {},
+        else => return err,
+    };
+    instance.stop();
+    _ = echo_future.await(io);
+}

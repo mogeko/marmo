@@ -7,7 +7,7 @@ protocols, rule-based routing, and latency-aware node selection.
 
 **Status:** Phase 1 MVP implemented; Phase 2 has started with outbound selectors
 (manual, round-robin, random, fallback, least-latency), active TCP health
-probes, a VLESS outbound over TCP or TLS, and a TLS 1.3 server. Includes strict
+probes, VLESS outbound and inbound over TLS, and a TLS 1.3 server. Includes strict
 JSON config, direct TCP/UDP and HTTP CONNECT outbounds, SOCKS5 inbound (CONNECT
 + UDP ASSOCIATE), HTTP CONNECT and forward proxying, Shadowsocks 2022 TCP/UDP
 (AES-128/256-GCM), domain/IP-CIDR/port routing, relay, and metrics.

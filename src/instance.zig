@@ -25,11 +25,15 @@ const Action = @import("routing/router.zig").Action;
 const Router = @import("routing/router.zig").Router;
 const Dialer = @import("transport/dialer.zig").Dialer;
 const TlsDialer = @import("transport/tls_dialer.zig").TlsDialer;
+const tls_server = @import("transport/tls_server.zig");
+const TlsServerStream = tls_server.TlsServerStream;
+const tls_credentials = @import("transport/tls_credentials.zig");
 const PacketConn = @import("transport/packet.zig").PacketConn;
 const Stream = @import("transport/stream.zig").Stream;
 const TcpStream = @import("transport/tcp.zig").TcpStream;
 const socks5 = @import("inbound/socks5.zig");
 const http_inbound = @import("inbound/http.zig");
+const vless_inbound = @import("inbound/vless.zig");
 
 pub const InitError = error{ InvalidConfig, OutOfMemory };
 pub const StartError = error{
@@ -56,6 +60,8 @@ const BoundInbound = struct {
     server: ?std.Io.net.Server = null,
     shadowsocks: ?*ss_inbound.Context = null,
     udp_server: ?*ss_udp.Server = null,
+    tls: ?tls_server.Options = null,
+    vless_uuid: ?vless_protocol.Uuid = null,
 };
 
 const ConnContext = struct {
@@ -114,7 +120,12 @@ pub const Instance = struct {
             config.outbounds,
             diagnostic,
         );
-        const inbounds = try compileInbounds(allocator, config.inbounds, diagnostic);
+        const inbounds = try compileInbounds(
+            allocator,
+            io,
+            config.inbounds,
+            diagnostic,
+        );
 
         return .{
             .gpa = gpa,
@@ -224,6 +235,12 @@ pub const Instance = struct {
 
         for (self.inbounds) |*inbound| {
             if (inbound.shadowsocks) |context| context.deinit();
+            if (inbound.tls) |*tls| {
+                std.crypto.secureZero(u8, std.mem.asBytes(&tls.private_key));
+            }
+            if (inbound.vless_uuid) |*uuid| {
+                std.crypto.secureZero(u8, std.mem.asBytes(uuid));
+            }
         }
         for (self.outbounds) |*outbound| {
             if (outbound.cleanup) |cleanup| cleanup(outbound.cleanup_ctx.?);
@@ -375,8 +392,24 @@ fn connectionWrapper(context: *ConnContext) std.Io.Cancelable!void {
 fn handleConnection(context: *ConnContext) !void {
     const self = context.instance;
     defer self.gpa.destroy(context);
-    defer context.stream.close(self.io);
     defer self.metrics.connectionClosed();
+
+    var stream = context.stream;
+    if (context.inbound.tls) |tls_options| {
+        var options = tls_options;
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&options.private_key));
+        const tls = TlsServerStream.create(
+            self.io,
+            self.gpa,
+            stream,
+            options,
+        ) catch |err| {
+            stream.close(self.io);
+            return err;
+        };
+        stream = tls.stream();
+    }
+    defer stream.close(self.io);
 
     var arena = std.heap.ArenaAllocator.init(self.gpa);
     defer arena.deinit();
@@ -385,14 +418,14 @@ fn handleConnection(context: *ConnContext) !void {
     switch (context.inbound.protocol) {
         .socks5 => try socks5.handle(
             self.io,
-            context.stream,
+            stream,
             context.inbound.tag,
             dispatch,
             arena.allocator(),
         ),
         .http => try http_inbound.handle(
             self.io,
-            context.stream,
+            stream,
             context.inbound.tag,
             dispatch,
             arena.allocator(),
@@ -400,11 +433,26 @@ fn handleConnection(context: *ConnContext) !void {
         .shadowsocks => try ss_inbound.handle(
             self.io,
             self.gpa,
-            context.stream,
+            stream,
             context.inbound.tag,
             dispatch,
             context.inbound.shadowsocks orelse return error.InvalidConfig,
         ),
+        .vless => {
+            var vless_context: vless_inbound.Context = .{
+                .uuid = context.inbound.vless_uuid orelse
+                    return error.InvalidConfig,
+            };
+            defer std.crypto.secureZero(u8, std.mem.asBytes(&vless_context));
+            try vless_inbound.handle(
+                self.io,
+                stream,
+                context.inbound.tag,
+                dispatch,
+                arena.allocator(),
+                &vless_context,
+            );
+        },
     }
 }
 
@@ -644,6 +692,7 @@ fn compileSelector(
 
 fn compileInbounds(
     allocator: std.mem.Allocator,
+    io: std.Io,
     configs: []const Config.Inbound,
     diagnostic: *Diagnostic,
 ) InitError![]BoundInbound {
@@ -679,6 +728,27 @@ fn compileInbounds(
                 };
                 key.deinit();
                 inbounds[index].shadowsocks = context;
+            },
+            .vless => {
+                const uuid_text = config.uuid orelse return error.InvalidConfig;
+                inbounds[index].vless_uuid = vless_protocol.parseUuid(uuid_text) catch
+                    return error.InvalidConfig;
+                const tls = config.tls orelse return error.InvalidConfig;
+                inbounds[index].tls = tls_credentials.loadOptions(
+                    allocator,
+                    io,
+                    tls.certificate,
+                    tls.private_key,
+                ) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.InvalidCredentials => {
+                        diagnostic.set(
+                            "inbounds[{d}].tls: invalid certificate or private key",
+                            .{index},
+                        );
+                        return error.InvalidConfig;
+                    },
+                };
             },
             .http, .socks5 => {},
         }

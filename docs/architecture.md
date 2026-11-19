@@ -1,7 +1,7 @@
 # Architecture
 
 Status: Phase 1 MVP implemented; Phase 2 started with outbound selectors and
-active TCP health probes, followed by a VLESS outbound over TCP or TLS and a
+active TCP health probes, followed by VLESS outbound/inbound over TLS and a
 TLS 1.3 server package. SS2022 TCP/UDP interop was verified locally against
 shadowsocks-rust 1.25.0 in both directions; the interop harness is not part of
 the repository. Protocol and Phase 2 gaps are tracked in `docs/protocols/` and
@@ -399,7 +399,7 @@ for counters and a mutex only around node-set replacement (config reload).
 | HTTP proxy | TCP | yes | no | yes | yes | 1 | CONNECT + forward implemented |
 | Shadowsocks | TCP/UDP | yes | yes | yes | yes | 1 | 2022 TCP + UDP implemented |
 | Trojan | TLS | yes | yes | yes | yes | 2 | inbound needs in-tree TLS server |
-| VLESS | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | TCP outbound + TLS client done; UDP/inbound/WS/H2 pending |
+| VLESS | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | TCP inbound/outbound over TLS done; UDP/WS/H2 pending |
 | VMess | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | legacy CFB not planned; gRPC in phase 3 |
 | TUIC | QUIC | yes | yes | yes | yes | 3 | in-tree QUIC |
 | Hysteria2 | QUIC + TLS | yes | yes | yes | yes | 3 | Salamander, Brutal CC |
@@ -414,9 +414,9 @@ Phasing:
   config, counters.
 - **Phase 2**: VLESS/Trojan/VMess, in-tree TLS 1.3 server and WS/H2 transports,
   sniffing, compiled rule sets, process rules, groups and health checks, DNS
-  cache/DoH. Implemented: selectors, TCP health probes, a VLESS outbound over
-  TCP or TLS, and the TLS 1.3 server package. `http_head`, jitter, backoff,
-  VLESS UDP and inbound, and the remaining items are next.
+  cache/DoH. Implemented: selectors, TCP health probes, VLESS outbound and
+  inbound over TLS, and the TLS 1.3 server package. `http_head`, jitter,
+  backoff, VLESS UDP, and the remaining items are next.
 - **Phase 3**: in-tree QUIC, TUIC, Hysteria2, gRPC transport.
 - **Phase 4**: optional TUN/transparent proxying, Windows, transport hardening
   and external audit.
@@ -451,7 +451,9 @@ provides the same primitive, deleting the in-tree version.
 - **TLS 1.3 server**: in-tree in `packages/tls13` on `std.crypto`; X25519,
   AES-128-GCM/SHA-256, ECDSA P-256 certificates, caller-provided chain and key.
   No client auth, PSK, tickets, ALPN selection, KeyUpdate, or 0-RTT.
-  `src/transport/tls_server.zig` is the thin `Stream` adapter.
+  `src/transport/tls_server.zig` is the thin `Stream` adapter. `Instance`
+  wraps accepted TCP streams for the VLESS inbound; credentials are PEM/DER
+  files loaded by `src/transport/tls_credentials.zig`.
 - **WebSocket / HTTP/2 / gRPC**: in-tree, Phase 2/3; HTTP/2 is limited to
   transport needs (framing, HPACK, SETTINGS, GOAWAY).
 - **QUIC**: in-tree, Phase 3; QUIC v1, stream multiplexing, datagrams, and

@@ -15,11 +15,11 @@ comptime {
     std.debug.assert(1 + uuid_len + 1 + 1 + 2 == 21);
 }
 
-const command_tcp: u8 = 1;
-const address_ipv4: u8 = 1;
-const address_domain: u8 = 2;
-const address_ipv6: u8 = 3;
-const max_domain_len: usize = 255;
+pub const command_tcp: u8 = 1;
+pub const address_ipv4: u8 = 1;
+pub const address_domain: u8 = 2;
+pub const address_ipv6: u8 = 3;
+pub const max_domain_len: usize = 255;
 
 pub const Uuid = [uuid_len]u8;
 
@@ -106,6 +106,80 @@ pub fn encodeRequest(
         target,
     );
     return 1 + uuid_len + 4 + address_len;
+}
+
+pub const Request = struct {
+    command: u8,
+    target: Endpoint,
+};
+
+/// Reads a VLESS TCP request from a server-side stream. Domain names are
+/// copied into `domain_buffer`; the caller must keep that buffer alive for as
+/// long as the returned endpoint is used.
+pub fn readRequestHeader(
+    io: std.Io,
+    stream: Stream,
+    expected_uuid: *const Uuid,
+    domain_buffer: *[max_domain_len]u8,
+) !Request {
+    var fixed: [1 + uuid_len + 1]u8 = undefined;
+    try readExact(io, stream, &fixed);
+    if (fixed[0] != version) return error.ProtocolViolation;
+
+    const received_uuid: Uuid = fixed[1..][0..uuid_len].*;
+    if (!std.crypto.timing_safe.eql(Uuid, expected_uuid.*, received_uuid)) {
+        return error.AuthenticationFailed;
+    }
+
+    const addon_len = fixed[1 + uuid_len];
+    if (addon_len != 0) {
+        var addons: [addon_len_max]u8 = undefined;
+        try readExact(io, stream, addons[0..addon_len]);
+    }
+
+    var command_bytes: [1]u8 = undefined;
+    try readExact(io, stream, &command_bytes);
+    var port_bytes: [2]u8 = undefined;
+    try readExact(io, stream, &port_bytes);
+    const port = std.mem.readInt(u16, &port_bytes, .big);
+
+    var address_type: [1]u8 = undefined;
+    try readExact(io, stream, &address_type);
+    const target = switch (address_type[0]) {
+        address_ipv4 => blk: {
+            var bytes: [4]u8 = undefined;
+            try readExact(io, stream, &bytes);
+            break :blk Endpoint{
+                .ip = .{ .ip4 = .{ .bytes = bytes, .port = port } },
+            };
+        },
+        address_domain => blk: {
+            var length: [1]u8 = undefined;
+            try readExact(io, stream, &length);
+            if (length[0] == 0) return error.InvalidDomain;
+            try readExact(io, stream, domain_buffer[0..length[0]]);
+            break :blk Endpoint{
+                .domain = .{
+                    .name = domain_buffer[0..length[0]],
+                    .port = port,
+                },
+            };
+        },
+        address_ipv6 => blk: {
+            var bytes: [16]u8 = undefined;
+            try readExact(io, stream, &bytes);
+            break :blk Endpoint{
+                .ip = .{ .ip6 = .{ .bytes = bytes, .port = port } },
+            };
+        },
+        else => return error.UnsupportedAddress,
+    };
+    return .{ .command = command_bytes[0], .target = target };
+}
+
+/// Writes the empty VLESS response header.
+pub fn writeResponseHeader(io: std.Io, stream: Stream) !void {
+    try writeAll(io, stream, &.{ version, 0 });
 }
 
 /// Reads and validates the VLESS response header.

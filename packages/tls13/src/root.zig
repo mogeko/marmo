@@ -15,6 +15,7 @@ pub const Client = @import("client.zig").Client;
 pub const Options = @import("client.zig").Options;
 pub const Server = @import("server.zig").Server;
 pub const ServerOptions = @import("server.zig").ServerOptions;
+pub const validateCredentials = @import("server.zig").validateCredentials;
 pub const readSome = @import("reader.zig").readSome;
 pub const min_buffer_len = @import("client.zig").min_buffer_len;
 
