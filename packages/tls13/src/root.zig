@@ -5,10 +5,15 @@
 //! as the `Client`, `Options`, and `Ca` API stays compatible.
 
 const std = @import("std");
-const builtin = @import("builtin");
 
-/// Runtime-generated certificates for integration tests. Empty outside tests.
-pub const test_cert = if (builtin.is_test) @import("test_cert.zig") else struct {};
+/// Runtime-generated certificates for tests, examples, and fuzz harnesses.
+/// No private key is committed; each call generates a fresh key pair.
+pub const test_cert = @import("test_cert.zig");
+
+/// Wire-level handshake and record modules. Exposed so adapters and fuzz
+/// harnesses can exercise the parser without a socket; no stability guarantee.
+pub const handshake = @import("handshake.zig");
+pub const record = @import("record.zig");
 
 pub const Ca = @import("ca.zig").Ca;
 pub const Client = @import("client.zig").Client;

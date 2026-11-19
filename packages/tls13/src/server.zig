@@ -448,9 +448,10 @@ pub const Server = struct {
                 &self.record_read,
             ) catch |err| return mapAppReadError(err);
 
+            // RFC 8446 §5: a change_cipher_spec record after the handshake is
+            // a protocol error, not a record to ignore.
             if (rec[0] == record.content_type_change_cipher_spec) {
-                if (rec.len != 6 or rec[5] != 1) return error.ProtocolViolation;
-                continue;
+                return error.ProtocolViolation;
             }
             if (rec[0] == record.content_type_alert) {
                 return self.handleAppAlert(rec[record.record_header_len..]);
@@ -687,6 +688,43 @@ fn testServerRun(io: std.Io, context: *TestContext) !void {
         try tls_server.writer().writeAll(buffer[0..read_len]);
         try tls_server.flush();
     }
+}
+
+test "post-handshake change_cipher_spec is a protocol error" {
+    const ccs = [_]u8{ record.content_type_change_cipher_spec, 0x03, 0x03, 0, 1, 1 };
+    var input_buffer: [16]u8 = undefined;
+    var calls = [_]std.testing.Reader.Call{.{ .buffer = &ccs }};
+    var reader = std.testing.Reader.init(&input_buffer, &calls);
+
+    var server: Server = undefined;
+    server.input = &reader.interface;
+    server.eof = false;
+    server.pending_len = 0;
+    server.pending_offset = 0;
+    server.read_keys = .{};
+
+    var dest: [16]u8 = undefined;
+    try std.testing.expectError(
+        error.ProtocolViolation,
+        server.readPlaintext(&dest),
+    );
+}
+
+test "plaintext close_notify is reported as clean EOF" {
+    const alert = [_]u8{ record.content_type_alert, 0x03, 0x03, 0, 2, 1, 0 };
+    var input_buffer: [16]u8 = undefined;
+    var calls = [_]std.testing.Reader.Call{.{ .buffer = &alert }};
+    var reader = std.testing.Reader.init(&input_buffer, &calls);
+
+    var server: Server = undefined;
+    server.input = &reader.interface;
+    server.eof = false;
+    server.pending_len = 0;
+    server.pending_offset = 0;
+    server.read_keys = .{};
+
+    var dest: [16]u8 = undefined;
+    try std.testing.expectError(error.Closed, server.readPlaintext(&dest));
 }
 
 test "TLS 1.3 server and client exchange application data" {
