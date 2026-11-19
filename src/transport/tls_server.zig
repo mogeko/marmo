@@ -4,6 +4,7 @@ const std = @import("std");
 const tls13 = @import("tls13");
 const Endpoint = @import("../net/endpoint.zig").Endpoint;
 const Stream = @import("stream.zig").Stream;
+const writeSlices = @import("write.zig").writeSlices;
 
 pub const socket_buffer_len = tls13.min_buffer_len;
 const plain_buffer_len = 4096;
@@ -92,7 +93,7 @@ pub const TlsServerStream = struct {
 
         self.write_lock.lock(io) catch return error.Canceled;
         defer self.write_lock.unlock(io);
-        self.server.writer().writeVecAll(@constCast(buffers)) catch
+        writeSlices(self.server.writer(), buffers) catch
             return self.writeFailure();
         self.server.flush() catch return self.writeFailure();
         return total;

@@ -4,6 +4,7 @@ const std = @import("std");
 const tls13 = @import("tls13");
 const Endpoint = @import("../net/endpoint.zig").Endpoint;
 const Stream = @import("stream.zig").Stream;
+const writeSlices = @import("write.zig").writeSlices;
 
 pub const socket_buffer_len = tls13.min_buffer_len;
 const plain_buffer_len = 4096;
@@ -94,7 +95,7 @@ pub const TlsClientStream = struct {
 
         self.write_lock.lock(io) catch return error.Canceled;
         defer self.write_lock.unlock(io);
-        self.client.writer().writeVecAll(@constCast(buffers)) catch
+        writeSlices(self.client.writer(), buffers) catch
             return self.writeFailure();
         // The TLS writer encrypts into the socket writer but does not flush
         // the underlying transport, so both layers need an explicit flush.

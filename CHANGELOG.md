@@ -29,6 +29,13 @@ and behavior may change between minor releases.
 - Root CI runs formatting, Debug tests, and a ReleaseSafe test pass.
 - `AGENTS.md` consolidates the enforceable Zig style and workspace rules.
 
+### Fixed
+
+- `Stream.write` no longer passes a const slice array to
+  `Writer.writeVecAll`. The old `@constCast` path mutated read-only slice
+  descriptors and crashed ReleaseSafe on Linux; writes now use a small mutable
+  stack copy. Added a regression test.
+
 ### Known limitations
 
 - VLESS UDP implements simple UoT (`[2B length][payload]`) only. XUDP command
@@ -49,7 +56,7 @@ and behavior may change between minor releases.
 
 ### Tests
 
-- 51 root tests (32 unit, 4 public API, 15 integration) and 4 TLS package
+- 52 root tests (33 unit, 4 public API, 15 integration) and 4 TLS package
   tests, passing in Debug and ReleaseSafe.
 - Examples build with `zig build examples`.
 - Reference interop was checked locally against Xray-core 26.11.9 for VLESS TCP
