@@ -19,6 +19,7 @@ pub const Vless = struct {
     transport_cleanup_ctx: ?*anyopaque = null,
 
     pub fn deinit(self: *Vless) void {
+        std.crypto.secureZero(u8, &self.uuid);
         if (self.transport_cleanup) |cleanup| cleanup(self.transport_cleanup_ctx.?);
     }
 
@@ -101,4 +102,13 @@ fn mapCreateError(err: anyerror) Dialer.ConnectError {
         error.ProtocolViolation => error.ProtocolViolation,
         else => error.Unexpected,
     };
+}
+
+test "deinit zeroizes the VLESS UUID" {
+    var value: Vless = undefined;
+    value.uuid = @splat(0xff);
+    value.transport_cleanup = null;
+    value.transport_cleanup_ctx = null;
+    value.deinit();
+    for (value.uuid) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
 }
