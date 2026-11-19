@@ -89,6 +89,11 @@ pub const ValidationError = error{InvalidConfig};
 
 pub const ParseError = error{ InvalidJson, OutOfMemory };
 
+/// Upper bound for a configuration document. It is far above any realistic
+/// deployment and keeps a hostile or accidental huge input from allocating
+/// without bound during JSON parsing.
+pub const max_config_bytes: usize = 4 * 1024 * 1024;
+
 pub const Parsed = struct {
     inner: std.json.Parsed(Config),
 
@@ -104,7 +109,10 @@ pub const Parsed = struct {
 };
 
 pub fn fromJson(gpa: std.mem.Allocator, text: []const u8) ParseError!Parsed {
-    const inner = std.json.parseFromSlice(Config, gpa, text, .{}) catch |err| switch (err) {
+    if (text.len > max_config_bytes) return error.InvalidJson;
+    const inner = std.json.parseFromSlice(Config, gpa, text, .{
+        .max_value_len = max_config_bytes,
+    }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.InvalidJson,
     };
@@ -580,6 +588,19 @@ fn isValidRouteTarget(tag: []const u8, outbounds: []const Config.Outbound) bool 
         if (std.mem.eql(u8, outbound.tag, tag)) return true;
     }
     return false;
+}
+
+test "config rejects oversized documents" {
+    const oversized = try std.testing.allocator.alloc(
+        u8,
+        max_config_bytes + 1,
+    );
+    defer std.testing.allocator.free(oversized);
+    @memset(oversized, ' ');
+    try std.testing.expectError(
+        error.InvalidJson,
+        fromJson(std.testing.allocator, oversized),
+    );
 }
 
 test "config parses defaults and validates" {
