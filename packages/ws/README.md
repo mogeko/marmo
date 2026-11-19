@@ -46,16 +46,23 @@ adapters.
   `Sec-WebSocket-Accept` verification. Bytes after the HTTP terminator stay in
   the reader, so a frame coalesced with the handshake is not lost.
 - Binary and text messages, continuation, ping/pong, and close.
-- Client masking is mandatory and server frames must be unmasked.
+- Close codes are validated; invalid codes/reasons get 1002/1007. Messages are
+  capped at 1 MiB and 1024 fragments; control frames per read are capped.
+- Client masking is mandatory and server frames must be unmasked. A single
+  frame is capped at 64 KiB, so larger messages must be fragmented by the peer.
 - No extensions (including `permessage-deflate`), redirects, subprotocol
-  negotiation, or HTTP authentication.
+  negotiation, or HTTP authentication. Handshake parsing is strict: obs-fold,
+  whitespace before the colon, duplicate required headers, and body-bearing
+  upgrades are rejected.
 - One reader and one writer may run concurrently; writes are serialized
   internally, and a pong from the reader shares that lock. Close state is
   checked under that lock, so no data or pong is sent after a close, and the
   adapter waits for in-flight operations before releasing memory.
 
 The root package wraps this API in `src/transport/ws_{client,server,dialer}.zig`
-and composes it with TCP/TLS dialers.
+and composes it with TCP/TLS dialers. The adapter does not inspect TLS ALPN;
+when composing over TLS, set `TlsDialer.required_alpn = "http/1.1"` (or the
+configured protocol) explicitly.
 
 ## Tests
 

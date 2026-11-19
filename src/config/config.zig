@@ -39,6 +39,8 @@ pub const Config = struct {
         certificate: []const u8,
         /// PEM or DER ECDSA P-256 private key file.
         private_key: []const u8,
+        /// ALPN protocols in server preference order.
+        alpn: ?[]const []const u8 = null,
         handshake_timeout_s: u16 = 10,
     };
 
@@ -61,6 +63,10 @@ pub const Config = struct {
     pub const Tls = struct {
         sni: ?[]const u8 = null,
         insecure: bool = false,
+        /// ALPN protocols in client preference order.
+        alpn: ?[]const []const u8 = null,
+        /// Require the server to select this protocol.
+        required_alpn: ?[]const u8 = null,
         handshake_timeout_s: u16 = 10,
     };
 
@@ -258,6 +264,13 @@ fn validateVlessInbound(
         );
         return error.InvalidConfig;
     }
+    var alpn_path_buffer: [64]u8 = undefined;
+    const alpn_path = std.fmt.bufPrint(
+        &alpn_path_buffer,
+        "inbounds[{d}].tls",
+        .{index},
+    ) catch return error.InvalidConfig;
+    try validateAlpn(tls.alpn, null, alpn_path, diagnostic);
 }
 
 fn validateTrojanInbound(
@@ -473,6 +486,18 @@ fn validateOutboundTls(
         );
         return error.InvalidConfig;
     }
+    var alpn_path_buffer: [64]u8 = undefined;
+    const alpn_path = std.fmt.bufPrint(
+        &alpn_path_buffer,
+        "outbounds[{d}].tls",
+        .{index},
+    ) catch return error.InvalidConfig;
+    try validateAlpn(
+        tls_config.alpn,
+        tls_config.required_alpn,
+        alpn_path,
+        diagnostic,
+    );
 }
 
 fn validateTrojan(
@@ -632,6 +657,54 @@ fn validateSelector(
                 node_index,
                 node_tag,
             });
+            return error.InvalidConfig;
+        }
+    }
+}
+
+fn validateAlpn(
+    protocols: ?[]const []const u8,
+    required: ?[]const u8,
+    base: []const u8,
+    diagnostic: *Diagnostic,
+) ValidationError!void {
+    const list = protocols orelse &.{};
+    if (list.len == 0 and required != null) {
+        diagnostic.set("{s}.required_alpn: requires alpn protocols", .{base});
+        return error.InvalidConfig;
+    }
+    var seen: [32][]const u8 = undefined;
+    if (list.len > seen.len) {
+        diagnostic.set("{s}.alpn: too many protocols", .{base});
+        return error.InvalidConfig;
+    }
+    for (list, 0..) |protocol, list_index| {
+        if (protocol.len == 0 or protocol.len > 255) {
+            diagnostic.set("{s}.alpn[{d}]: invalid protocol name", .{
+                base,
+                list_index,
+            });
+            return error.InvalidConfig;
+        }
+        for (seen[0..list_index]) |previous| {
+            if (std.mem.eql(u8, previous, protocol)) {
+                diagnostic.set("{s}.alpn[{d}]: duplicate '{s}'", .{
+                    base,
+                    list_index,
+                    protocol,
+                });
+                return error.InvalidConfig;
+            }
+        }
+        seen[list_index] = protocol;
+    }
+    if (required) |needed| {
+        var found = false;
+        for (list) |protocol| {
+            if (std.mem.eql(u8, protocol, needed)) found = true;
+        }
+        if (!found) {
+            diagnostic.set("{s}.required_alpn: not present in alpn", .{base});
             return error.InvalidConfig;
         }
     }
@@ -1071,6 +1144,70 @@ test "config validates Trojan credentials, TLS, and fallback" {
     );
     try std.testing.expectEqualStrings(
         "inbounds[0].fallback: invalid endpoint 'not-an-endpoint'",
+        diagnostic.message(),
+    );
+}
+
+test "TLS ALPN config validates names and required selection" {
+    var diagnostic: Diagnostic = .{};
+    var valid = try fromJson(std.testing.allocator,
+        \\{
+        \\  "inbounds": [
+        \\    { "tag": "vless", "protocol": "vless", "listen": "127.0.0.1:443",
+        \\      "uuid": "00112233-4455-6677-8899-aabbccddeeff",
+        \\      "tls": { "certificate": "cert.pem", "private_key": "key.pem",
+        \\               "alpn": ["h2", "http/1.1"] } }
+        \\  ],
+        \\  "outbounds": [
+        \\    { "tag": "proxy", "protocol": "trojan",
+        \\      "server": "example.com:443", "password": "secret",
+        \\      "tls": { "sni": "example.com", "alpn": ["h2"],
+        \\               "required_alpn": "h2" } }
+        \\  ],
+        \\  "route": { "final": "proxy" }
+        \\}
+    );
+    defer valid.deinit();
+    try validate(valid.inner.value, &diagnostic);
+
+    var bad_required = try fromJson(std.testing.allocator,
+        \\{
+        \\  "outbounds": [
+        \\    { "tag": "proxy", "protocol": "trojan",
+        \\      "server": "example.com:443", "password": "secret",
+        \\      "tls": { "sni": "example.com", "alpn": ["http/1.1"],
+        \\               "required_alpn": "h2" } }
+        \\  ],
+        \\  "route": { "final": "proxy" }
+        \\}
+    );
+    defer bad_required.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(bad_required.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "outbounds[0].tls.required_alpn: not present in alpn",
+        diagnostic.message(),
+    );
+
+    var duplicate = try fromJson(std.testing.allocator,
+        \\{
+        \\  "inbounds": [
+        \\    { "tag": "vless", "protocol": "vless", "listen": "127.0.0.1:443",
+        \\      "uuid": "00112233-4455-6677-8899-aabbccddeeff",
+        \\      "tls": { "certificate": "cert.pem", "private_key": "key.pem",
+        \\               "alpn": ["h2", "h2"] } }
+        \\  ]
+        \\}
+    );
+    defer duplicate.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(duplicate.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "inbounds[0].tls.alpn[1]: duplicate 'h2'",
         diagnostic.message(),
     );
 }

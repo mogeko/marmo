@@ -53,7 +53,7 @@ pub fn readRecord(
     input: *std.Io.Reader,
     buffer: []u8,
 ) ReadError![]u8 {
-    std.debug.assert(buffer.len >= record_header_len);
+    if (buffer.len < record_header_len) return error.ProtocolViolation;
     var header: [record_header_len]u8 = undefined;
     readExact(input, &header) catch |err| switch (err) {
         error.EndOfStream => return error.EndOfStream,
@@ -77,7 +77,7 @@ pub fn writePlain(
     content_type: u8,
     payload: []const u8,
 ) std.Io.Writer.Error!void {
-    std.debug.assert(payload.len <= max_plaintext);
+    if (payload.len > max_plaintext) return error.WriteFailed;
     var header: [record_header_len]u8 = .{
         content_type,
         0x03,
@@ -144,6 +144,7 @@ pub fn open(keys: *Keys, record: []const u8, out: []u8) OpenError!Opened {
 
     const ciphertext = record[record_header_len..][0 .. ciphertext_len - tag_len];
     const tag = record[record.len - tag_len ..][0..tag_len];
+    if (ciphertext.len > max_plaintext + 1) return error.ProtocolViolation;
     if (out.len < ciphertext.len) return error.ProtocolViolation;
 
     const nonce = makeNonce(keys.iv, keys.seq);

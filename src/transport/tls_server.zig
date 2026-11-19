@@ -236,6 +236,11 @@ pub const TlsServerStream = struct {
     }
 
     fn readFailure(self: *TlsServerStream) Stream.ReadError {
+        if (self.socket_reader.err) |inner| switch (inner) {
+            error.Canceled => return error.Canceled,
+            error.ConnectionReset => return error.ConnectionReset,
+            else => {},
+        };
         return switch (self.server.readError() orelse return error.Unexpected) {
             error.Canceled => error.Canceled,
             error.ProtocolViolation, error.HandshakeFailed => error.ProtocolViolation,

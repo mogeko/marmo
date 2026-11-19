@@ -23,6 +23,7 @@ pub const Params = struct {
     issuer_key: ?Ecdsa.KeyPair = null,
     san: ?[]const u8 = "localhost",
     ca: bool = false,
+    path_len: ?u16 = null,
     include_basic_constraints: bool = false,
     include_key_usage: bool = false,
     eku_server_auth: bool = false,
@@ -194,10 +195,29 @@ fn buildExtensions(gpa: std.mem.Allocator, params: Params) ![]u8 {
         );
     }
     if (params.include_basic_constraints) {
-        const value = if (params.ca)
-            try tlv(gpa, 0x30, &.{ 0x01, 0x01, 0xff })
-        else
-            try tlv(gpa, 0x30, &.{});
+        var basic_content: [8]u8 = undefined;
+        var basic_len: usize = 0;
+        if (params.ca) {
+            basic_content[0] = 0x01;
+            basic_content[1] = 0x01;
+            basic_content[2] = 0xff;
+            basic_len = 3;
+            if (params.path_len) |limit| {
+                if (limit <= 0x7f) {
+                    basic_content[3] = 0x02;
+                    basic_content[4] = 0x01;
+                    basic_content[5] = @intCast(limit);
+                    basic_len = 6;
+                } else {
+                    basic_content[3] = 0x02;
+                    basic_content[4] = 0x02;
+                    basic_content[5] = @intCast(limit >> 8);
+                    basic_content[6] = @intCast(limit & 0xff);
+                    basic_len = 7;
+                }
+            }
+        }
+        const value = try tlv(gpa, 0x30, basic_content[0..basic_len]);
         defer gpa.free(value);
         try appendExtension(
             gpa,

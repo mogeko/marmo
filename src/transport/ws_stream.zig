@@ -44,6 +44,7 @@ pub const WsStream = struct {
     socket_read_buffer: [socket_buffer_len]u8 = undefined,
     socket_write_buffer: [socket_buffer_len]u8 = undefined,
 
+    /// Takes ownership of `inner` on success; the caller closes it on error.
     pub fn createClient(
         io: std.Io,
         gpa: std.mem.Allocator,
@@ -56,6 +57,7 @@ pub const WsStream = struct {
         if (result) |_| return self else |err| return err;
     }
 
+    /// Takes ownership of `inner` on success; the caller closes it on error.
     pub fn createServer(
         io: std.Io,
         gpa: std.mem.Allocator,

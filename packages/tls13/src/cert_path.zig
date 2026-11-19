@@ -52,7 +52,7 @@ pub fn verifyServerChain(
 
     var index: usize = 1;
     while (index < chain.len) : (index += 1) {
-        try checkIssuer(chain[index]);
+        try checkIssuer(chain[index], params.host, index - 1);
         const subject = parse(chain[index]) catch
             return error.CertificateRejected;
         try rejectWeakSignature(subject);
@@ -108,13 +108,77 @@ fn rejectWeakSignature(subject: Certificate.Parsed) Error!void {
     }
 }
 
-fn checkIssuer(der_bytes: []const u8) Error!void {
+fn checkIssuer(
+    der_bytes: []const u8,
+    host: ?[]const u8,
+    ca_below: usize,
+) Error!void {
     const extensions = parseExtensions(der_bytes, .issuer) catch
         return error.CertificateRejected;
     if (!extensions.ca) return error.CertificateRejected;
     if (extensions.key_cert_sign) |allowed| {
         if (!allowed) return error.CertificateRejected;
     }
+    if (extensions.path_len) |limit| {
+        if (limit < ca_below) return error.CertificateRejected;
+    }
+    if (extensions.name_constraints) |constraints| {
+        if (host) |name| try checkNameConstraints(constraints, name);
+    }
+}
+
+fn checkNameConstraints(value: []const u8, host: []const u8) Error!void {
+    // IP address SANs are outside this DNS-only policy.
+    if (std.Io.net.IpAddress.parse(host, 0)) |_| return else |_| {}
+
+    const sequence = elementAt(value, 0) orelse
+        return error.CertificateRejected;
+    if (sequence.identifier.tag != .sequence) {
+        return error.CertificateRejected;
+    }
+    var permitted_present = false;
+    var permitted_match = false;
+    var cursor = sequence.slice.start;
+    while (cursor < sequence.slice.end) {
+        const subtree = elementAt(value, cursor) orelse
+            return error.CertificateRejected;
+        cursor = subtree.slice.end;
+        const kind = identifier(subtree);
+        if (kind != 0xa0 and kind != 0xa1) continue;
+        if (kind == 0xa0) permitted_present = true;
+        var base_cursor = subtree.slice.start;
+        while (base_cursor < subtree.slice.end) {
+            const entry = elementAt(value, base_cursor) orelse
+                return error.CertificateRejected;
+            base_cursor = entry.slice.end;
+            // GeneralSubtree is a SEQUENCE; its first child is GeneralName.
+            if (entry.identifier.tag != .sequence) continue;
+            const base = elementAt(value, entry.slice.start) orelse
+                return error.CertificateRejected;
+            if (identifier(base) != 0x82) continue;
+            const dns = value[base.slice.start..base.slice.end];
+            if (kind == 0xa1) {
+                if (dnsMatches(host, dns)) return error.CertificateRejected;
+            } else if (dnsMatches(host, dns)) {
+                permitted_match = true;
+            }
+        }
+    }
+    if (permitted_present and !permitted_match) {
+        return error.CertificateRejected;
+    }
+}
+
+fn dnsMatches(host: []const u8, constraint: []const u8) bool {
+    if (constraint.len == 0) return false;
+    if (constraint[0] == '.') {
+        return host.len > constraint.len and
+            std.ascii.endsWithIgnoreCase(host, constraint);
+    }
+    if (std.ascii.eqlIgnoreCase(host, constraint)) return true;
+    return host.len > constraint.len and
+        host[host.len - constraint.len - 1] == '.' and
+        std.ascii.endsWithIgnoreCase(host, constraint);
 }
 
 const ExtensionKind = enum { leaf, issuer };
@@ -122,6 +186,8 @@ const ExtensionKind = enum { leaf, issuer };
 const Extensions = struct {
     ca: bool = false,
     key_cert_sign: ?bool = null,
+    path_len: ?u16 = null,
+    name_constraints: ?[]const u8 = null,
 };
 
 fn parseExtensions(
@@ -210,7 +276,9 @@ fn parseExtensionList(
         }
         const value = bytes[value_elem.slice.start..value_elem.slice.end];
         if (std.mem.eql(u8, oid, &oid_basic_constraints)) {
-            extensions.ca = try parseBasicConstraints(value);
+            const basic = try parseBasicConstraints(value);
+            extensions.ca = basic.ca;
+            extensions.path_len = basic.path_len;
         } else if (std.mem.eql(u8, oid, &oid_key_usage)) {
             extensions.key_cert_sign = try parseKeyUsage(value);
         } else if (std.mem.eql(u8, oid, &oid_ext_key_usage)) {
@@ -219,27 +287,57 @@ fn parseExtensionList(
             }
         } else if (std.mem.eql(u8, oid, &oid_subject_alt_name)) {
             // Host-name validation is already handled by Certificate.Parsed.
+        } else if (std.mem.eql(u8, oid, &oid_name_constraints)) {
+            extensions.name_constraints = value;
         } else if (critical) {
             return error.CertificateRejected;
         }
     }
 }
 
-fn parseBasicConstraints(value: []const u8) Error!bool {
+const BasicConstraints = struct {
+    ca: bool = false,
+    path_len: ?u16 = null,
+};
+
+fn parseBasicConstraints(value: []const u8) Error!BasicConstraints {
     const sequence = elementAt(value, 0) orelse
         return error.CertificateRejected;
     if (sequence.identifier.tag != .sequence) {
         return error.CertificateRejected;
     }
-    const cursor = sequence.slice.start;
-    if (cursor >= sequence.slice.end) return false;
+    var result: BasicConstraints = .{};
+    var cursor = sequence.slice.start;
+    if (cursor >= sequence.slice.end) return result;
     const boolean = elementAt(value, cursor) orelse
         return error.CertificateRejected;
-    if (boolean.identifier.tag != .boolean) return false;
-    if (boolean.slice.end != boolean.slice.start + 1) {
-        return error.CertificateRejected;
+    if (boolean.identifier.tag == .boolean) {
+        if (boolean.slice.end != boolean.slice.start + 1) {
+            return error.CertificateRejected;
+        }
+        result.ca = value[boolean.slice.start] != 0;
+        cursor = boolean.slice.end;
     }
-    return value[boolean.slice.start] != 0;
+    if (cursor < sequence.slice.end) {
+        const integer = elementAt(value, cursor) orelse
+            return error.CertificateRejected;
+        if (integer.identifier.tag != .integer) {
+            return error.CertificateRejected;
+        }
+        const bytes = value[integer.slice.start..integer.slice.end];
+        if (bytes.len == 0 or bytes.len > 2) {
+            return error.CertificateRejected;
+        }
+        var path_len: u16 = 0;
+        for (bytes) |byte| {
+            path_len = std.math.mul(u16, path_len, 256) catch
+                return error.CertificateRejected;
+            path_len = std.math.add(u16, path_len, byte) catch
+                return error.CertificateRejected;
+        }
+        result.path_len = path_len;
+    }
+    return result;
 }
 
 fn parseKeyUsage(value: []const u8) Error!bool {
@@ -299,6 +397,7 @@ const oid_basic_constraints = [_]u8{ 0x55, 0x1d, 0x13 };
 const oid_key_usage = [_]u8{ 0x55, 0x1d, 0x0f };
 const oid_ext_key_usage = [_]u8{ 0x55, 0x1d, 0x25 };
 const oid_subject_alt_name = [_]u8{ 0x55, 0x1d, 0x11 };
+const oid_name_constraints = [_]u8{ 0x55, 0x1d, 0x1e };
 const oid_server_auth = [_]u8{
     0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01,
 };
@@ -307,11 +406,36 @@ test "basicConstraints and keyUsage are parsed" {
     const ca = [_]u8{
         0x30, 0x06, 0x01, 0x01, 0xff, 0x02, 0x01, 0x00,
     };
-    try std.testing.expect(try parseBasicConstraints(&ca));
+    try std.testing.expect((try parseBasicConstraints(&ca)).ca);
 
     const not_ca = [_]u8{ 0x30, 0x00 };
-    try std.testing.expect(!try parseBasicConstraints(&not_ca));
+    try std.testing.expect(!(try parseBasicConstraints(&not_ca)).ca);
 
     const usage = [_]u8{ 0x03, 0x02, 0x02, 0x04 };
     try std.testing.expect(try parseKeyUsage(&usage));
+}
+
+test "name constraints permit and exclude DNS subtrees" {
+    const permitted = [_]u8{
+        0x30, 0x11, 0xa0, 0x0f, 0x30, 0x0d, 0x82, 0x0b,
+        'e',  'x',  'a',  'm',  'p',  'l',  'e',  '.',
+        'c',  'o',  'm',
+    };
+    try checkNameConstraints(&permitted, "proxy.example.com");
+    try checkNameConstraints(&permitted, "example.com");
+    try std.testing.expectError(
+        error.CertificateRejected,
+        checkNameConstraints(&permitted, "other.test"),
+    );
+
+    const excluded = [_]u8{
+        0x30, 0x11, 0xa1, 0x0f, 0x30, 0x0d, 0x82, 0x0b,
+        'e',  'x',  'a',  'm',  'p',  'l',  'e',  '.',
+        'c',  'o',  'm',
+    };
+    try checkNameConstraints(&excluded, "other.test");
+    try std.testing.expectError(
+        error.CertificateRejected,
+        checkNameConstraints(&excluded, "proxy.example.com"),
+    );
 }

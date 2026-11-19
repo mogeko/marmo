@@ -642,6 +642,8 @@ fn compileTlsTransport(
         tls_config.insecure,
         @as(u64, tls_config.handshake_timeout_s) * std.time.ns_per_s,
     );
+    tls_dialer.alpn_protocols = tls_config.alpn orelse &.{};
+    tls_dialer.required_alpn = tls_config.required_alpn;
     return .{
         .dialer = tls_dialer.asDialer(),
         .cleanup = cleanupTlsDialer,
@@ -805,6 +807,7 @@ fn loadInboundTls(
             return error.InvalidConfig;
         },
     };
+    options.alpn_protocols = tls.alpn orelse &.{};
     options.handshake_timeout_ns =
         @as(u64, tls.handshake_timeout_s) * std.time.ns_per_s;
     return options;

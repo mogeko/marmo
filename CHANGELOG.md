@@ -19,6 +19,18 @@ and behavior may change between minor releases.
   close state under the write lock.
 - Stream adapters track in-flight operations so `close` unblocks I/O and waits
   before freeing connection state.
+- TLS certificate paths also enforce `pathLenConstraint`, DNS name
+  constraints, and strict supported-version/extension parsing; TLS ALPN is
+  configurable through `tls.alpn`/`tls.required_alpn`; secret stack copies are
+  zeroized.
+- HTTP/2 serializes writers, validates flow-control arithmetic, enforces
+  optional server paths and request pseudo-headers, bounds literal headers,
+  rejects invalid header encoding/order, sends client `ENABLE_PUSH=0`, zeroes
+  header storage on release, and adds `tls_server_hello` fuzzing.
+- WebSocket validates close codes/UTF-8 reasons, rejects strict-handshake
+  violations, caps messages at 1 MiB/1024 fragments and control frames per
+  read, uses a 4 KiB masking scratch buffer, and adds stateful connection and
+  handshake fuzz targets.
 
 ### Added
 

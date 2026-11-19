@@ -142,18 +142,22 @@ The client is TLS 1.3 only:
 - X25519, `TLS_AES_128_GCM_SHA256`, and server certificates using ECDSA
   P-256/P-384, Ed25519, or RSA with PKCS#1 v1.5/PSS signatures.
 - Certificate-chain verification against the system CA bundle, including
-  issuer `basicConstraints CA:TRUE`, `keyUsage keyCertSign`, and leaf EKU;
-  host-name verification through `server_name` is independent of chain
-  verification, so `verify = false` still pins the host when a name is present.
+  issuer `basicConstraints CA:TRUE`, `keyUsage keyCertSign`, `pathLenConstraint`,
+  DNS name constraints, and leaf EKU; host-name verification through
+  `server_name` is independent of chain verification, so `verify = false`
+  still pins the host when a name is present.
 - ALPN is offered from `Options.alpn_protocols`; a server selection that was
-  not offered fails the handshake. `negotiatedProtocol()` returns the result.
+  not offered fails the handshake. `required_alpn` makes a specific selection
+  mandatory. `negotiatedProtocol()` returns the result.
 - Post-handshake `NewSessionTicket` is ignored; `KeyUpdate` is rejected
   because this session does not implement key updates. Post-handshake alerts
   must be encrypted; a plaintext alert is a protocol error.
 - A missing `close_notify` is a truncation error unless
   `allow_truncation_attacks` is set; the root adapters default to strict
   handling and map truncation to `ConnectionReset`.
-- No client authentication, PSK, tickets, or 0-RTT.
+- No client authentication, PSK, tickets, or 0-RTT. Supported versions and
+  known extensions are parsed strictly; duplicate known extensions fail the
+  handshake.
 
 ## Replacement
 

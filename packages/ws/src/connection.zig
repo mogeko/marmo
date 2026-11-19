@@ -12,6 +12,10 @@ pub const Error = error{
     Unexpected,
 };
 
+pub const max_message = 1024 * 1024;
+pub const max_controls_per_read = 32;
+pub const max_fragments_per_message = 1024;
+
 pub const ClientOptions = struct {
     host: []const u8,
     path: []const u8 = "/",
@@ -30,17 +34,21 @@ pub const Connection = struct {
     pending_len: usize = 0,
     pending_offset: usize = 0,
     frame_payload: [frame.max_payload]u8 = undefined,
-    mask_buffer: [frame.max_payload]u8 = undefined,
+    mask_buffer: [frame.max_mask_scratch]u8 = undefined,
     in_message: bool = false,
+    message_len: usize = 0,
+    fragments: usize = 0,
     eof: bool = false,
     close_sent: bool = false,
 
     pub fn read(self: *Connection, buffers: [][]u8) Error!usize {
+        if (totalCapacity(buffers) == 0) return error.Unexpected;
         if (self.pending_offset < self.pending_len) {
             return self.copyPending(buffers);
         }
         if (self.eof) return 0;
 
+        var controls: usize = 0;
         while (true) {
             const parsed = frame.read(
                 self.input,
@@ -55,6 +63,11 @@ pub const Connection = struct {
             switch (parsed.opcode) {
                 frame.opcode_binary, frame.opcode_text => {
                     if (self.in_message) return error.ProtocolViolation;
+                    if (parsed.payload.len > max_message) {
+                        return error.ProtocolViolation;
+                    }
+                    self.message_len = parsed.payload.len;
+                    self.fragments = 1;
                     self.in_message = !parsed.fin;
                     if (parsed.payload.len == 0) continue;
                     self.pending_len = parsed.payload.len;
@@ -63,17 +76,37 @@ pub const Connection = struct {
                 },
                 frame.opcode_continuation => {
                     if (!self.in_message) return error.ProtocolViolation;
+                    self.message_len = std.math.add(
+                        usize,
+                        self.message_len,
+                        parsed.payload.len,
+                    ) catch return error.ProtocolViolation;
+                    if (self.message_len > max_message) {
+                        return error.ProtocolViolation;
+                    }
+                    self.fragments += 1;
+                    if (self.fragments > max_fragments_per_message) {
+                        return error.ProtocolViolation;
+                    }
                     self.in_message = !parsed.fin;
                     if (parsed.payload.len == 0) continue;
                     self.pending_len = parsed.payload.len;
                     self.pending_offset = 0;
                     return self.copyPending(buffers);
                 },
-                frame.opcode_ping => try self.writeControl(
-                    frame.opcode_pong,
-                    parsed.payload,
-                ),
-                frame.opcode_pong => {},
+                frame.opcode_ping => {
+                    controls += 1;
+                    if (controls > max_controls_per_read) {
+                        return error.ProtocolViolation;
+                    }
+                    try self.writeControl(frame.opcode_pong, parsed.payload);
+                },
+                frame.opcode_pong => {
+                    controls += 1;
+                    if (controls > max_controls_per_read) {
+                        return error.ProtocolViolation;
+                    }
+                },
                 frame.opcode_close => {
                     try self.receiveClose(parsed.payload);
                     return 0;
@@ -175,18 +208,37 @@ pub const Connection = struct {
 
     fn receiveClose(self: *Connection, payload: []const u8) Error!void {
         if (payload.len == 1) return error.ProtocolViolation;
+        var code: ?u16 = null;
+        if (payload.len >= 2) {
+            code = std.mem.readInt(u16, payload[0..2], .big);
+        }
+        var status: u16 = 1000;
+        if (code) |value| {
+            if (!validCloseCode(value)) status = 1002;
+        }
+        if (payload.len > 2 and
+            !std.unicode.utf8ValidateSlice(payload[2..]))
+        {
+            status = 1007;
+        }
+
         self.write_lock.lock(self.io) catch return error.Canceled;
         defer self.write_lock.unlock(self.io);
         if (!self.close_sent) {
-            try self.writeFrameLocked(
-                frame.opcode_close,
-                true,
-                if (payload.len >= 2) payload[0..2] else &.{},
-            );
+            var status_payload = [_]u8{
+                @intCast(status >> 8),
+                @intCast(status & 0xff),
+            };
+            const response: []const u8 = if (status == 1000)
+                if (payload.len >= 2) payload[0..2] else &.{}
+            else
+                &status_payload;
+            try self.writeFrameLocked(frame.opcode_close, true, response);
             self.close_sent = true;
             self.output.flush() catch return error.Unexpected;
         }
         self.eof = true;
+        if (status != 1000) return error.ProtocolViolation;
     }
 };
 
@@ -230,7 +282,9 @@ pub fn clientHandshake(
     output.flush() catch return error.HandshakeFailed;
 
     var head: handshake.Head = .{};
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&head));
     try handshake.readHead(input, &head);
+    try handshake.validateHead(head.bytes());
     try validateClientResponse(head.bytes(), &key);
 }
 
@@ -250,7 +304,9 @@ pub fn serverHandshake(
     };
 
     var head: handshake.Head = .{};
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&head));
     try handshake.readHead(input, &head);
+    try handshake.validateHead(head.bytes());
     const key = try validateServerRequest(head.bytes(), options.path);
 
     var accept: [28]u8 = undefined;
@@ -269,6 +325,13 @@ pub fn serverHandshake(
 }
 
 fn validateClientResponse(head: []const u8, key: *const [24]u8) Error!void {
+    if (handshake.headerCount(head, "upgrade") != 1 or
+        handshake.headerCount(head, "sec-websocket-accept") != 1 or
+        handshake.headerCount(head, "content-length") != 0 or
+        handshake.headerCount(head, "transfer-encoding") != 0)
+    {
+        return error.HandshakeFailed;
+    }
     const first_line_end = std.mem.indexOf(u8, head, "\r\n") orelse
         return error.HandshakeFailed;
     const status = head[0..first_line_end];
@@ -302,6 +365,15 @@ fn validateServerRequest(head: []const u8, path: []const u8) Error![]const u8 {
     const host = handshake.headerValue(head, "host") orelse
         return error.HandshakeFailed;
     if (host.len == 0) return error.HandshakeFailed;
+    if (handshake.headerCount(head, "host") != 1 or
+        handshake.headerCount(head, "upgrade") != 1 or
+        handshake.headerCount(head, "sec-websocket-version") != 1 or
+        handshake.headerCount(head, "sec-websocket-key") != 1 or
+        handshake.headerCount(head, "content-length") != 0 or
+        handshake.headerCount(head, "transfer-encoding") != 0)
+    {
+        return error.HandshakeFailed;
+    }
 
     if (!handshake.headerContainsToken(head, "upgrade", "websocket")) {
         return error.HandshakeFailed;
@@ -320,10 +392,36 @@ fn validateServerRequest(head: []const u8, path: []const u8) Error![]const u8 {
     return key;
 }
 
+fn totalCapacity(buffers: [][]u8) usize {
+    var total: usize = 0;
+    for (buffers) |buffer| total += buffer.len;
+    return total;
+}
+
+fn validCloseCode(code: u16) bool {
+    if (code >= 3000 and code <= 4999) return true;
+    return switch (code) {
+        1000,
+        1001,
+        1002,
+        1003,
+        1007,
+        1008,
+        1009,
+        1010,
+        1011,
+        1012,
+        1013,
+        1014,
+        => true,
+        else => false,
+    };
+}
+
 fn validHost(host: []const u8) bool {
     if (host.len == 0 or host.len > 255) return false;
     for (host) |byte| {
-        if (byte == '\r' or byte == '\n' or byte == ' ') return false;
+        if (byte <= 0x20 or byte == 0x7f) return false;
     }
     return true;
 }
@@ -331,7 +429,7 @@ fn validHost(host: []const u8) bool {
 fn validPath(path: []const u8) bool {
     if (path.len == 0 or path.len > 255 or path[0] != '/') return false;
     for (path) |byte| {
-        if (byte == '\r' or byte == '\n' or byte == ' ') return false;
+        if (byte <= 0x20 or byte == 0x7f) return false;
     }
     return true;
 }
@@ -510,5 +608,106 @@ test "a received close is echoed once and blocks further writes" {
     try std.testing.expectError(
         error.Closed,
         connection.write(&.{"after-close"}),
+    );
+}
+
+test "invalid close codes are answered with 1002" {
+    const allocator = std.testing.allocator;
+    var storage: std.Io.Writer.Allocating = .init(allocator);
+    defer storage.deinit();
+    var input = std.Io.Reader.fixed(&.{});
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &storage.writer,
+        .role = .server,
+    };
+    const payload = [_]u8{ 0x03, 0xed }; // 1005 is reserved
+    try std.testing.expectError(
+        error.ProtocolViolation,
+        connection.receiveClose(&payload),
+    );
+    const written = storage.written();
+    try std.testing.expect(written.len >= 4);
+    try std.testing.expectEqual(@as(u8, 0x03), written[2]);
+    try std.testing.expectEqual(@as(u8, 0xea), written[3]);
+}
+
+test "invalid close reason is answered with 1007" {
+    const allocator = std.testing.allocator;
+    var storage: std.Io.Writer.Allocating = .init(allocator);
+    defer storage.deinit();
+    var input = std.Io.Reader.fixed(&.{});
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &storage.writer,
+        .role = .server,
+    };
+    const payload = [_]u8{ 0x03, 0xe8, 0xff };
+    try std.testing.expectError(
+        error.ProtocolViolation,
+        connection.receiveClose(&payload),
+    );
+    const written = storage.written();
+    try std.testing.expectEqual(@as(u8, 0x03), written[2]);
+    try std.testing.expectEqual(@as(u8, 0xef), written[3]);
+}
+
+test "a fragmented message over 1 MiB is rejected" {
+    const allocator = std.testing.allocator;
+    var frames: std.Io.Writer.Allocating = .init(allocator);
+    defer frames.deinit();
+    var payload: [frame.max_payload]u8 = undefined;
+    @memset(&payload, 'x');
+    var scratch: [frame.max_mask_scratch]u8 = undefined;
+    var remaining: usize = 17;
+    while (remaining > 0) : (remaining -= 1) {
+        const first = remaining == 17;
+        const opcode = if (first) frame.opcode_binary else frame.opcode_continuation;
+        const fin = remaining == 1;
+        try frame.write(
+            std.testing.io,
+            &frames.writer,
+            .client,
+            opcode,
+            fin,
+            &payload,
+            &scratch,
+        );
+    }
+
+    var input = std.Io.Reader.fixed(frames.written());
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &output.writer,
+        .role = .server,
+    };
+    var buffer: [1024]u8 = undefined;
+    var buffers = [_][]u8{&buffer};
+    while (true) {
+        _ = connection.read(&buffers) catch |err| {
+            try std.testing.expectEqual(error.ProtocolViolation, err);
+            break;
+        };
+    }
+}
+
+test "zero-length read buffers are not clean EOF" {
+    var input = std.Io.Reader.fixed(&.{});
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &output.writer,
+        .role = .server,
+    };
+    try std.testing.expectError(
+        error.Unexpected,
+        connection.read(&.{}),
     );
 }

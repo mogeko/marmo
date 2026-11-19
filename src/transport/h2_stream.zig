@@ -17,6 +17,7 @@ pub const ClientOptions = struct {
 };
 
 pub const ServerOptions = struct {
+    path: ?[]const u8 = null,
     handshake_timeout_ns: u64 = default_handshake_timeout_ns,
 };
 
@@ -277,11 +278,12 @@ fn handshake(self: *H2Stream, options: HandshakeOptions) anyerror!void {
             };
             self.h2_stream = try self.mode.client.openStream(&headers);
         },
-        .server => {
-            self.mode = .{ .server = try http2.Server.init(
+        .server => |server_options| {
+            self.mode = .{ .server = try http2.Server.initWithOptions(
                 self.io,
                 &self.socket_reader.interface,
                 &self.socket_writer.interface,
+                .{ .path = server_options.path },
             ) };
             self.h2_stream = try self.mode.server.acceptStream();
             const headers = [_]http2.Header{

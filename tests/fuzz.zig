@@ -180,6 +180,14 @@ const FakeDispatch = struct {
     };
 };
 
+fn fuzzTlsServerHello(_: Context, smith: *std.testing.Smith) anyerror!void {
+    var buffer: [tls13.handshake.max_handshake]u8 = undefined;
+    const len = smith.slice(&buffer);
+    _ = tls13.handshake.parseServerHello(buffer[0..len]) catch |err| switch (err) {
+        error.HandshakeFailed => return,
+    };
+}
+
 fn fuzzWsFrame(_: Context, smith: *std.testing.Smith) anyerror!void {
     var input: [ws.max_frame_payload]u8 = undefined;
     const len = smith.slice(&input);
@@ -202,6 +210,43 @@ fn fuzzWsHandshake(_: Context, smith: *std.testing.Smith) anyerror!void {
     ws.handshake.readHead(&reader, &head) catch return;
     _ = ws.handshake.headerValue(head.bytes(), "sec-websocket-key");
     _ = ws.handshake.headerValue(head.bytes(), "upgrade");
+}
+
+fn fuzzWsConnection(ctx: Context, smith: *std.testing.Smith) anyerror!void {
+    var input_buffer: [64 * 1024]u8 = undefined;
+    const len = smith.slice(&input_buffer);
+    var input = std.Io.Reader.fixed(input_buffer[0..len]);
+    var output_buffer: [4096]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    var connection: ws.Connection = .{
+        .io = ctx.io,
+        .input = &input,
+        .output = &output,
+        .role = .server,
+    };
+    var buffer: [1024]u8 = undefined;
+    var buffers = [_][]u8{&buffer};
+    var iterations: usize = 0;
+    while (iterations < 256) : (iterations += 1) {
+        const read_len = connection.read(&buffers) catch return;
+        if (read_len == 0) return;
+    }
+}
+
+fn fuzzWsHandshakeValidate(ctx: Context, smith: *std.testing.Smith) anyerror!void {
+    var input_buffer: [ws.max_handshake]u8 = undefined;
+    const len = smith.slice(&input_buffer);
+    var reader = std.Io.Reader.fixed(input_buffer[0..len]);
+    var output_buffer: [512]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    var connection: ws.Connection = undefined;
+    ws.serverHandshake(
+        ctx.io,
+        &reader,
+        &output,
+        &connection,
+        .{},
+    ) catch return;
 }
 
 fn fuzzHttp2Frame(_: Context, smith: *std.testing.Smith) anyerror!void {
@@ -886,8 +931,11 @@ pub const targets = [_]Target{
     .{ .name = "tls_server_handshake_mutated", .max_input = 1024, .run = fuzzTlsServerHandshakeMutated },
     .{ .name = "tls_credentials", .max_input = 4096, .run = fuzzTlsCredentials },
     .{ .name = "tls_key_schedule", .max_input = 64, .run = fuzzTlsKeySchedule },
+    .{ .name = "tls_server_hello", .max_input = 16 * 1024, .run = fuzzTlsServerHello },
     .{ .name = "ws_frame", .max_input = ws.max_frame_payload, .run = fuzzWsFrame },
     .{ .name = "ws_handshake", .max_input = ws.max_handshake, .run = fuzzWsHandshake },
+    .{ .name = "ws_connection", .max_input = 64 * 1024, .run = fuzzWsConnection },
+    .{ .name = "ws_handshake_validate", .max_input = ws.max_handshake, .run = fuzzWsHandshakeValidate },
     .{ .name = "http2_frame", .max_input = http2.max_frame_size + http2.frame.header_len, .run = fuzzHttp2Frame },
     .{ .name = "http2_hpack", .max_input = http2.max_header_block, .run = fuzzHttp2Hpack },
     .{ .name = "vless_request", .max_input = 1024, .run = fuzzVlessRequest },
@@ -1039,6 +1087,12 @@ test "fuzz corpus: WebSocket and HTTP/2 parsers" {
     });
     try std.testing.fuzz(testContext(), fuzzWsHandshake, .{
         .corpus = &.{ "GET / HTTP/1.1\r\n\r\n", "HTTP/1.1 101\r\n\r\n" },
+    });
+    try std.testing.fuzz(testContext(), fuzzWsConnection, .{
+        .corpus = &.{ "\x82\x05hello", "\x88\x02\x03\xe8" },
+    });
+    try std.testing.fuzz(testContext(), fuzzWsHandshakeValidate, .{
+        .corpus = &.{"GET / HTTP/1.1\r\nHost: x\r\n\r\n"},
     });
     try std.testing.fuzz(testContext(), fuzzHttp2Frame, .{
         .corpus = &.{ "\x00\x00\x03\x00\x01\x00\x00\x00\x01abc", "" },

@@ -46,6 +46,55 @@ pub fn readHead(input: *std.Io.Reader, head: *Head) Error!void {
     }
 }
 
+/// Rejects obs-fold, whitespace before the colon, control bytes, and malformed
+/// field names before any header is trusted.
+pub fn validateHead(head: []const u8) Error!void {
+    var lines = std.mem.splitSequence(u8, head, "\r\n");
+    const start_line = lines.next() orelse return error.HandshakeFailed;
+    if (start_line.len == 0) return error.HandshakeFailed;
+    while (lines.next()) |line| {
+        if (line.len == 0) return;
+        if (line[0] == ' ' or line[0] == '\t') {
+            return error.HandshakeFailed;
+        }
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse
+            return error.HandshakeFailed;
+        if (colon == 0) return error.HandshakeFailed;
+        if (line[colon - 1] == ' ' or line[colon - 1] == '\t') {
+            return error.HandshakeFailed;
+        }
+        for (line[0..colon]) |byte| {
+            if (!isTokenChar(byte)) return error.HandshakeFailed;
+        }
+        for (line[colon + 1 ..]) |byte| {
+            if (byte == 0 or byte == 0x7f) return error.HandshakeFailed;
+            if (byte < 0x20 and byte != '\t') return error.HandshakeFailed;
+        }
+    }
+    return error.HandshakeFailed;
+}
+
+pub fn headerCount(head: []const u8, name: []const u8) usize {
+    var count: usize = 0;
+    var lines = std.mem.splitSequence(u8, head, "\r\n");
+    _ = lines.next();
+    while (lines.next()) |line| {
+        if (line.len == 0) break;
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const field = std.mem.trim(u8, line[0..colon], " \t");
+        if (std.ascii.eqlIgnoreCase(field, name)) count += 1;
+    }
+    return count;
+}
+
+fn isTokenChar(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or
+        byte == '!' or byte == '#' or byte == '$' or byte == '%' or
+        byte == '&' or byte == '\'' or byte == '*' or byte == '+' or
+        byte == '-' or byte == '.' or byte == '^' or byte == '_' or
+        byte == '`' or byte == '|' or byte == '~';
+}
+
 pub fn headerValue(head: []const u8, name: []const u8) ?[]const u8 {
     var lines = std.mem.splitSequence(u8, head, "\r\n");
     _ = lines.next();
@@ -64,13 +113,21 @@ pub fn headerContainsToken(
     name: []const u8,
     token: []const u8,
 ) bool {
-    const value = headerValue(head, name) orelse return false;
-    var parts = std.mem.splitScalar(u8, value, ',');
-    while (parts.next()) |part| {
-        if (std.ascii.eqlIgnoreCase(
-            std.mem.trim(u8, part, " \t"),
-            token,
-        )) return true;
+    var lines = std.mem.splitSequence(u8, head, "\r\n");
+    _ = lines.next();
+    while (lines.next()) |line| {
+        if (line.len == 0) break;
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const field = std.mem.trim(u8, line[0..colon], " \t");
+        if (!std.ascii.eqlIgnoreCase(field, name)) continue;
+        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        var parts = std.mem.splitScalar(u8, value, ',');
+        while (parts.next()) |part| {
+            if (std.ascii.eqlIgnoreCase(
+                std.mem.trim(u8, part, " \t"),
+                token,
+            )) return true;
+        }
     }
     return false;
 }
@@ -142,4 +199,31 @@ test "readHead preserves bytes after the terminator" {
         head.bytes(),
     );
     try std.testing.expectEqualStrings("\x82\x05hello", input.buffered());
+}
+
+test "strict head validation rejects obs-fold and whitespace before colon" {
+    try std.testing.expectError(
+        error.HandshakeFailed,
+        validateHead("GET / HTTP/1.1\r\n Upgrade: websocket\r\n\r\n"),
+    );
+    try std.testing.expectError(
+        error.HandshakeFailed,
+        validateHead("GET / HTTP/1.1\r\nUpgrade : websocket\r\n\r\n"),
+    );
+    try std.testing.expectError(
+        error.HandshakeFailed,
+        validateHead("GET / HTTP/1.1\r\nX-Test: bad\x00value\r\n\r\n"),
+    );
+    try validateHead("GET / HTTP/1.1\r\nUpgrade: websocket\r\n\r\n");
+}
+
+test "headerCount counts duplicate fields" {
+    const head =
+        "GET / HTTP/1.1\r\n" ++
+        "Host: a\r\n" ++
+        "Host: b\r\n" ++
+        "Connection: keep-alive\r\n" ++
+        "Connection: Upgrade\r\n\r\n";
+    try std.testing.expectEqual(@as(usize, 2), headerCount(head, "host"));
+    try std.testing.expect(headerContainsToken(head, "connection", "upgrade"));
 }

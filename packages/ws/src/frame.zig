@@ -3,6 +3,7 @@
 const std = @import("std");
 
 pub const max_payload = 64 * 1024;
+pub const max_mask_scratch = 4 * 1024;
 pub const max_control_payload = 125;
 pub const header_max = 14;
 
@@ -132,7 +133,7 @@ pub fn write(
     }
 
     if (masked) {
-        if (scratch.len < payload.len) return error.ProtocolViolation;
+        if (scratch.len == 0) return error.ProtocolViolation;
         var mask: [4]u8 = undefined;
         std.Io.randomSecure(io, &mask) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
@@ -140,12 +141,18 @@ pub fn write(
         };
         @memcpy(header[header_len..][0..4], &mask);
         header_len += 4;
-        for (payload, 0..) |byte, index| {
-            scratch[index] = byte ^ mask[index % 4];
-        }
         output.writeAll(header[0..header_len]) catch return error.Unexpected;
-        output.writeAll(scratch[0..payload.len]) catch
-            return error.Unexpected;
+        var offset: usize = 0;
+        while (offset < payload.len) {
+            const chunk_len = @min(scratch.len, payload.len - offset);
+            for (0..chunk_len) |index| {
+                scratch[index] = payload[offset + index] ^
+                    mask[(offset + index) % 4];
+            }
+            output.writeAll(scratch[0..chunk_len]) catch
+                return error.Unexpected;
+            offset += chunk_len;
+        }
         return;
     }
 

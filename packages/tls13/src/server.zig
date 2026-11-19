@@ -71,7 +71,12 @@ pub const Server = struct {
         output: *std.Io.Writer,
         options: ServerOptions,
     ) Error!*Server {
-        try validateOptions(options);
+        try validateOptions(&options);
+        var owned_options = options;
+        defer std.crypto.secureZero(
+            u8,
+            std.mem.asBytes(&owned_options.private_key),
+        );
 
         const self = try gpa.create(Server);
         errdefer {
@@ -97,7 +102,7 @@ pub const Server = struct {
             },
             .allow_truncation_attacks = options.allow_truncation_attacks,
         };
-        try self.runHandshake(io, options);
+        try self.runHandshake(io, &owned_options);
         return self;
     }
 
@@ -154,7 +159,11 @@ pub const Server = struct {
         gpa.destroy(self);
     }
 
-    fn runHandshake(self: *Server, io: std.Io, options: ServerOptions) Error!void {
+    fn runHandshake(
+        self: *Server,
+        io: std.Io,
+        options: *const ServerOptions,
+    ) Error!void {
         const client_hello_message = try self.readHandshake(null);
         const client_hello = handshake.parseClientHello(
             client_hello_message,
@@ -163,12 +172,20 @@ pub const Server = struct {
         if (client_hello.server_name) |name| {
             self.server_name_len = @intCast(name.len);
         }
-        try selectAlpn(
+        selectAlpn(
             client_hello.alpn_protocols,
             options.alpn_protocols,
             &self.alpn_buf,
             &self.alpn_len,
-        );
+        ) catch |err| {
+            record.writePlain(
+                self.output,
+                record.content_type_alert,
+                &.{ 2, 120 },
+            ) catch {};
+            self.output.flush() catch {};
+            return err;
+        };
         self.transcript.update(client_hello_message);
 
         var key_pair = std.crypto.dh.X25519.KeyPair.generate(io);
@@ -186,7 +203,10 @@ pub const Server = struct {
             hello_hash,
         );
         self.write_keys = self.key_schedule.server_hs_keys;
-        try self.sendServerFlight(options.certificate_chain, options.private_key);
+        try self.sendServerFlight(
+            options.certificate_chain,
+            &options.private_key,
+        );
         self.output.flush() catch return error.HandshakeFailed;
 
         const handshake_hash = handshake.transcriptHash(&self.transcript);
@@ -261,7 +281,7 @@ pub const Server = struct {
     fn sendServerFlight(
         self: *Server,
         chain: []const []const u8,
-        private_key: Ecdsa.KeyPair,
+        private_key: *const Ecdsa.KeyPair,
     ) Error!void {
         try self.sendEncryptedExtensions();
         try self.sendCertificate(chain);
@@ -310,7 +330,7 @@ pub const Server = struct {
 
     fn sendCertificateVerify(
         self: *Server,
-        private_key: Ecdsa.KeyPair,
+        private_key: *const Ecdsa.KeyPair,
     ) Error!void {
         const transcript_hash = handshake.transcriptHash(&self.transcript);
         const context = "TLS 1.3, server CertificateVerify";
@@ -618,7 +638,7 @@ fn selectAlpn(
     return error.HandshakeFailed;
 }
 
-fn validateOptions(options: ServerOptions) Error!void {
+fn validateOptions(options: *const ServerOptions) Error!void {
     for (options.alpn_protocols) |protocol| {
         if (protocol.len == 0 or
             protocol.len > handshake.max_alpn_protocol)
@@ -843,6 +863,7 @@ test "TLS 1.3 server and client exchange application data" {
             .server_name = "localhost",
             .verify = false,
             .alpn_protocols = &.{ "http/1.1", "h2" },
+            .required_alpn = "h2",
             .read_buffer = &plain_read,
             .write_buffer = &plain_write,
         },
@@ -1005,6 +1026,64 @@ test "certificate path accepts a CA:TRUE intermediate" {
             .verify_chain = false,
             .now_sec = now,
             .bundle = null,
+        }, &leaf),
+    );
+}
+
+test "certificate path enforces pathLenConstraint" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var root = try test_cert.generateCa(allocator, io, "marmo pathlen root");
+    defer root.deinit(allocator);
+    var inter1 = try test_cert.generateParams(allocator, io, .{
+        .common_name = "marmo pathlen intermediate",
+        .issuer_name = "marmo pathlen root",
+        .issuer_key = root.key_pair,
+        .san = null,
+        .ca = true,
+        .path_len = 0,
+        .include_basic_constraints = true,
+        .include_key_usage = true,
+    });
+    defer inter1.deinit(allocator);
+    var inter2 = try test_cert.generateParams(allocator, io, .{
+        .common_name = "marmo pathlen second",
+        .issuer_name = "marmo pathlen intermediate",
+        .issuer_key = inter1.key_pair,
+        .san = null,
+        .ca = true,
+        .include_basic_constraints = true,
+        .include_key_usage = true,
+    });
+    defer inter2.deinit(allocator);
+    var leaf_cert = try test_cert.generateParams(allocator, io, .{
+        .common_name = "proxy.test",
+        .issuer_name = "marmo pathlen second",
+        .issuer_key = inter2.key_pair,
+        .san = "proxy.test",
+        .include_basic_constraints = true,
+        .include_key_usage = true,
+        .eku_server_auth = true,
+    });
+    defer leaf_cert.deinit(allocator);
+
+    var bundle: std.crypto.Certificate.Bundle = .empty;
+    defer bundle.deinit(allocator);
+    const now = std.Io.Timestamp.now(io, .real).toSeconds();
+    try test_cert.addTrustedDer(&bundle, allocator, root.der, now);
+
+    var leaf: cert_path.Leaf = .{};
+    const chain = [_][]const u8{ leaf_cert.der, inter2.der, inter1.der };
+    try std.testing.expectError(
+        error.CertificateRejected,
+        cert_path.verifyServerChain(&chain, .{
+            .host = "proxy.test",
+            .verify_chain = true,
+            .now_sec = now,
+            .bundle = &bundle,
         }, &leaf),
     );
 }

@@ -295,7 +295,9 @@ fn appendHeader(
     value: []const u8,
 ) Error!void {
     if (header_count.* == headers.len) return error.Malformed;
-    if (name.len == 0) return error.Malformed;
+    if (name.len == 0 or name.len > max_name or value.len > max_value) {
+        return error.Malformed;
+    }
     const name_copy = try copyToStorage(storage, storage_used, name);
     const value_copy = try copyToStorage(storage, storage_used, value);
     headers[header_count.*] = .{
@@ -364,6 +366,7 @@ pub fn encodeHeader(
     name: []const u8,
     value: []const u8,
 ) Error!void {
+    if (!validName(name) or !validValue(value)) return error.Malformed;
     if (findStatic(name, value)) |index| {
         try encodeInt(output, pos, index, 7, 0x80);
         return;
@@ -411,6 +414,34 @@ fn encodeInt(
     if (pos.* >= output.len) return error.OutOfMemory;
     output[pos.*] = @intCast(remaining);
     pos.* += 1;
+}
+
+fn validName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    var start: usize = 0;
+    if (name[0] == ':') {
+        if (name.len == 1) return false;
+        start = 1;
+    }
+    for (name[start..]) |byte| {
+        if (byte >= 'A' and byte <= 'Z') return false;
+        const tchar = std.ascii.isAlphanumeric(byte) or
+            byte == '!' or byte == '#' or byte == '$' or byte == '%' or
+            byte == '&' or byte == '\'' or byte == '*' or byte == '+' or
+            byte == '-' or byte == '.' or byte == '^' or byte == '_' or
+            byte == '`' or byte == '|' or byte == '~';
+        if (!tchar) return false;
+    }
+    return true;
+}
+
+fn validValue(value: []const u8) bool {
+    for (value) |byte| {
+        if (byte == 0 or byte == '\r' or byte == '\n' or byte == 0x7f) {
+            return false;
+        }
+    }
+    return true;
 }
 
 fn findStatic(name: []const u8, value: []const u8) ?usize {
@@ -590,4 +621,40 @@ test "dynamic table keeps more than sixteen entries" {
     const second = try decoder.decode(&oldest, &storage, &headers);
     try std.testing.expectEqualStrings("x-00", second[0].name);
     try std.testing.expectEqualStrings("v-00", second[0].value);
+}
+
+test "encoder rejects invalid header names and values" {
+    var block: [256]u8 = undefined;
+    var pos: usize = 0;
+    try std.testing.expectError(
+        error.Malformed,
+        encodeHeader(&block, &pos, "X-Test", "value"),
+    );
+    try std.testing.expectError(
+        error.Malformed,
+        encodeHeader(&block, &pos, "x-test", "bad\r\nvalue"),
+    );
+    try std.testing.expectError(
+        error.Malformed,
+        encodeHeader(&block, &pos, "", "value"),
+    );
+}
+
+test "literal headers are bounded by max_name and max_value" {
+    var block: [max_header_list]u8 = undefined;
+    var pos: usize = 0;
+    var large_value: [max_value + 1]u8 = undefined;
+    @memset(&large_value, 'a');
+    block[pos] = 0x00;
+    pos += 1;
+    try encodeString(&block, &pos, "x-test");
+    try encodeString(&block, &pos, &large_value);
+
+    var decoder = Decoder.init();
+    var storage: [max_header_list]u8 = undefined;
+    var headers: [4]Header = undefined;
+    try std.testing.expectError(
+        error.Malformed,
+        decoder.decode(block[0..pos], &storage, &headers),
+    );
 }

@@ -64,3 +64,12 @@ wrap marmo's `Stream` and require ALPN `h2`.
 - Tested by HPACK known-answer vectors, frame truncation/overflow tests, an
   in-tree client/server loopback exchange over `std.testing.Reader`/`Writer`,
   and TLS ALPN integration. Malformed input returns typed errors.
+
+## Amendment (2026-11-20)
+
+The transport now sends `SETTINGS_ENABLE_PUSH = 0` from the client and accepts
+0/1 from clients on the server; treats peer `END_STREAM` as a read half-close;
+validates HEADERS against the active stream; reports RST_STREAM and truncating
+GOAWAY as `ConnectionReset`; caps CONTINUATION at 16 frames; uses a byte-budgeted
+4 KiB HPACK table (up to 128 entries); serializes writers; and supports an
+optional `ServerOptions.path` plus request pseudo-header validation.

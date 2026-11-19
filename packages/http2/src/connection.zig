@@ -66,6 +66,7 @@ pub const Connection = struct {
     role: Role,
     input_mutex: std.Io.Mutex = .init,
     write_mutex: std.Io.Mutex = .init,
+    writer_serial: std.Io.Mutex = .init,
     window_event: std.Io.Event = .unset,
     decoder: hpack.Decoder = .{},
     frame_buffer: [frame.max_frame_size]u8 = undefined,
@@ -97,7 +98,10 @@ pub const Connection = struct {
     }
 
     pub fn deinit(self: *Connection) void {
-        _ = self;
+        std.crypto.secureZero(u8, &self.header_storage);
+        std.crypto.secureZero(u8, &self.header_block);
+        std.crypto.secureZero(u8, &self.pending);
+        std.crypto.secureZero(u8, &self.decoder.storage);
     }
 
     pub fn cancel(self: *Connection) void {
@@ -113,6 +117,7 @@ pub const Connection = struct {
         self.input_mutex.lock(self.io) catch return error.Canceled;
         defer self.input_mutex.unlock(self.io);
         if (stream_id != self.stream_id) return error.ProtocolViolation;
+        if (totalCapacity(buffers) == 0) return error.Unexpected;
         if (self.pending_offset < self.pending_len) {
             return self.copyPending(buffers);
         }
@@ -135,6 +140,8 @@ pub const Connection = struct {
         buffers: []const []const u8,
     ) Error!usize {
         if (stream_id != self.stream_id) return error.ProtocolViolation;
+        self.writer_serial.lock(self.io) catch return error.Canceled;
+        defer self.writer_serial.unlock(self.io);
         if (self.canceled.load(.acquire)) return error.Canceled;
         if (self.local_closed) return error.Closed;
         var total: usize = 0;
@@ -146,6 +153,8 @@ pub const Connection = struct {
     }
 
     fn closeStream(self: *Connection, stream_id: u32) Error!void {
+        self.writer_serial.lock(self.io) catch return error.Canceled;
+        defer self.writer_serial.unlock(self.io);
         self.write_mutex.lock(self.io) catch return error.Canceled;
         defer self.write_mutex.unlock(self.io);
         if (stream_id != self.stream_id or self.local_closed) return;
@@ -205,7 +214,14 @@ pub const Connection = struct {
                     parsed.payload[0..4],
                     .big,
                 ) & 0x7fffffff;
-                if (self.stream_id != 0 and last_stream_id < self.stream_id) {
+                const error_code = std.mem.readInt(
+                    u32,
+                    parsed.payload[4..8],
+                    .big,
+                );
+                if (error_code != 0 or
+                    (self.stream_id != 0 and last_stream_id < self.stream_id))
+                {
                     self.stream_aborted.store(true, .release);
                 }
                 self.window_event.set(self.io);
@@ -268,6 +284,11 @@ pub const Connection = struct {
             setting_initial_window_size => {
                 if (value > frame.max_window) return error.ProtocolViolation;
                 const delta = @as(i64, value) - self.peer_initial_window;
+                const current = self.send_window.load(.acquire);
+                const next = current + delta;
+                if (next > frame.max_window or next < -frame.max_window) {
+                    return error.ProtocolViolation;
+                }
                 _ = self.send_window.fetchAdd(delta, .acq_rel);
                 self.peer_initial_window = value;
                 self.window_event.set(self.io);
@@ -306,15 +327,17 @@ pub const Connection = struct {
         const increment = std.mem.readInt(u32, parsed.payload[0..4], .big) & 0x7fffffff;
         if (increment == 0) return error.ProtocolViolation;
         if (parsed.stream_id == 0) {
-            const current = self.conn_send_window.fetchAdd(increment, .acq_rel);
+            const current = self.conn_send_window.load(.acquire);
             if (current + increment > frame.max_window) {
                 return error.ProtocolViolation;
             }
+            _ = self.conn_send_window.fetchAdd(increment, .acq_rel);
         } else if (parsed.stream_id == self.stream_id) {
-            const current = self.send_window.fetchAdd(increment, .acq_rel);
+            const current = self.send_window.load(.acquire);
             if (current + increment > frame.max_window) {
                 return error.ProtocolViolation;
             }
+            _ = self.send_window.fetchAdd(increment, .acq_rel);
         }
         self.window_event.set(self.io);
     }
@@ -465,9 +488,19 @@ pub const Connection = struct {
     fn sendHeaders(self: *Connection, header_list: []const Header, end_stream: bool) Error!void {
         var block: [max_header_block]u8 = undefined;
         var block_len: usize = 0;
+        var regular_seen = false;
         for (header_list) |header| {
-            hpack.encodeHeader(&block, &block_len, header.name, header.value) catch
-                return error.OutOfMemory;
+            if (header.name.len != 0 and header.name[0] == ':') {
+                if (regular_seen) return error.ProtocolViolation;
+            } else {
+                regular_seen = true;
+            }
+            hpack.encodeHeader(&block, &block_len, header.name, header.value) catch |err| {
+                return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.Malformed => error.ProtocolViolation,
+                };
+            };
         }
 
         self.write_mutex.lock(self.io) catch return error.Canceled;
@@ -498,20 +531,80 @@ pub const Connection = struct {
     }
 
     fn sendOurSettings(self: *Connection) Error!void {
-        var payload: [18]u8 = undefined;
-        std.mem.writeInt(u16, payload[0..2], setting_max_concurrent_streams, .big);
-        std.mem.writeInt(u32, payload[2..6], 1, .big);
-        std.mem.writeInt(u16, payload[6..8], setting_initial_window_size, .big);
-        std.mem.writeInt(u32, payload[8..12], our_initial_window, .big);
-        std.mem.writeInt(u16, payload[12..14], setting_max_frame_size, .big);
-        std.mem.writeInt(u32, payload[14..18], frame.max_frame_size, .big);
-        try self.sendFrame(frame.type_settings, 0, 0, &payload);
+        var payload: [24]u8 = undefined;
+        var len: usize = 0;
+        if (self.role == .client) {
+            len = appendSetting(&payload, len, setting_enable_push, 0);
+        }
+        len = appendSetting(&payload, len, setting_max_concurrent_streams, 1);
+        len = appendSetting(
+            &payload,
+            len,
+            setting_initial_window_size,
+            our_initial_window,
+        );
+        len = appendSetting(
+            &payload,
+            len,
+            setting_max_frame_size,
+            frame.max_frame_size,
+        );
+        try self.sendFrame(frame.type_settings, 0, 0, payload[0..len]);
         try self.sendWindowUpdate(
             0,
             our_initial_window - frame.default_window,
         );
     }
 };
+
+fn appendSetting(
+    buffer: []u8,
+    offset: usize,
+    identifier: u16,
+    value: u32,
+) usize {
+    std.mem.writeInt(u16, buffer[offset..][0..2], identifier, .big);
+    std.mem.writeInt(u32, buffer[offset + 2 ..][0..4], value, .big);
+    return offset + 6;
+}
+
+fn totalCapacity(buffers: [][]u8) usize {
+    var total: usize = 0;
+    for (buffers) |buffer| total += buffer.len;
+    return total;
+}
+
+fn findHeader(headers: []const Header, name: []const u8) ?[]const u8 {
+    for (headers) |header| {
+        if (std.mem.eql(u8, header.name, name)) return header.value;
+    }
+    return null;
+}
+
+fn validateRequest(headers: []const Header, path: ?[]const u8) Error!void {
+    const method = findHeader(headers, ":method") orelse
+        return error.ProtocolViolation;
+    const authority = findHeader(headers, ":authority") orelse
+        return error.ProtocolViolation;
+    if (method.len == 0 or authority.len == 0) {
+        return error.ProtocolViolation;
+    }
+    const request_path = findHeader(headers, ":path");
+    if (!std.mem.eql(u8, method, "CONNECT")) {
+        const scheme = findHeader(headers, ":scheme") orelse
+            return error.ProtocolViolation;
+        const value = request_path orelse return error.ProtocolViolation;
+        if (scheme.len == 0 or value.len == 0) {
+            return error.ProtocolViolation;
+        }
+    }
+    if (path) |expected| {
+        const value = request_path orelse return error.ProtocolViolation;
+        if (!std.mem.eql(u8, value, expected)) {
+            return error.ProtocolViolation;
+        }
+    }
+}
 
 pub const Client = struct {
     connection: Connection,
@@ -552,20 +645,37 @@ pub const Client = struct {
     }
 };
 
+pub const ServerOptions = struct {
+    path: ?[]const u8 = null,
+};
+
 pub const Server = struct {
     connection: Connection,
+    path: ?[]const u8 = null,
 
     pub fn init(
         io: std.Io,
         input: *std.Io.Reader,
         output: *std.Io.Writer,
     ) Error!Server {
-        var server: Server = .{ .connection = .{
-            .io = io,
-            .input = input,
-            .output = output,
-            .role = .server,
-        } };
+        return initWithOptions(io, input, output, .{});
+    }
+
+    pub fn initWithOptions(
+        io: std.Io,
+        input: *std.Io.Reader,
+        output: *std.Io.Writer,
+        options: ServerOptions,
+    ) Error!Server {
+        var server: Server = .{
+            .connection = .{
+                .io = io,
+                .input = input,
+                .output = output,
+                .role = .server,
+            },
+            .path = options.path,
+        };
         var preface_buffer: [preface.len]u8 = undefined;
         frame.readExact(input, &preface_buffer, false) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
@@ -609,7 +719,7 @@ pub const Server = struct {
                         return error.ProtocolViolation;
                     }
                     const decoded = try self.connection.readHeaderBlock(parsed);
-                    _ = decoded;
+                    try validateRequest(decoded, self.path);
                     self.connection.stream_id = parsed.stream_id;
                     self.connection.send_window.store(
                         self.connection.peer_initial_window,
@@ -865,13 +975,18 @@ test "server accepts curl settings and responds to a no-body request" {
     try frame.write(&input_writer, frame.type_settings, 0, 0, &settings);
     try frame.write(&input_writer, frame.type_settings, frame.flag_ack, 0, &.{});
 
-    var header_block = [_]u8{0x82}; // indexed :method GET
+    var header_block: [128]u8 = undefined;
+    var block_len: usize = 0;
+    try hpack.encodeHeader(&header_block, &block_len, ":method", "GET");
+    try hpack.encodeHeader(&header_block, &block_len, ":scheme", "https");
+    try hpack.encodeHeader(&header_block, &block_len, ":path", "/");
+    try hpack.encodeHeader(&header_block, &block_len, ":authority", "example.com");
     try frame.write(
         &input_writer,
         frame.type_headers,
         frame.flag_end_headers | frame.flag_end_stream,
         1,
-        &header_block,
+        header_block[0..block_len],
     );
 
     var input = std.Io.Reader.fixed(input_writer.buffered());
@@ -887,4 +1002,44 @@ test "server accepts curl settings and responds to a no-body request" {
     try stream.sendHeaders(&response, false);
     _ = try stream.write(&.{"ok"});
     try std.testing.expect(output.written().len > 0);
+}
+
+test "zero-length read buffers are not clean EOF" {
+    var input = std.Io.Reader.fixed(&.{});
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &output.writer,
+        .role = .server,
+        .stream_id = 1,
+    };
+    try std.testing.expectError(
+        error.Unexpected,
+        connection.readStream(1, &.{}),
+    );
+}
+
+test "request pseudo headers and configured path are enforced" {
+    const headers = [_]Header{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/ws" },
+        .{ .name = ":authority", .value = "example.com" },
+    };
+    try validateRequest(&headers, "/ws");
+    try std.testing.expectError(
+        error.ProtocolViolation,
+        validateRequest(&headers, "/other"),
+    );
+    const missing_authority = [_]Header{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/ws" },
+    };
+    try std.testing.expectError(
+        error.ProtocolViolation,
+        validateRequest(&missing_authority, null),
+    );
 }

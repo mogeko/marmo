@@ -19,6 +19,8 @@ pub const Options = struct {
     ca: ?*tls13.Ca = null,
     /// ALPN protocols in preference order.
     alpn_protocols: []const []const u8 = &.{},
+    /// Require this negotiated ALPN protocol.
+    required_alpn: ?[]const u8 = null,
     /// Treat a missing close_notify as EOF instead of a truncation error.
     allow_truncation_attacks: bool = false,
     /// Bounded handshake duration. Zero disables the timeout.
@@ -130,6 +132,7 @@ pub const TlsClientStream = struct {
                 .verify = !options.insecure,
                 .ca = options.ca,
                 .alpn_protocols = options.alpn_protocols,
+                .required_alpn = options.required_alpn,
                 .allow_truncation_attacks = options.allow_truncation_attacks,
                 .read_buffer = &self.plain_read_buffer,
                 .write_buffer = &self.plain_write_buffer,
@@ -245,6 +248,11 @@ pub const TlsClientStream = struct {
     }
 
     fn readFailure(self: *TlsClientStream) Stream.ReadError {
+        if (self.socket_reader.err) |inner| switch (inner) {
+            error.Canceled => return error.Canceled,
+            error.ConnectionReset => return error.ConnectionReset,
+            else => {},
+        };
         const err = self.client.readError() orelse {
             return self.socket_reader.err orelse error.ProtocolViolation;
         };

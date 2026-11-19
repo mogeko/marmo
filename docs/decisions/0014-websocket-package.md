@@ -54,3 +54,13 @@ with TLS/TCP dialers. The package imports only `std`.
   authentication in the handshake. Client masking is mandatory and enforced.
 - Tested by handshake accept-vector tests, frame parser truncation/masking
   tests, an in-tree client/server loopback echo, and a TLS+WS integration path.
+
+## Amendment (2026-11-20)
+
+The opening handshake now keeps bytes after the HTTP terminator, rejects
+obs-fold/whitespace-before-colon/duplicate required headers/body-bearing
+upgrades, and preserves frames coalesced with the handshake. Messages are
+bounded at 1 MiB and 1024 fragments, control frames per read are bounded, close
+codes and UTF-8 reasons are validated, and client masking uses a 4 KiB scratch
+buffer. A single frame remains capped at 64 KiB; larger messages must be
+fragmented by the peer.

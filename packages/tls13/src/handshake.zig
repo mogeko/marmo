@@ -146,6 +146,7 @@ pub const ClientHello = struct {
     x25519_public: [32]u8,
     x25519_found: bool,
     server_name: ?[]const u8,
+    supported_versions_found: bool,
     /// Raw ALPN ProtocolNameList body (length-prefixed names), borrowed from
     /// the ClientHello message.
     alpn_protocols: ?[]const u8,
@@ -165,7 +166,7 @@ pub fn parseClientHello(
     if (cursor.remaining() != body_len) return error.HandshakeFailed;
     var body: Cursor = .{ .buf = try cursor.readBytes(body_len) };
 
-    _ = try body.readU16(); // legacy_version
+    if (try body.readU16() != 0x0303) return error.HandshakeFailed;
     var random: [32]u8 = undefined;
     @memcpy(&random, try body.readBytes(32));
 
@@ -183,6 +184,7 @@ pub fn parseClientHello(
         .x25519_public = @splat(0),
         .x25519_found = false,
         .server_name = null,
+        .supported_versions_found = false,
         .alpn_protocols = null,
     };
     try parseCipherSuites(&body, &hello);
@@ -194,7 +196,8 @@ pub fn parseClientHello(
     try parseExtensions(&extensions, &hello, server_name_buf);
     if (!hello.cipher_aes_128_gcm_sha256 or
         !hello.signature_ecdsa_p256 or
-        !hello.x25519_found)
+        !hello.x25519_found or
+        !hello.supported_versions_found)
     {
         return error.HandshakeFailed;
     }
@@ -223,23 +226,37 @@ fn parseExtensions(
     hello: *ClientHello,
     server_name_buf: *[max_server_name]u8,
 ) Error!void {
+    var seen_sni = false;
+    var seen_signature = false;
+    var seen_versions = false;
+    var seen_key_share = false;
     while (!extensions.eof()) {
         const extension_type = try extensions.readU16();
         const extension_len = try extensions.readU16();
         var extension = try extensions.sub(extension_len);
         switch (extension_type) {
-            extension_server_name => try parseServerName(
-                &extension,
-                hello,
-                server_name_buf,
-            ),
+            extension_server_name => {
+                if (seen_sni) return error.HandshakeFailed;
+                seen_sni = true;
+                try parseServerName(&extension, hello, server_name_buf);
+            },
             extension_alpn => try parseAlpnProtocols(&extension, hello),
-            extension_signature_algorithms => try parseSignatureAlgorithms(
-                &extension,
-                hello,
-            ),
-            extension_supported_versions => try parseSupportedVersions(&extension),
-            extension_key_share => try parseKeyShares(&extension, hello),
+            extension_signature_algorithms => {
+                if (seen_signature) return error.HandshakeFailed;
+                seen_signature = true;
+                try parseSignatureAlgorithms(&extension, hello);
+            },
+            extension_supported_versions => {
+                if (seen_versions) return error.HandshakeFailed;
+                seen_versions = true;
+                try parseSupportedVersions(&extension);
+                hello.supported_versions_found = true;
+            },
+            extension_key_share => {
+                if (seen_key_share) return error.HandshakeFailed;
+                seen_key_share = true;
+                try parseKeyShares(&extension, hello);
+            },
             else => {},
         }
     }
@@ -331,6 +348,7 @@ pub const ServerHello = struct {
     cipher_aes_128_gcm_sha256: bool,
     x25519_public: [32]u8,
     x25519_found: bool,
+    supported_version_found: bool,
     hello_retry_request: bool,
 };
 
@@ -361,6 +379,7 @@ pub fn parseServerHello(message: []const u8) Error!ServerHello {
         .cipher_aes_128_gcm_sha256 = false,
         .x25519_public = @splat(0),
         .x25519_found = false,
+        .supported_version_found = false,
         .hello_retry_request = std.mem.eql(
             u8,
             &random,
@@ -380,12 +399,24 @@ pub fn parseServerHello(message: []const u8) Error!ServerHello {
         const extension_len = try extensions.readU16();
         var extension = try extensions.sub(extension_len);
         switch (extension_type) {
-            extension_supported_versions => try parseSelectedVersion(&extension),
-            extension_key_share => try parseServerKeyShare(&extension, &hello),
+            extension_supported_versions => {
+                if (hello.supported_version_found) {
+                    return error.HandshakeFailed;
+                }
+                try parseSelectedVersion(&extension);
+                hello.supported_version_found = true;
+            },
+            extension_key_share => {
+                if (hello.x25519_found) return error.HandshakeFailed;
+                try parseServerKeyShare(&extension, &hello);
+            },
             else => {},
         }
     }
-    if (!hello.cipher_aes_128_gcm_sha256 or !hello.x25519_found) {
+    if (!hello.cipher_aes_128_gcm_sha256 or
+        !hello.x25519_found or
+        !hello.supported_version_found)
+    {
         return error.HandshakeFailed;
     }
     return hello;
@@ -461,24 +492,30 @@ pub const KeySchedule = struct {
     master_secret: [32]u8,
 
     pub fn derive(shared_secret: [32]u8, hello_hash: [32]u8) KeySchedule {
+        var secret = shared_secret;
+        defer std.crypto.secureZero(u8, &secret);
         const zeroes: [32]u8 = @splat(0);
-        const early_secret = Hkdf.extract(&.{0}, &zeroes);
+        var early_secret = Hkdf.extract(&.{0}, &zeroes);
+        defer std.crypto.secureZero(u8, &early_secret);
         const empty_hash = std.crypto.tls.emptyHash(Hash);
-        const hs_derived = std.crypto.tls.hkdfExpandLabel(
+        var hs_derived = std.crypto.tls.hkdfExpandLabel(
             Hkdf,
             early_secret,
             "derived",
             &empty_hash,
             32,
         );
-        const handshake_secret = Hkdf.extract(&hs_derived, &shared_secret);
-        const ap_derived = std.crypto.tls.hkdfExpandLabel(
+        defer std.crypto.secureZero(u8, &hs_derived);
+        var handshake_secret = Hkdf.extract(&hs_derived, &secret);
+        defer std.crypto.secureZero(u8, &handshake_secret);
+        var ap_derived = std.crypto.tls.hkdfExpandLabel(
             Hkdf,
             handshake_secret,
             "derived",
             &empty_hash,
             32,
         );
+        defer std.crypto.secureZero(u8, &ap_derived);
         const master_secret = Hkdf.extract(&ap_derived, &zeroes);
         const client_hs_secret = std.crypto.tls.hkdfExpandLabel(
             Hkdf,
@@ -539,9 +576,11 @@ pub const KeySchedule = struct {
 };
 
 pub fn keysFromSecret(secret: [32]u8) record.Keys {
+    var local = secret;
+    defer std.crypto.secureZero(u8, &local);
     return .{
-        .key = std.crypto.tls.hkdfExpandLabel(Hkdf, secret, "key", "", record.key_len),
-        .iv = std.crypto.tls.hkdfExpandLabel(Hkdf, secret, "iv", "", record.iv_len),
+        .key = std.crypto.tls.hkdfExpandLabel(Hkdf, local, "key", "", record.key_len),
+        .iv = std.crypto.tls.hkdfExpandLabel(Hkdf, local, "iv", "", record.iv_len),
     };
 }
 
@@ -549,8 +588,10 @@ pub fn finishedVerifyData(
     finished_key: [32]u8,
     transcript_hash: [32]u8,
 ) [32]u8 {
+    var key = finished_key;
+    defer std.crypto.secureZero(u8, &key);
     var result: [32]u8 = undefined;
-    Hmac.create(&result, &transcript_hash, &finished_key);
+    Hmac.create(&result, &transcript_hash, &key);
     return result;
 }
 
@@ -571,5 +612,28 @@ test "ALPN extension length is bounded before the u16 cast" {
     try std.testing.expectError(
         error.HandshakeFailed,
         writeAlpnExtension(&encoder, &protocols),
+    );
+}
+
+test "duplicate ServerHello extensions are rejected" {
+    var message: [4 + 52]u8 = undefined;
+    message[0] = handshake_server_hello;
+    std.mem.writeInt(u24, message[1..4], 52, .big);
+    var body: Encoder = .init(message[4..]);
+    try body.writeU16(0x0303);
+    try body.writeZeros(32);
+    try body.writeU8(0);
+    try body.writeU16(cipher_aes_128_gcm_sha256);
+    try body.writeU8(0);
+    try body.writeU16(12);
+    var index: usize = 0;
+    while (index < 2) : (index += 1) {
+        try body.writeU16(extension_supported_versions);
+        try body.writeU16(2);
+        try body.writeU16(tls_1_3);
+    }
+    try std.testing.expectError(
+        error.HandshakeFailed,
+        parseServerHello(&message),
     );
 }

@@ -25,6 +25,8 @@ pub const Options = struct {
     ca: ?*Ca = null,
     /// ALPN protocols in preference order. Empty disables the extension.
     alpn_protocols: []const []const u8 = &.{},
+    /// If set, the handshake fails unless the server selects this protocol.
+    required_alpn: ?[]const u8 = null,
     /// Plaintext reader buffer. Must be non-empty.
     read_buffer: []u8,
     /// Plaintext writer buffer. Must be non-empty.
@@ -223,6 +225,13 @@ pub const Client = struct {
         self.read_keys = handshake.keysFromSecret(server_app_secret);
         self.write_keys = handshake.keysFromSecret(client_app_secret);
         std.crypto.secureZero(u8, std.mem.asBytes(&self.key_schedule));
+        if (options.required_alpn) |required| {
+            const selected = self.negotiatedProtocol() orelse
+                return error.HandshakeFailed;
+            if (!std.mem.eql(u8, selected, required)) {
+                return error.HandshakeFailed;
+            }
+        }
     }
 
     fn buildClientHello(
@@ -607,11 +616,7 @@ pub const Client = struct {
                 },
                 record.content_type_alert => return self.handleAlert(opened.content),
                 record.content_type_handshake => {
-                    // NewSessionTicket is safe to ignore; KeyUpdate would
-                    // change the record keys and desynchronize this session.
-                    if (opened.content.len != 0 and opened.content[0] == 24) {
-                        return error.HandshakeFailed;
-                    }
+                    try rejectKeyUpdate(opened.content);
                     continue;
                 },
                 else => return error.HandshakeFailed,
@@ -928,6 +933,23 @@ fn writerDrain(
     return consumed;
 }
 
+fn rejectKeyUpdate(content: []const u8) InitError!void {
+    var offset: usize = 0;
+    while (offset < content.len) {
+        if (content.len - offset < 4) return error.HandshakeFailed;
+        const body_len: usize = std.mem.readInt(
+            u24,
+            content[offset + 1 ..][0..3],
+            .big,
+        );
+        if (body_len > content.len - offset - 4) {
+            return error.HandshakeFailed;
+        }
+        if (content[offset] == 24) return error.HandshakeFailed;
+        offset += 4 + body_len;
+    }
+}
+
 fn mapRecordError() InitError {
     return error.HandshakeFailed;
 }
@@ -1078,4 +1100,15 @@ test "missing close_notify is a truncation unless explicitly allowed" {
         client.readPlaintext(&dest),
     );
     try std.testing.expect(client.eof_received);
+}
+
+test "post-handshake KeyUpdate is rejected even after a ticket" {
+    const content = [_]u8{
+        4, 0, 0, 0, // NewSessionTicket header, empty body
+        24, 0, 0, 0, // KeyUpdate header, empty body
+    };
+    try std.testing.expectError(
+        error.HandshakeFailed,
+        rejectKeyUpdate(&content),
+    );
 }
