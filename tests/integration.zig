@@ -1622,3 +1622,416 @@ test "TLS server handshake times out" {
     _ = server_future.await(io);
     try std.testing.expectEqual(error.TimedOut, context.error_code.?);
 }
+
+fn streamReadHeaders(
+    io: std.Io,
+    stream: marmo.Stream,
+    buffer: []u8,
+) ![]const u8 {
+    var len: usize = 0;
+    while (len < buffer.len) {
+        var buffers = [_][]u8{buffer[len .. len + 1]};
+        const read_len = try stream.read(io, &buffers);
+        if (read_len == 0) return error.EndOfStream;
+        len += 1;
+        if (len >= 4 and std.mem.endsWith(u8, buffer[0..len], "\r\n\r\n")) {
+            return buffer[0..len];
+        }
+    }
+    return error.HeadersTooLarge;
+}
+
+fn connectTlsStream(io: std.Io, endpoint: marmo.Endpoint) !marmo.Stream {
+    const address = switch (endpoint) {
+        .ip => |ip| ip,
+        .domain => return error.TestUnexpectedResult,
+    };
+    const net_stream = try std.Io.net.IpAddress.connect(
+        &address,
+        io,
+        .{ .mode = .stream },
+    );
+    const remote: marmo.Endpoint = .{ .ip = net_stream.socket.address };
+    const tcp = try marmo.TcpStream.create(
+        allocator,
+        net_stream,
+        endpoint,
+        remote,
+    );
+    const tls = marmo.TlsClientStream.create(
+        io,
+        allocator,
+        tcp.stream(),
+        .{
+            .server_name = "localhost",
+            .insecure = true,
+        },
+    ) catch |err| {
+        tcp.stream().close(io);
+        return err;
+    };
+    return tls.stream();
+}
+
+fn fallbackHttpLoop(io: std.Io, server: *std.Io.net.Server) void {
+    const stream = server.accept(io) catch return;
+    defer stream.close(io);
+
+    var headers: [2048]u8 = undefined;
+    const request = tcpReadHeaders(io, stream, &headers) catch return;
+    if (!std.mem.startsWith(u8, request, "GET / HTTP/1.1\r\n")) {
+        tcpWrite(io, stream, "HTTP/1.1 400 Bad Request\r\n\r\n") catch {};
+        return;
+    }
+    tcpWrite(io, stream, "HTTP/1.1 204 No Content\r\n\r\n") catch {};
+}
+
+fn buildSocksUdpPacket(
+    buffer: []u8,
+    port: u16,
+    payload: []const u8,
+) []const u8 {
+    buffer[0] = 0;
+    buffer[1] = 0;
+    buffer[2] = 0;
+    buffer[3] = 1;
+    @memcpy(buffer[4..8], &[_]u8{ 127, 0, 0, 1 });
+    buffer[8] = @intCast(port >> 8);
+    buffer[9] = @intCast(port & 0xff);
+    @memcpy(buffer[10..][0..payload.len], payload);
+    return buffer[0 .. 10 + payload.len];
+}
+
+test "Trojan TCP outbound and inbound relay over TLS" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var echo_bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var echo_server = try echo_bind.listen(io, .{ .reuse_address = true });
+    defer echo_server.deinit(io);
+    var echo_future = io.async(echoLoopOnce, .{ io, &echo_server });
+
+    var cert = try tls13.test_cert.generate(allocator, io);
+    defer cert.deinit(allocator);
+    var files = try TestTlsFiles.init(io, allocator, &cert);
+    defer files.deinit();
+
+    var diagnostic: marmo.Diagnostic = .{};
+    const server_config: marmo.Config = .{
+        .inbounds = &.{
+            .{
+                .tag = "trojan-in",
+                .protocol = .trojan,
+                .listen = "127.0.0.1:0",
+                .password = "trojan-test-secret",
+                .tls = .{
+                    .certificate = files.certificatePath(),
+                    .private_key = files.privateKeyPath(),
+                },
+            },
+        },
+        .route = .{ .final = "direct" },
+    };
+    var server_instance = marmo.Instance.init(
+        allocator,
+        io,
+        server_config,
+        &diagnostic,
+    ) catch |err| {
+        std.debug.print("trojan server init: {s}\n", .{diagnostic.message()});
+        return err;
+    };
+    defer server_instance.deinit();
+    try server_instance.start();
+
+    const trojan_endpoint = server_instance.inboundEndpoint("trojan-in") orelse
+        return error.TestUnexpectedResult;
+    var server_text_buffer: [32]u8 = undefined;
+    const server_text = try std.fmt.bufPrint(
+        &server_text_buffer,
+        "127.0.0.1:{d}",
+        .{trojan_endpoint.port()},
+    );
+
+    const client_config: marmo.Config = .{
+        .inbounds = &.{
+            .{ .tag = "socks", .protocol = .socks5, .listen = "127.0.0.1:0" },
+        },
+        .outbounds = &.{
+            .{
+                .tag = "trojan-out",
+                .protocol = .trojan,
+                .server = server_text,
+                .password = "trojan-test-secret",
+                .tls = .{ .sni = "localhost", .insecure = true },
+            },
+        },
+        .route = .{ .final = "trojan-out" },
+    };
+    var client_instance = marmo.Instance.init(
+        allocator,
+        io,
+        client_config,
+        &diagnostic,
+    ) catch |err| {
+        std.debug.print("trojan client init: {s}\n", .{diagnostic.message()});
+        return err;
+    };
+    defer client_instance.deinit();
+    try client_instance.start();
+
+    const socks_endpoint = client_instance.inboundEndpoint("socks") orelse
+        return error.TestUnexpectedResult;
+    const socks_address = switch (socks_endpoint) {
+        .ip => |ip| ip,
+        .domain => return error.TestUnexpectedResult,
+    };
+    const client = try std.Io.net.IpAddress.connect(
+        &socks_address,
+        io,
+        .{ .mode = .stream },
+    );
+    defer client.close(io);
+
+    try socksNegotiate(io, client);
+    const target_port = echo_server.socket.address.getPort();
+    try tcpWrite(io, client, &[_]u8{
+        5,                          1,                            0, 1, 127, 0, 0, 1,
+        @intCast(target_port >> 8), @intCast(target_port & 0xff),
+    });
+
+    var reply: [10]u8 = undefined;
+    try tcpReadExact(io, client, &reply);
+    try std.testing.expectEqual(@as(u8, 5), reply[0]);
+    try std.testing.expectEqual(@as(u8, 0), reply[1]);
+
+    try tcpWrite(io, client, "hello");
+    var echoed: [5]u8 = undefined;
+    try tcpReadExact(io, client, &echoed);
+    try std.testing.expectEqualStrings("hello", &echoed);
+
+    client_instance.stop();
+    server_instance.stop();
+    _ = echo_future.await(io);
+}
+
+test "Trojan UDP association relays multiple destinations" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var echo1_bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var echo1 = try echo1_bind.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer echo1.close(io);
+    var echo1_future = io.async(udpEchoOnce, .{ io, &echo1 });
+
+    var echo2_bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var echo2 = try echo2_bind.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer echo2.close(io);
+    var echo2_future = io.async(udpEchoOnce, .{ io, &echo2 });
+
+    var cert = try tls13.test_cert.generate(allocator, io);
+    defer cert.deinit(allocator);
+    var files = try TestTlsFiles.init(io, allocator, &cert);
+    defer files.deinit();
+
+    var diagnostic: marmo.Diagnostic = .{};
+    const server_config: marmo.Config = .{
+        .inbounds = &.{
+            .{
+                .tag = "trojan-in",
+                .protocol = .trojan,
+                .listen = "127.0.0.1:0",
+                .password = "trojan-test-secret",
+                .tls = .{
+                    .certificate = files.certificatePath(),
+                    .private_key = files.privateKeyPath(),
+                },
+            },
+        },
+        .route = .{ .final = "direct" },
+    };
+    var server_instance = marmo.Instance.init(
+        allocator,
+        io,
+        server_config,
+        &diagnostic,
+    ) catch |err| {
+        std.debug.print("trojan udp server init: {s}\n", .{diagnostic.message()});
+        return err;
+    };
+    defer server_instance.deinit();
+    try server_instance.start();
+
+    const trojan_endpoint = server_instance.inboundEndpoint("trojan-in") orelse
+        return error.TestUnexpectedResult;
+    var server_text_buffer: [32]u8 = undefined;
+    const server_text = try std.fmt.bufPrint(
+        &server_text_buffer,
+        "127.0.0.1:{d}",
+        .{trojan_endpoint.port()},
+    );
+
+    const client_config: marmo.Config = .{
+        .inbounds = &.{
+            .{ .tag = "socks", .protocol = .socks5, .listen = "127.0.0.1:0" },
+        },
+        .outbounds = &.{
+            .{
+                .tag = "trojan-out",
+                .protocol = .trojan,
+                .server = server_text,
+                .password = "trojan-test-secret",
+                .tls = .{ .sni = "localhost", .insecure = true },
+            },
+        },
+        .route = .{ .final = "trojan-out" },
+    };
+    var client_instance = marmo.Instance.init(
+        allocator,
+        io,
+        client_config,
+        &diagnostic,
+    ) catch |err| {
+        std.debug.print("trojan udp client init: {s}\n", .{diagnostic.message()});
+        return err;
+    };
+    defer client_instance.deinit();
+    try client_instance.start();
+
+    const socks_endpoint = client_instance.inboundEndpoint("socks") orelse
+        return error.TestUnexpectedResult;
+    const socks_address = switch (socks_endpoint) {
+        .ip => |ip| ip,
+        .domain => return error.TestUnexpectedResult,
+    };
+    const client = try std.Io.net.IpAddress.connect(
+        &socks_address,
+        io,
+        .{ .mode = .stream },
+    );
+    defer client.close(io);
+
+    try socksNegotiate(io, client);
+    try tcpWrite(io, client, &[_]u8{ 5, 3, 0, 1, 0, 0, 0, 0, 0, 0 });
+
+    var reply: [10]u8 = undefined;
+    try tcpReadExact(io, client, &reply);
+    try std.testing.expectEqual(@as(u8, 5), reply[0]);
+    try std.testing.expectEqual(@as(u8, 0), reply[1]);
+
+    const relay_port = (@as(u16, reply[8]) << 8) | reply[9];
+    const relay_address: std.Io.net.IpAddress = .{ .ip4 = .{
+        .bytes = .{ 127, 0, 0, 1 },
+        .port = relay_port,
+    } };
+
+    var local_bind: std.Io.net.IpAddress = .{ .ip4 = .unspecified(0) };
+    const udp_socket = try local_bind.bind(
+        io,
+        .{ .mode = .dgram, .protocol = .udp },
+    );
+    defer udp_socket.close(io);
+
+    var packet: [64]u8 = undefined;
+    const first = buildSocksUdpPacket(
+        &packet,
+        echo1.address.getPort(),
+        "first",
+    );
+    try udp_socket.send(io, &relay_address, first);
+
+    var receive_buffer: [1500]u8 = undefined;
+    const first_reply = try udp_socket.receive(io, &receive_buffer);
+    try std.testing.expectEqualStrings("first", first_reply.data[10..]);
+
+    const second = buildSocksUdpPacket(
+        &packet,
+        echo2.address.getPort(),
+        "second",
+    );
+    try udp_socket.send(io, &relay_address, second);
+    const second_reply = try udp_socket.receive(io, &receive_buffer);
+    try std.testing.expectEqualStrings("second", second_reply.data[10..]);
+
+    client_instance.stop();
+    server_instance.stop();
+    _ = echo1_future.await(io);
+    _ = echo2_future.await(io);
+}
+
+test "Trojan fallback receives an unauthenticated HTTP probe" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var fallback_bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var fallback_server = try fallback_bind.listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer fallback_server.deinit(io);
+    var fallback_future = io.async(
+        fallbackHttpLoop,
+        .{ io, &fallback_server },
+    );
+
+    var cert = try tls13.test_cert.generate(allocator, io);
+    defer cert.deinit(allocator);
+    var files = try TestTlsFiles.init(io, allocator, &cert);
+    defer files.deinit();
+
+    var fallback_text_buffer: [32]u8 = undefined;
+    const fallback_text = try std.fmt.bufPrint(
+        &fallback_text_buffer,
+        "127.0.0.1:{d}",
+        .{fallback_server.socket.address.getPort()},
+    );
+
+    var diagnostic: marmo.Diagnostic = .{};
+    const config: marmo.Config = .{
+        .inbounds = &.{
+            .{
+                .tag = "trojan-in",
+                .protocol = .trojan,
+                .listen = "127.0.0.1:0",
+                .password = "trojan-test-secret",
+                .fallback = fallback_text,
+                .tls = .{
+                    .certificate = files.certificatePath(),
+                    .private_key = files.privateKeyPath(),
+                },
+            },
+        },
+        .route = .{ .final = "direct" },
+    };
+    var instance = marmo.Instance.init(
+        allocator,
+        io,
+        config,
+        &diagnostic,
+    ) catch |err| {
+        std.debug.print("trojan fallback init: {s}\n", .{diagnostic.message()});
+        return err;
+    };
+    defer instance.deinit();
+    try instance.start();
+
+    const endpoint = instance.inboundEndpoint("trojan-in") orelse
+        return error.TestUnexpectedResult;
+    const stream = try connectTlsStream(io, endpoint);
+    defer stream.close(io);
+
+    _ = try stream.write(io, &.{"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"});
+    var response: [512]u8 = undefined;
+    const headers = try streamReadHeaders(io, stream, &response);
+    try std.testing.expect(std.mem.startsWith(u8, headers, "HTTP/1.1 204"));
+
+    stream.shutdown(io, .both) catch |err| switch (err) {
+        error.NotConnected => {},
+        else => return err,
+    };
+    instance.stop();
+    _ = fallback_future.await(io);
+}

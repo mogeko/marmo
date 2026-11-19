@@ -1,0 +1,16 @@
+.{
+    .name = .marmo_trojan_example,
+    .version = "0.0.0",
+    .fingerprint = 0xfe67e93ba9c8dcb7,
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{
+        .marmo = .{ .path = "../.." },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSE",
+        "README.md",
+    },
+}

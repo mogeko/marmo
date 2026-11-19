@@ -3,6 +3,28 @@
 All notable changes to marmo are recorded here. The project is pre-1.0; APIs
 and behavior may change between minor releases.
 
+## Unreleased
+
+### Added
+
+- Trojan inbound and outbound over TLS: TCP `CONNECT`, UDP `ASSOCIATE` with
+  per-packet destinations, SHA-224 password authentication, and an optional
+  explicit `fallback` endpoint routed through the router (ADR-0011).
+- Trojan config validation, protocol unit tests, loopback TCP/UDP integration
+  tests, a fallback integration test, and `trojan_auth`, `trojan_request`, and
+  `trojan_udp_frame` fuzz targets.
+- Standalone `examples/trojan` server/client, including an optional routed
+  fallback and local certificate setup.
+- Local interop checks against self-hosted Xray-core 26.11.9 and trojan-gfw
+  1.16.0 cover TCP and UDP in both directions; the harness is not committed.
+
+### Fixed
+
+- The TLS client reader now waits for a complete record instead of reporting a
+  partial record as EOF. The bug lost split replies and was found during
+  trojan-gfw UDP interop; `packages/tls13/src/reader.zig` has a regression
+  test.
+
 ## 0.0.2 - 2026-11-19
 
 ### Added

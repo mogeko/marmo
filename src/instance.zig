@@ -10,12 +10,14 @@ const Endpoint = @import("net/endpoint.zig").Endpoint;
 const Direct = @import("outbound/direct.zig").Direct;
 const HttpConnect = @import("outbound/http_connect.zig").HttpConnect;
 const Shadowsocks = @import("outbound/shadowsocks.zig").Shadowsocks;
+const Trojan = @import("outbound/trojan.zig").Trojan;
 const Vless = @import("outbound/vless.zig").Vless;
 const selector_module = @import("outbound/selector.zig");
 const Selector = selector_module.Selector;
 const SelectorHealth = selector_module.Health;
 const Outbound = @import("outbound/outbound.zig").Outbound;
 const s2022 = @import("protocol/shadowsocks2022.zig");
+const trojan_protocol = @import("protocol/trojan.zig");
 const vless_protocol = @import("protocol/vless.zig");
 const ss_inbound = @import("inbound/shadowsocks.zig");
 const ss_udp = @import("inbound/shadowsocks_udp.zig");
@@ -33,6 +35,7 @@ const Stream = @import("transport/stream.zig").Stream;
 const TcpStream = @import("transport/tcp.zig").TcpStream;
 const socks5 = @import("inbound/socks5.zig");
 const http_inbound = @import("inbound/http.zig");
+const trojan_inbound = @import("inbound/trojan.zig");
 const vless_inbound = @import("inbound/vless.zig");
 
 pub const InitError = error{ InvalidConfig, OutOfMemory };
@@ -61,6 +64,7 @@ const BoundInbound = struct {
     shadowsocks: ?*ss_inbound.Context = null,
     udp_server: ?*ss_udp.Server = null,
     tls: ?tls_server.Options = null,
+    trojan: ?trojan_inbound.Context = null,
     vless_uuid: ?vless_protocol.Uuid = null,
 };
 
@@ -240,6 +244,12 @@ pub const Instance = struct {
             }
             if (inbound.vless_uuid) |*uuid| {
                 std.crypto.secureZero(u8, std.mem.asBytes(uuid));
+            }
+            if (inbound.trojan) |*context| {
+                std.crypto.secureZero(
+                    u8,
+                    std.mem.asBytes(&context.password_hash),
+                );
             }
         }
         for (self.outbounds) |*outbound| {
@@ -438,6 +448,19 @@ fn handleConnection(context: *ConnContext) !void {
             dispatch,
             context.inbound.shadowsocks orelse return error.InvalidConfig,
         ),
+        .trojan => {
+            var trojan_context = context.inbound.trojan orelse
+                return error.InvalidConfig;
+            defer std.crypto.secureZero(u8, std.mem.asBytes(&trojan_context));
+            try trojan_inbound.handle(
+                self.io,
+                stream,
+                context.inbound.tag,
+                dispatch,
+                arena.allocator(),
+                &trojan_context,
+            );
+        },
         .vless => {
             var vless_context: vless_inbound.Context = .{
                 .uuid = context.inbound.vless_uuid orelse
@@ -588,8 +611,81 @@ fn compileNonSelector(
                 .cleanup_ctx = shadowsocks,
             };
         },
+        .trojan => try compileTrojan(allocator, gpa, direct, config),
         .vless => try compileVless(allocator, gpa, direct, config),
         .selector => unreachable,
+    };
+}
+
+const TlsTransport = struct {
+    dialer: Dialer,
+    cleanup: ?*const fn (ctx: *anyopaque) void = null,
+    cleanup_ctx: ?*anyopaque = null,
+};
+
+fn compileTlsTransport(
+    allocator: std.mem.Allocator,
+    gpa: std.mem.Allocator,
+    direct: *Direct,
+    server: Endpoint,
+    tls_config: Config.Tls,
+) InitError!TlsTransport {
+    const server_name = tls_config.sni orelse switch (server) {
+        .domain => |domain| domain.name,
+        .ip => null,
+    };
+    const tls_dialer = try allocator.create(TlsDialer);
+    tls_dialer.* = TlsDialer.init(
+        gpa,
+        direct.dialer(),
+        server_name,
+        tls_config.insecure,
+        @as(u64, tls_config.handshake_timeout_s) * std.time.ns_per_s,
+    );
+    return .{
+        .dialer = tls_dialer.asDialer(),
+        .cleanup = cleanupTlsDialer,
+        .cleanup_ctx = tls_dialer,
+    };
+}
+
+fn compileTrojan(
+    allocator: std.mem.Allocator,
+    gpa: std.mem.Allocator,
+    direct: *Direct,
+    config: Config.Outbound,
+) InitError!Outbound {
+    const server_text = config.server orelse return error.InvalidConfig;
+    const server = Endpoint.parse(server_text) catch return error.InvalidConfig;
+    const password = config.password orelse return error.InvalidConfig;
+    const tls_config = config.tls orelse return error.InvalidConfig;
+
+    var password_hash = trojan_protocol.hashPassword(password);
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&password_hash));
+
+    const trojan = try allocator.create(Trojan);
+    errdefer allocator.destroy(trojan);
+    const transport = try compileTlsTransport(
+        allocator,
+        gpa,
+        direct,
+        server,
+        tls_config,
+    );
+    trojan.* = .{
+        .gpa = gpa,
+        .server = server,
+        .password_hash = password_hash,
+        .transport = transport.dialer,
+        .transport_cleanup = transport.cleanup,
+        .transport_cleanup_ctx = transport.cleanup_ctx,
+    };
+    return .{
+        .tag = config.tag,
+        .dialer = trojan.asDialer(),
+        .supports_udp = true,
+        .cleanup = cleanupTrojan,
+        .cleanup_ctx = trojan,
     };
 }
 
@@ -609,21 +705,16 @@ fn compileVless(
     var transport_cleanup: ?*const fn (ctx: *anyopaque) void = null;
     var transport_cleanup_ctx: ?*anyopaque = null;
     if (config.tls) |tls| {
-        const server_name = tls.sni orelse switch (server) {
-            .domain => |domain| domain.name,
-            .ip => null,
-        };
-        const tls_dialer = try allocator.create(TlsDialer);
-        tls_dialer.* = TlsDialer.init(
+        const compiled = try compileTlsTransport(
+            allocator,
             gpa,
-            direct.dialer(),
-            server_name,
-            tls.insecure,
-            @as(u64, tls.handshake_timeout_s) * std.time.ns_per_s,
+            direct,
+            server,
+            tls,
         );
-        transport = tls_dialer.asDialer();
-        transport_cleanup = cleanupTlsDialer;
-        transport_cleanup_ctx = tls_dialer;
+        transport = compiled.dialer;
+        transport_cleanup = compiled.cleanup;
+        transport_cleanup_ctx = compiled.cleanup_ctx;
     }
 
     const vless = try allocator.create(Vless);
@@ -692,6 +783,33 @@ fn compileSelector(
     };
 }
 
+fn loadInboundTls(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    tls: Config.InboundTls,
+    index: usize,
+    diagnostic: *Diagnostic,
+) InitError!tls_server.Options {
+    var options = tls_credentials.loadOptions(
+        allocator,
+        io,
+        tls.certificate,
+        tls.private_key,
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidCredentials => {
+            diagnostic.set(
+                "inbounds[{d}].tls: invalid certificate or private key",
+                .{index},
+            );
+            return error.InvalidConfig;
+        },
+    };
+    options.handshake_timeout_ns =
+        @as(u64, tls.handshake_timeout_s) * std.time.ns_per_s;
+    return options;
+}
+
 fn compileInbounds(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -731,29 +849,40 @@ fn compileInbounds(
                 key.deinit();
                 inbounds[index].shadowsocks = context;
             },
+            .trojan => {
+                const password = config.password orelse return error.InvalidConfig;
+                const tls = config.tls orelse return error.InvalidConfig;
+                const fallback = if (config.fallback) |text|
+                    Endpoint.parse(text) catch return error.InvalidConfig
+                else
+                    null;
+                const tls_options = try loadInboundTls(
+                    allocator,
+                    io,
+                    tls,
+                    index,
+                    diagnostic,
+                );
+                var password_hash = trojan_protocol.hashPassword(password);
+                defer std.crypto.secureZero(u8, &password_hash);
+                inbounds[index].trojan = .{
+                    .password_hash = password_hash,
+                    .fallback = fallback,
+                };
+                inbounds[index].tls = tls_options;
+            },
             .vless => {
                 const uuid_text = config.uuid orelse return error.InvalidConfig;
                 inbounds[index].vless_uuid = vless_protocol.parseUuid(uuid_text) catch
                     return error.InvalidConfig;
                 const tls = config.tls orelse return error.InvalidConfig;
-                var options = tls_credentials.loadOptions(
+                inbounds[index].tls = try loadInboundTls(
                     allocator,
                     io,
-                    tls.certificate,
-                    tls.private_key,
-                ) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.InvalidCredentials => {
-                        diagnostic.set(
-                            "inbounds[{d}].tls: invalid certificate or private key",
-                            .{index},
-                        );
-                        return error.InvalidConfig;
-                    },
-                };
-                options.handshake_timeout_ns =
-                    @as(u64, tls.handshake_timeout_s) * std.time.ns_per_s;
-                inbounds[index].tls = options;
+                    tls,
+                    index,
+                    diagnostic,
+                );
             },
             .http, .socks5 => {},
         }
@@ -768,6 +897,11 @@ fn cleanupShadowsocks(ctx: *anyopaque) void {
 
 fn cleanupVless(ctx: *anyopaque) void {
     const self: *Vless = @ptrCast(@alignCast(ctx));
+    self.deinit();
+}
+
+fn cleanupTrojan(ctx: *anyopaque) void {
+    const self: *Trojan = @ptrCast(@alignCast(ctx));
     self.deinit();
 }
 

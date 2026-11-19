@@ -18,6 +18,7 @@ zig build fuzz -Dfuzz-iterations=2000 -Dfuzz-seed=4660
 | --- | --- | --- |
 | `tls/` | `client_hello.bin`, `client_hello_record.bin`, `record_appdata.bin`, `cert.pem` | Handshake parser, record framing, truncated AEAD record, PEM decoder |
 | `vless/` | `request_ipv4.bin`, `xudp_new.bin` | VLESS request header and XUDP New frame |
+| `trojan/` | `auth_line.bin`, `request_ipv4.bin`, `udp_packet.bin` | Trojan authentication line, CONNECT request, UDP frame |
 | `shadowsocks2022/` | `tcp_request.bin`, `udp_packet.bin` | Malformed/random AEAD inputs for the request and datagram decoders |
 | `socks5/` | `greeting.bin`, `connect_ipv4.bin`, `udp_request.bin` | Greeting, CONNECT address, UDP request header |
 | `http/` | `connect.txt`, `forward.txt` | CONNECT and absolute-form forward request heads |

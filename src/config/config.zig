@@ -28,9 +28,11 @@ pub const Config = struct {
         password: ?[]const u8 = null,
         uuid: ?[]const u8 = null,
         tls: ?InboundTls = null,
+        /// Optional Trojan fallback endpoint for unauthenticated traffic.
+        fallback: ?[]const u8 = null,
     };
 
-    pub const InboundProtocol = enum { http, shadowsocks, socks5, vless };
+    pub const InboundProtocol = enum { http, shadowsocks, socks5, trojan, vless };
 
     pub const InboundTls = struct {
         /// PEM or DER certificate chain file, leaf first.
@@ -54,7 +56,7 @@ pub const Config = struct {
         health_check: ?HealthCheck = null,
     };
 
-    pub const OutboundProtocol = enum { direct, http, selector, shadowsocks, vless };
+    pub const OutboundProtocol = enum { direct, http, selector, shadowsocks, trojan, vless };
 
     pub const Tls = struct {
         sni: ?[]const u8 = null,
@@ -167,16 +169,18 @@ fn validateInbounds(
         switch (inbound.protocol) {
             .socks5, .http => {
                 if (inbound.method != null or inbound.password != null or
-                    inbound.uuid != null or inbound.tls != null)
+                    inbound.uuid != null or inbound.tls != null or
+                    inbound.fallback != null)
                 {
                     diagnostic.set(
-                        "inbounds[{d}]: socks5/http do not take credentials or TLS",
+                        "inbounds[{d}]: socks5/http do not take credentials, TLS, or fallback",
                         .{index},
                     );
                     return error.InvalidConfig;
                 }
             },
             .shadowsocks => try validateShadowsocksInbound(inbound, index, diagnostic),
+            .trojan => try validateTrojanInbound(inbound, index, diagnostic),
             .vless => try validateVlessInbound(inbound, index, diagnostic),
         }
     }
@@ -187,8 +191,11 @@ fn validateShadowsocksInbound(
     index: usize,
     diagnostic: *Diagnostic,
 ) ValidationError!void {
-    if (inbound.uuid != null or inbound.tls != null) {
-        diagnostic.set("inbounds[{d}]: uuid/tls only apply to vless", .{index});
+    if (inbound.uuid != null or inbound.tls != null or inbound.fallback != null) {
+        diagnostic.set(
+            "inbounds[{d}]: uuid/tls/fallback do not apply to shadowsocks",
+            .{index},
+        );
         return error.InvalidConfig;
     }
     const method_text = inbound.method orelse {
@@ -215,8 +222,13 @@ fn validateVlessInbound(
     index: usize,
     diagnostic: *Diagnostic,
 ) ValidationError!void {
-    if (inbound.method != null or inbound.password != null) {
-        diagnostic.set("inbounds[{d}]: vless does not take method or password", .{index});
+    if (inbound.method != null or inbound.password != null or
+        inbound.fallback != null)
+    {
+        diagnostic.set(
+            "inbounds[{d}]: vless does not take method, password, or fallback",
+            .{index},
+        );
         return error.InvalidConfig;
     }
     const uuid_text = inbound.uuid orelse {
@@ -245,6 +257,60 @@ fn validateVlessInbound(
             .{index},
         );
         return error.InvalidConfig;
+    }
+}
+
+fn validateTrojanInbound(
+    inbound: Config.Inbound,
+    index: usize,
+    diagnostic: *Diagnostic,
+) ValidationError!void {
+    if (inbound.method != null or inbound.uuid != null) {
+        diagnostic.set(
+            "inbounds[{d}]: trojan does not take method or uuid",
+            .{index},
+        );
+        return error.InvalidConfig;
+    }
+    const password = inbound.password orelse {
+        diagnostic.set("inbounds[{d}].password: required for trojan", .{index});
+        return error.InvalidConfig;
+    };
+    if (password.len == 0) {
+        diagnostic.set("inbounds[{d}].password: must not be empty", .{index});
+        return error.InvalidConfig;
+    }
+    const tls = inbound.tls orelse {
+        diagnostic.set("inbounds[{d}].tls: required for trojan", .{index});
+        return error.InvalidConfig;
+    };
+    if (tls.certificate.len == 0) {
+        diagnostic.set("inbounds[{d}].tls.certificate: must not be empty", .{index});
+        return error.InvalidConfig;
+    }
+    if (tls.private_key.len == 0) {
+        diagnostic.set("inbounds[{d}].tls.private_key: must not be empty", .{index});
+        return error.InvalidConfig;
+    }
+    if (tls.handshake_timeout_s == 0) {
+        diagnostic.set(
+            "inbounds[{d}].tls.handshake_timeout_s: must be positive",
+            .{index},
+        );
+        return error.InvalidConfig;
+    }
+    if (inbound.fallback) |fallback| {
+        if (fallback.len == 0) {
+            diagnostic.set("inbounds[{d}].fallback: must not be empty", .{index});
+            return error.InvalidConfig;
+        }
+        _ = Endpoint.parse(fallback) catch {
+            diagnostic.set(
+                "inbounds[{d}].fallback: invalid endpoint '{s}'",
+                .{ index, fallback },
+            );
+            return error.InvalidConfig;
+        };
     }
 }
 
@@ -280,6 +346,7 @@ fn validateOutbounds(
             .http => try validateHttp(outbound, index, diagnostic),
             .shadowsocks => try validateShadowsocks(outbound, index, diagnostic),
             .selector => try validateSelector(outbound, index, outbounds, diagnostic),
+            .trojan => try validateTrojan(outbound, index, diagnostic),
             .vless => try validateVless(outbound, index, diagnostic),
         }
     }
@@ -368,11 +435,86 @@ fn rejectVlessFields(
 ) ValidationError!void {
     if (outbound.uuid != null or outbound.tls != null or outbound.xudp) {
         diagnostic.set(
-            "outbounds[{d}]: uuid/tls/xudp only apply to vless",
+            "outbounds[{d}]: uuid/xudp only apply to vless; tls applies to vless/trojan",
             .{index},
         );
         return error.InvalidConfig;
     }
+}
+
+fn validateOutboundTls(
+    tls_config: Config.Tls,
+    server: Endpoint,
+    index: usize,
+    diagnostic: *Diagnostic,
+) ValidationError!void {
+    if (tls_config.sni) |sni| {
+        if (sni.len == 0) {
+            diagnostic.set("outbounds[{d}].tls.sni: must not be empty", .{index});
+            return error.InvalidConfig;
+        }
+    }
+    if (!tls_config.insecure and tls_config.sni == null) {
+        switch (server) {
+            .domain => {},
+            .ip => {
+                diagnostic.set(
+                    "outbounds[{d}].tls.sni: required for an IP server",
+                    .{index},
+                );
+                return error.InvalidConfig;
+            },
+        }
+    }
+    if (tls_config.handshake_timeout_s == 0) {
+        diagnostic.set(
+            "outbounds[{d}].tls.handshake_timeout_s: must be positive",
+            .{index},
+        );
+        return error.InvalidConfig;
+    }
+}
+
+fn validateTrojan(
+    outbound: Config.Outbound,
+    index: usize,
+    diagnostic: *Diagnostic,
+) ValidationError!void {
+    try rejectSelectorFields(outbound, index, diagnostic);
+    if (outbound.method != null or outbound.uuid != null or outbound.xudp) {
+        diagnostic.set(
+            "outbounds[{d}]: trojan does not take method, uuid, or xudp",
+            .{index},
+        );
+        return error.InvalidConfig;
+    }
+
+    const server_text = outbound.server orelse {
+        diagnostic.set("outbounds[{d}].server: required for trojan", .{index});
+        return error.InvalidConfig;
+    };
+    const server = Endpoint.parse(server_text) catch {
+        diagnostic.set("outbounds[{d}].server: invalid endpoint '{s}'", .{
+            index,
+            server_text,
+        });
+        return error.InvalidConfig;
+    };
+
+    const password = outbound.password orelse {
+        diagnostic.set("outbounds[{d}].password: required for trojan", .{index});
+        return error.InvalidConfig;
+    };
+    if (password.len == 0) {
+        diagnostic.set("outbounds[{d}].password: must not be empty", .{index});
+        return error.InvalidConfig;
+    }
+
+    const tls_config = outbound.tls orelse {
+        diagnostic.set("outbounds[{d}].tls: required for trojan", .{index});
+        return error.InvalidConfig;
+    };
+    try validateOutboundTls(tls_config, server, index, diagnostic);
 }
 
 fn validateVless(
@@ -408,31 +550,7 @@ fn validateVless(
     };
 
     const tls_config = outbound.tls orelse return;
-    if (tls_config.sni) |sni| {
-        if (sni.len == 0) {
-            diagnostic.set("outbounds[{d}].tls.sni: must not be empty", .{index});
-            return error.InvalidConfig;
-        }
-    }
-    if (!tls_config.insecure and tls_config.sni == null) {
-        switch (server) {
-            .domain => {},
-            .ip => {
-                diagnostic.set(
-                    "outbounds[{d}].tls.sni: required for an IP server",
-                    .{index},
-                );
-                return error.InvalidConfig;
-            },
-        }
-    }
-    if (tls_config.handshake_timeout_s == 0) {
-        diagnostic.set(
-            "outbounds[{d}].tls.handshake_timeout_s: must be positive",
-            .{index},
-        );
-        return error.InvalidConfig;
-    }
+    try validateOutboundTls(tls_config, server, index, diagnostic);
 }
 
 fn rejectSelectorFields(
@@ -757,7 +875,7 @@ test "vless config validates uuid and TLS options" {
         validate(tls_on_direct.inner.value, &diagnostic),
     );
     try std.testing.expectEqualStrings(
-        "outbounds[0]: uuid/tls/xudp only apply to vless",
+        "outbounds[0]: uuid/xudp only apply to vless; tls applies to vless/trojan",
         diagnostic.message(),
     );
 
@@ -857,6 +975,102 @@ test "config validates VLESS inbound TLS fields" {
     );
     try std.testing.expectEqualStrings(
         "inbounds[0].uuid: invalid UUID",
+        diagnostic.message(),
+    );
+}
+
+test "config validates Trojan credentials, TLS, and fallback" {
+    var diagnostic: Diagnostic = .{};
+    var valid = try fromJson(std.testing.allocator,
+        \\{
+        \\  "inbounds": [
+        \\    { "tag": "trojan", "protocol": "trojan", "listen": "127.0.0.1:443",
+        \\      "password": "secret",
+        \\      "fallback": "127.0.0.1:8080",
+        \\      "tls": { "certificate": "cert.pem",
+        \\               "private_key": "key.pem" } }
+        \\  ],
+        \\  "outbounds": [
+        \\    { "tag": "proxy", "protocol": "trojan",
+        \\      "server": "example.com:443", "password": "secret",
+        \\      "tls": { "sni": "example.com" } }
+        \\  ],
+        \\  "route": { "final": "proxy" }
+        \\}
+    );
+    defer valid.deinit();
+    try validate(valid.inner.value, &diagnostic);
+
+    var missing_password = try fromJson(std.testing.allocator,
+        \\{
+        \\  "inbounds": [
+        \\    { "tag": "trojan", "protocol": "trojan", "listen": "127.0.0.1:443",
+        \\      "tls": { "certificate": "cert.pem", "private_key": "key.pem" } }
+        \\  ]
+        \\}
+    );
+    defer missing_password.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(missing_password.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "inbounds[0].password: required for trojan",
+        diagnostic.message(),
+    );
+
+    var missing_tls = try fromJson(std.testing.allocator,
+        \\{
+        \\  "outbounds": [
+        \\    { "tag": "proxy", "protocol": "trojan",
+        \\      "server": "example.com:443", "password": "secret" }
+        \\  ]
+        \\}
+    );
+    defer missing_tls.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(missing_tls.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "outbounds[0].tls: required for trojan",
+        diagnostic.message(),
+    );
+
+    var fallback_on_socks = try fromJson(std.testing.allocator,
+        \\{
+        \\  "inbounds": [
+        \\    { "tag": "socks", "protocol": "socks5", "listen": "127.0.0.1:1080",
+        \\      "fallback": "127.0.0.1:8080" }
+        \\  ]
+        \\}
+    );
+    defer fallback_on_socks.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(fallback_on_socks.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "inbounds[0]: socks5/http do not take credentials, TLS, or fallback",
+        diagnostic.message(),
+    );
+
+    var bad_fallback = try fromJson(std.testing.allocator,
+        \\{
+        \\  "inbounds": [
+        \\    { "tag": "trojan", "protocol": "trojan", "listen": "127.0.0.1:443",
+        \\      "password": "secret", "fallback": "not-an-endpoint",
+        \\      "tls": { "certificate": "cert.pem", "private_key": "key.pem" } }
+        \\  ]
+        \\}
+    );
+    defer bad_fallback.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(bad_fallback.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "inbounds[0].fallback: invalid endpoint 'not-an-endpoint'",
         diagnostic.message(),
     );
 }

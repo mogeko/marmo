@@ -9,6 +9,7 @@ of the root library build.
 | Example | Purpose |
 | --- | --- |
 | [vless](vless/) | VLESS server/client over TLS; includes local Xray interop notes |
+| [trojan](trojan/) | Trojan server/client over TLS with an optional routed fallback |
 | [shadowsocks2022](shadowsocks2022/) | Shadowsocks 2022 server/client |
 
 ## Commands
