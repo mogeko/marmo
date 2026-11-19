@@ -1,10 +1,11 @@
 # Architecture
 
 Status: Phase 1 MVP implemented; Phase 2 started with outbound selectors and
-active TCP health probes, followed by a VLESS outbound over TCP or TLS. SS2022
-TCP/UDP interop was verified locally against shadowsocks-rust 1.25.0 in both
-directions; the interop harness is not part of the repository. Protocol and
-Phase 2 gaps are tracked in `docs/protocols/` and §11.
+active TCP health probes, followed by a VLESS outbound over TCP or TLS and a
+TLS 1.3 server package. SS2022 TCP/UDP interop was verified locally against
+shadowsocks-rust 1.25.0 in both directions; the interop harness is not part of
+the repository. Protocol and Phase 2 gaps are tracked in `docs/protocols/` and
+§11.
 
 ## 1. Purpose
 
@@ -55,8 +56,8 @@ handling, and configuration storage.
 - **No own event loop**: the library takes `io: std.Io` and never creates
   threads, an event loop, or a global allocator. The embedder owns the runtime.
 - **std gaps that must be filled in-tree** (ADR-0007):
-  - TLS: client only (`std.crypto.tls.Client`); the TLS 1.3 server is in-tree
-    work in Phase 2.
+  - TLS: client from `std.crypto.tls.Client`; the TLS 1.3 server is in-tree in
+    `packages/tls13` (X25519, AES-128-GCM/SHA-256, ECDSA P-256).
   - QUIC, HTTP/2, and a WebSocket client: none; implemented in-tree.
   - DNS: system resolver via `IpAddress.resolve`, no DoH/DoT client.
 - **No external transport backends**: no C toolchain and no optional backend
@@ -413,9 +414,9 @@ Phasing:
   config, counters.
 - **Phase 2**: VLESS/Trojan/VMess, in-tree TLS 1.3 server and WS/H2 transports,
   sniffing, compiled rule sets, process rules, groups and health checks, DNS
-  cache/DoH. Implemented: selectors, TCP health probes, and a VLESS outbound
-  over TCP or TLS (client side). `http_head`, jitter, backoff, VLESS UDP and
-  inbound, and the remaining items are next.
+  cache/DoH. Implemented: selectors, TCP health probes, a VLESS outbound over
+  TCP or TLS, and the TLS 1.3 server package. `http_head`, jitter, backoff,
+  VLESS UDP and inbound, and the remaining items are next.
 - **Phase 3**: in-tree QUIC, TUIC, Hysteria2, gRPC transport.
 - **Phase 4**: optional TUN/transparent proxying, Windows, transport hardening
   and external audit.
@@ -431,17 +432,23 @@ client scope.
 
 ## 13. Dependencies and in-tree transports
 
+First-party packages live under `packages/` and are consumed by path
+dependencies (ADR-0010). `packages/tls13` owns TLS handshake, record, and CA
+policy; the root package only adapts `Stream` to its `Reader`/`Writer` API.
+
 There is exactly one build configuration: std-only, no C toolchain, no optional
 backend selected by a flag (ADR-0007). A transport that `std` lacks is
 implemented in this repository, but in-tree code is always second choice:
 re-check every transport on each Zig upgrade and migrate to `std` as soon as it
 provides the same primitive, deleting the in-tree version.
 
-- **TLS client**: `std.crypto.tls.Client`, adapted to the public `Stream`
-  interface in `src/transport/tls_client.zig` and composed as a transport
-  dialer in `src/transport/tls_dialer.zig` (Phase 1/2).
-- **TLS 1.3 server**: in-tree on `std.crypto`, Phase 2; TLS 1.3 only, ALPN/SNI,
-  caller-provided certificate and key, no renegotiation or weak ciphers.
+- **TLS client**: `std.crypto.tls.Client` inside `packages/tls13`, adapted to
+  the public `Stream` interface in `src/transport/tls_client.zig` and composed
+  as a transport dialer in `src/transport/tls_dialer.zig`.
+- **TLS 1.3 server**: in-tree in `packages/tls13` on `std.crypto`; X25519,
+  AES-128-GCM/SHA-256, ECDSA P-256 certificates, caller-provided chain and key.
+  No client auth, PSK, tickets, ALPN selection, KeyUpdate, or 0-RTT.
+  `src/transport/tls_server.zig` is the thin `Stream` adapter.
 - **WebSocket / HTTP/2 / gRPC**: in-tree, Phase 2/3; HTTP/2 is limited to
   transport needs (framing, HPACK, SETTINGS, GOAWAY).
 - **QUIC**: in-tree, Phase 3; QUIC v1, stream multiplexing, datagrams, and
@@ -569,3 +576,4 @@ Module boundaries are enforced by review, not by the compiler; do not import
 | [0007](decisions/0007-tls-quic-dependencies.md) | TLS, QUIC, crypto dependencies (std-first) | Accepted |
 | [0008](decisions/0008-api-and-config.md) | Public API, config, errors | Accepted |
 | [0009](decisions/0009-licensing-and-interop.md) | Licensing and interop hygiene | Accepted |
+| [0010](decisions/0010-tls-module-package.md) | TLS module as a replaceable package | Accepted |

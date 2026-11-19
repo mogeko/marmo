@@ -18,12 +18,16 @@ repository ships the library only: no CLI, daemon, or `app` layer.
 
 - Phase 1 MVP is implemented. Phase 2 has started with outbound selectors:
   manual, round-robin, random, fallback, and least-latency, plus active TCP
-  health probes and a VLESS outbound over TCP or TLS. `http_head`, jitter, and
-  exponential backoff remain, along with Trojan/VMess, VLESS UDP and inbound,
-  TLS server, WS/H2, sniffing, rule sets, process rules, and DNS cache/DoH.
+  health probes, a VLESS outbound over TCP or TLS, and a TLS 1.3 server.
+  `http_head`, jitter, and exponential backoff remain, along with Trojan/VMess,
+  VLESS UDP and inbound, TLS inbounds, WS/H2, sniffing, rule sets, process
+  rules, and DNS cache/DoH.
+- `packages/tls13/` is a first-party package (ADR-0010) with its own build;
+  the root depends on it by path. It has no marmo imports. Root adapters live
+  in `src/transport/tls_{client,dialer,server}.zig`.
 - `examples/shadowsocks2022/` is standalone: it has its own `build.zig` and
   `build.zig.zon` and is not part of the root build.
-- ADR-0001–0009 are accepted; new architecture decisions need a new ADR.
+- ADR-0001–0010 are accepted; new architecture decisions need a new ADR.
 - Snell is deferred and WireGuard is out of scope (ADR-0002).
 
 ## Toolchain gotchas (verified Zig 0.17.1)
@@ -32,9 +36,10 @@ repository ships the library only: no CLI, daemon, or `app` layer.
   loop, and never use `async`/`await` keywords.
 - `Io.Evented` exists only on aarch64/x86_64/riscv64 (io_uring, kqueue,
   Dispatch); everything else uses `Io.Threaded`.
-- `std` has a TLS **client** only. No TLS server, no QUIC, no HTTP/2, no
-  WebSocket client. ADR-0007 requires implementing missing transports in-tree;
-  there are no optional backends.
+- `std` has a TLS **client** only. The TLS 1.3 server is in-tree in
+  `packages/tls13`; QUIC, HTTP/2, and a WebSocket client are still missing.
+  ADR-0007 requires implementing missing transports in-tree; there are no
+  optional backends.
 - Every allocating API takes an explicit allocator; no globals or thread-locals.
 
 ## Zig style
@@ -160,12 +165,13 @@ Adapted from TigerBeetle's
 
 ## Commands and tests
 
-- `zig build test` runs the unit, public API, and integration tests (47 tests
-  today). Reference-implementation interop is local-only and not part of this
-  repository or CI.
+- `zig build test` runs the root unit, public API, and integration tests (48
+  tests today). `(cd packages/tls13 && zig build test)` runs the TLS package
+  tests (4 today). Reference-implementation interop is local-only and not part
+  of this repository or CI.
 - `zig test src/root.zig` runs the module tests directly; use
   `zig test src/net/endpoint.zig --test-filter <name>` for one file or test.
-- `zig fmt build.zig src tests` before finishing; CI runs
-  `zig fmt --check build.zig src tests`.
+- `zig fmt build.zig src tests packages` before finishing; CI runs
+  `zig fmt --check build.zig src tests packages` and tests each package.
 - Integration tests will use loopback port 0 and never live servers.
 - Protocol tests use captured fixtures under `tests/fixtures/<protocol>/`.

@@ -3,12 +3,15 @@
     .version = "0.0.1",
     .fingerprint = 0x7e31019a076a735f,
     .minimum_zig_version = "0.17.1",
-    .dependencies = .{},
+    .dependencies = .{
+        .tls13 = .{ .path = "packages/tls13" },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
         "tests",
+        "packages",
         "LICENSE",
         "README.md",
     },

@@ -1,25 +1,20 @@
-//! TLS client stream over an existing byte stream.
-//!
-//! The handshake and record layer come from `std.crypto.tls.Client`; this file
-//! adapts the public `Stream` interface to the `std.Io.Reader`/`Writer` pair
-//! that the TLS client expects.
+//! Adapter from `Stream` to the TLS 1.3 package client.
 
 const std = @import("std");
+const tls13 = @import("tls13");
 const Endpoint = @import("../net/endpoint.zig").Endpoint;
 const Stream = @import("stream.zig").Stream;
 
-const tls = std.crypto.tls;
-
-pub const socket_buffer_len = tls.Client.min_buffer_len;
+pub const socket_buffer_len = tls13.min_buffer_len;
 const plain_buffer_len = 4096;
 
 pub const Options = struct {
     /// Server name for SNI and certificate host verification.
     server_name: ?[]const u8,
-    /// Verify the certificate chain against `ca`.
-    verify: bool,
-    ca: ?*std.crypto.Certificate.Bundle = null,
-    ca_lock: ?*std.Io.RwLock = null,
+    /// Skip CA-chain verification. The hostname is still checked when
+    /// `server_name` is present.
+    insecure: bool,
+    ca: ?*tls13.Ca = null,
 };
 
 pub const CreateError = error{
@@ -36,7 +31,7 @@ pub const TlsClientStream = struct {
     write_lock: std.Io.Mutex = .init,
     socket_reader: SocketReader,
     socket_writer: SocketWriter,
-    client: std.crypto.tls.Client,
+    client: tls13.Client,
     plain_read_buffer: [plain_buffer_len]u8 = undefined,
     plain_write_buffer: [plain_buffer_len]u8 = undefined,
     socket_read_buffer: [socket_buffer_len]u8 = undefined,
@@ -49,13 +44,6 @@ pub const TlsClientStream = struct {
         inner: Stream,
         options: Options,
     ) CreateError!*TlsClientStream {
-        if (options.verify and (options.ca == null or options.ca_lock == null)) {
-            return error.HandshakeFailed;
-        }
-        if (options.verify and options.server_name == null) {
-            return error.HandshakeFailed;
-        }
-
         const self = try gpa.create(TlsClientStream);
         errdefer gpa.destroy(self);
         self.gpa = gpa;
@@ -66,37 +54,20 @@ pub const TlsClientStream = struct {
         self.socket_reader = SocketReader.init(inner, io, &self.socket_read_buffer);
         self.socket_writer = SocketWriter.init(inner, io, &self.socket_write_buffer);
 
-        var entropy: [tls.Client.Options.entropy_len]u8 = undefined;
-        std.Io.randomSecure(io, &entropy) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => return error.HandshakeFailed,
-        };
-
-        self.client = tls.Client.init(
+        self.client = tls13.Client.init(
+            io,
             &self.socket_reader.interface,
             &self.socket_writer.interface,
             .{
-                .host = if (options.server_name) |name|
-                    .{ .explicit = name }
-                else
-                    .no_verification,
-                .ca = if (options.verify) .{ .bundle = .{
-                    .gpa = gpa,
-                    .io = io,
-                    .lock = options.ca_lock.?,
-                    .bundle = options.ca.?,
-                } } else .no_verification,
-                .write_buffer = &self.plain_write_buffer,
+                .server_name = options.server_name,
+                .verify = !options.insecure,
+                .ca = options.ca,
                 .read_buffer = &self.plain_read_buffer,
-                .entropy = &entropy,
-                .realtime_now = std.Io.Timestamp.now(io, .real),
-                // A proxied byte stream has no application framing that could
-                // detect truncation; a peer close is a normal EOF.
-                .allow_truncation_attacks = true,
+                .write_buffer = &self.plain_write_buffer,
             },
         ) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
-            else => return error.HandshakeFailed,
+            error.HandshakeFailed => return error.HandshakeFailed,
         };
         return self;
     }
@@ -108,20 +79,8 @@ pub const TlsClientStream = struct {
     fn read(ctx: *anyopaque, io: std.Io, buffers: [][]u8) Stream.ReadError!usize {
         _ = io;
         const self: *TlsClientStream = @ptrCast(@alignCast(ctx));
-        std.debug.assert(self.socket_reader.interface.buffer.len >= socket_buffer_len);
-        var requested: usize = 0;
-        for (buffers) |buffer| requested += buffer.len;
-        if (requested == 0) return 0;
-
-        // The TLS reader may return zero while a partial record is buffered;
-        // the public Stream contract only allows zero for a clean EOF.
-        while (true) {
-            const read_len = self.client.reader.readVec(buffers) catch |err| switch (err) {
-                error.EndOfStream => return 0,
-                error.ReadFailed => return self.readFailure(),
-            };
-            if (read_len > 0) return read_len;
-        }
+        return tls13.readSome(self.client.reader(), buffers) catch
+            return self.readFailure();
     }
 
     fn write(
@@ -135,11 +94,11 @@ pub const TlsClientStream = struct {
 
         self.write_lock.lock(io) catch return error.Canceled;
         defer self.write_lock.unlock(io);
-        self.client.writer.writeVecAll(@constCast(buffers)) catch
+        self.client.writer().writeVecAll(@constCast(buffers)) catch
             return self.writeFailure();
         // The TLS writer encrypts into the socket writer but does not flush
         // the underlying transport, so both layers need an explicit flush.
-        self.client.writer.flush() catch return self.writeFailure();
+        self.client.writer().flush() catch return self.writeFailure();
         self.socket_writer.interface.flush() catch return self.writeFailure();
         return total;
     }
@@ -161,8 +120,7 @@ pub const TlsClientStream = struct {
                 return self.inner.shutdown(io, .send);
             },
             // `shutdown(.both)` is also used to abort a relay from the reading
-            // direction. Only touch the underlying transport there: sending
-            // close_notify here would race with a concurrent writer.
+            // direction. Only touch the underlying transport there.
             .both => return self.inner.shutdown(io, .both),
         }
     }
@@ -171,7 +129,7 @@ pub const TlsClientStream = struct {
         const self: *TlsClientStream = @ptrCast(@alignCast(ctx));
         if (self.closed.swap(true, .acq_rel)) return;
         self.inner.close(io);
-        std.crypto.secureZero(u8, std.mem.asBytes(&self.client));
+        self.client.deinit();
         std.crypto.secureZero(u8, &self.plain_read_buffer);
         std.crypto.secureZero(u8, &self.plain_write_buffer);
         std.crypto.secureZero(u8, &self.socket_read_buffer);

@@ -1,0 +1,13 @@
+.{
+    .name = .tls13,
+    .version = "0.0.0",
+    .fingerprint = 0x94ba4904a2f40078,
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+    },
+}

@@ -4,9 +4,18 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const tls13 = b.dependency("tls13", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     const marmo = b.addModule("marmo", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "tls13", .module = tls13.module("tls13") },
+        },
     });
 
     const unit_tests = b.addTest(.{ .root_module = marmo });
@@ -29,6 +38,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "marmo", .module = marmo },
+            .{ .name = "tls13", .module = tls13.module("tls13") },
         },
     });
     const integration_tests = b.addTest(.{ .root_module = integration });

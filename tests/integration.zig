@@ -1,5 +1,6 @@
 const std = @import("std");
 const marmo = @import("marmo");
+const tls13 = @import("tls13");
 
 const allocator = std.heap.smp_allocator;
 
@@ -1050,4 +1051,106 @@ test "selector health check probes a node" {
     try event.wait(io);
     instance.stop();
     _ = health_future.await(io);
+}
+
+const TlsAdapterContext = struct {
+    listener: *std.Io.net.Server,
+    cert: *tls13.test_cert.Certificate,
+    error_code: ?anyerror = null,
+};
+
+fn tlsAdapterServer(io: std.Io, context: *TlsAdapterContext) void {
+    tlsAdapterServerRun(io, context) catch |err| {
+        context.error_code = err;
+    };
+}
+
+fn tlsAdapterServerRun(io: std.Io, context: *TlsAdapterContext) !void {
+    const accepted = try context.listener.accept(io);
+    const remote: marmo.Endpoint = .{ .ip = accepted.socket.address };
+    const local: marmo.Endpoint = .{ .ip = context.listener.socket.address };
+    const tcp = try marmo.TcpStream.create(allocator, accepted, local, remote);
+    const tls = marmo.TlsServerStream.create(
+        io,
+        allocator,
+        tcp.stream(),
+        .{
+            .certificate_chain = &.{context.cert.der},
+            .private_key = context.cert.key_pair,
+        },
+    ) catch |err| {
+        tcp.stream().close(io);
+        return err;
+    };
+    const stream = tls.stream();
+    defer stream.close(io);
+
+    var buffer: [128]u8 = undefined;
+    while (true) {
+        var buffers = [_][]u8{&buffer};
+        const read_len = try stream.read(io, &buffers);
+        if (read_len == 0) break;
+        _ = try stream.write(io, &.{buffer[0..read_len]});
+    }
+}
+
+test "TLS 1.3 adapters exchange application data" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var cert = try tls13.test_cert.generate(allocator, io);
+    defer cert.deinit(allocator);
+
+    var bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var listener = try bind.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    const port = listener.socket.address.getPort();
+
+    var context: TlsAdapterContext = .{
+        .listener = &listener,
+        .cert = &cert,
+    };
+    var server_future = io.async(tlsAdapterServer, .{ io, &context });
+
+    var address: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
+    const accepted = try std.Io.net.IpAddress.connect(
+        &address,
+        io,
+        .{ .mode = .stream },
+    );
+    const remote: marmo.Endpoint = .{ .ip = accepted.socket.address };
+    const tcp = try marmo.TcpStream.create(allocator, accepted, remote, remote);
+    const tls = marmo.TlsClientStream.create(
+        io,
+        allocator,
+        tcp.stream(),
+        .{
+            .server_name = "localhost",
+            .insecure = true,
+        },
+    ) catch |err| {
+        tcp.stream().close(io);
+        return err;
+    };
+    const stream = tls.stream();
+    defer stream.close(io);
+
+    _ = try stream.write(io, &.{"hello"});
+    var response: [5]u8 = undefined;
+    var offset: usize = 0;
+    while (offset < response.len) {
+        var buffers = [_][]u8{response[offset..]};
+        const read_len = try stream.read(io, &buffers);
+        if (read_len == 0) return error.EndOfStream;
+        offset += read_len;
+    }
+    try std.testing.expectEqualStrings("hello", &response);
+
+    stream.shutdown(io, .both) catch |err| switch (err) {
+        error.NotConnected => {},
+        else => return err,
+    };
+    _ = server_future.await(io);
+    if (context.error_code) |err| return err;
 }

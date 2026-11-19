@@ -35,7 +35,8 @@ retrieved 2026-11-19. TLS record details come from RFC 8446; the record layer is
   - A missing `close_notify` is treated as EOF: proxied byte streams have no
     application length framing that could detect truncation.
 - The TLS adapter implements the public `Stream` interface and preserves the
-  underlying endpoints.
+  underlying endpoints. TLS lives in `packages/tls13`; the in-tree TLS 1.3
+  server is available there, but this outbound only uses the client side.
 
 ### Config example
 

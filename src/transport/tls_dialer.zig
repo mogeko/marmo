@@ -1,6 +1,7 @@
-//! TLS transport dialer: wraps another dialer and adds a TLS client handshake.
+//! TLS transport dialer: wraps another dialer and adds a TLS 1.3 handshake.
 
 const std = @import("std");
+const tls13 = @import("tls13");
 const Endpoint = @import("../net/endpoint.zig").Endpoint;
 const Dialer = @import("dialer.zig").Dialer;
 const Stream = @import("stream.zig").Stream;
@@ -12,18 +13,29 @@ pub const TlsDialer = struct {
     /// SNI and certificate host; null disables both.
     server_name: ?[]const u8,
     insecure: bool,
-    bundle: std.crypto.Certificate.Bundle = .empty,
-    bundle_lock: std.Io.RwLock = .init,
-    bundle_loaded: bool = false,
+    ca: tls13.Ca,
+
+    pub fn init(
+        gpa: std.mem.Allocator,
+        base: Dialer,
+        server_name: ?[]const u8,
+        insecure: bool,
+    ) TlsDialer {
+        return .{
+            .gpa = gpa,
+            .base = base,
+            .server_name = server_name,
+            .insecure = insecure,
+            .ca = .init(gpa),
+        };
+    }
 
     pub fn asDialer(self: *TlsDialer) Dialer {
         return .{ .ctx = self, .vtable = &vtable };
     }
 
     pub fn deinit(self: *TlsDialer) void {
-        if (self.bundle_loaded) self.bundle.deinit(self.gpa);
-        self.bundle = .empty;
-        self.bundle_loaded = false;
+        self.ca.deinit();
     }
 
     fn connect(
@@ -33,47 +45,19 @@ pub const TlsDialer = struct {
     ) Dialer.ConnectError!Stream {
         const self: *TlsDialer = @ptrCast(@alignCast(ctx));
         const inner = try self.base.connect(io, endpoint);
-        const tls_stream = self.wrap(io, inner) catch |err| {
+        const tls_stream = TlsClientStream.create(io, self.gpa, inner, .{
+            .server_name = self.server_name,
+            .insecure = self.insecure,
+            .ca = if (self.insecure) null else &self.ca,
+        }) catch |err| {
             inner.close(io);
-            return err;
+            return switch (err) {
+                error.Canceled => error.Canceled,
+                error.OutOfMemory => error.Unexpected,
+                error.HandshakeFailed => error.ProtocolViolation,
+            };
         };
         return tls_stream.stream();
-    }
-
-    fn wrap(
-        self: *TlsDialer,
-        io: std.Io,
-        inner: Stream,
-    ) Dialer.ConnectError!*TlsClientStream {
-        if (!self.insecure) try self.loadBundle(io);
-        return TlsClientStream.create(io, self.gpa, inner, .{
-            .server_name = self.server_name,
-            .verify = !self.insecure,
-            .ca = if (self.insecure) null else &self.bundle,
-            .ca_lock = if (self.insecure) null else &self.bundle_lock,
-        }) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            error.OutOfMemory => return error.Unexpected,
-            error.HandshakeFailed => return error.ProtocolViolation,
-        };
-    }
-
-    /// Loads the system CA bundle once, on the first verifying connection.
-    fn loadBundle(self: *TlsDialer, io: std.Io) Dialer.ConnectError!void {
-        self.bundle_lock.lock(io) catch return error.Canceled;
-        defer self.bundle_lock.unlock(io);
-        if (self.bundle_loaded) return;
-
-        self.bundle.rescan(
-            self.gpa,
-            io,
-            std.Io.Timestamp.now(io, .real),
-        ) catch {
-            self.bundle.deinit(self.gpa);
-            self.bundle = .empty;
-            return error.Unexpected;
-        };
-        self.bundle_loaded = true;
     }
 
     const vtable: Dialer.VTable = .{ .connect = connect };

@@ -7,18 +7,20 @@ protocols, rule-based routing, and latency-aware node selection.
 
 **Status:** Phase 1 MVP implemented; Phase 2 has started with outbound selectors
 (manual, round-robin, random, fallback, least-latency), active TCP health
-probes, and a VLESS outbound over TCP or TLS. Includes strict JSON config, direct
-TCP/UDP and HTTP CONNECT outbounds, SOCKS5 inbound (CONNECT + UDP ASSOCIATE),
-HTTP CONNECT and forward proxying, Shadowsocks 2022 TCP/UDP
+probes, a VLESS outbound over TCP or TLS, and a TLS 1.3 server. Includes strict
+JSON config, direct TCP/UDP and HTTP CONNECT outbounds, SOCKS5 inbound (CONNECT
++ UDP ASSOCIATE), HTTP CONNECT and forward proxying, Shadowsocks 2022 TCP/UDP
 (AES-128/256-GCM), domain/IP-CIDR/port routing, relay, and metrics.
 
-**Transport status:** plaintext TCP and the TLS client are wired in; TLS
-verification uses the system CA bundle, with an explicit insecure option for
-testing. The in-tree TLS 1.3 server, QUIC, HTTP/2, WebSocket, and gRPC are not
-implemented (ADR-0007).
+**Transport status:** plaintext TCP, the TLS client, and an in-tree TLS 1.3
+server are wired in. The TLS code lives in the independent
+[`packages/tls13`](packages/tls13/) package (ADR-0010); the server supports
+X25519, AES-128-GCM/SHA-256, and ECDSA P-256 certificates. QUIC, HTTP/2,
+WebSocket, and gRPC are not implemented (ADR-0007).
 
 - [Architecture](docs/architecture.md)
 - [Architecture decisions](docs/decisions/)
+- [TLS 1.3 package](packages/tls13/)
 - [Shadowsocks 2022 example](examples/shadowsocks2022/)
 - [Agent instructions and Zig style](AGENTS.md)
 

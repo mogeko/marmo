@@ -561,16 +561,17 @@ fn compileVless(
     var transport_cleanup: ?*const fn (ctx: *anyopaque) void = null;
     var transport_cleanup_ctx: ?*anyopaque = null;
     if (config.tls) |tls| {
-        const tls_dialer = try allocator.create(TlsDialer);
-        tls_dialer.* = .{
-            .gpa = gpa,
-            .base = direct.dialer(),
-            .server_name = tls.sni orelse switch (server) {
-                .domain => |domain| domain.name,
-                .ip => null,
-            },
-            .insecure = tls.insecure,
+        const server_name = tls.sni orelse switch (server) {
+            .domain => |domain| domain.name,
+            .ip => null,
         };
+        const tls_dialer = try allocator.create(TlsDialer);
+        tls_dialer.* = TlsDialer.init(
+            gpa,
+            direct.dialer(),
+            server_name,
+            tls.insecure,
+        );
         transport = tls_dialer.asDialer();
         transport_cleanup = cleanupTlsDialer;
         transport_cleanup_ctx = tls_dialer;

@@ -12,9 +12,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
-      - run: zig fmt --check build.zig src tests
+      - run: zig fmt --check build.zig src tests packages
       - run: zig build --summary all
       - run: zig build test --summary all
+      - name: Test packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for build in packages/*/build.zig; do
+            dir="${build%/build.zig}"
+            echo "::group::Testing ${dir}"
+            (cd "${dir}" && zig build test)
+            echo "::endgroup::"
+          done
 
   examples:
     runs-on: ubuntu-latest

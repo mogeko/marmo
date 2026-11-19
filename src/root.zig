@@ -34,6 +34,7 @@ pub const ShutdownHow = Stream.ShutdownHow;
 pub const TcpStream = @import("transport/tcp.zig").TcpStream;
 pub const TlsClientStream = @import("transport/tls_client.zig").TlsClientStream;
 pub const TlsDialer = @import("transport/tls_dialer.zig").TlsDialer;
+pub const TlsServerStream = @import("transport/tls_server.zig").TlsServerStream;
 pub const UdpPacketConn = @import("transport/udp.zig").UdpPacketConn;
 
 pub const Outbound = @import("outbound/outbound.zig").Outbound;
