@@ -7,6 +7,18 @@ and behavior may change between minor releases.
 
 ### Added
 
+- TLS ALPN negotiation on both sides (ADR-0012). The TLS client is now the
+  in-tree TLS 1.3 implementation, replacing `std.crypto.tls.Client`, so it can
+  send the ALPN extension. It verifies ECDSA, Ed25519, and RSA server
+  certificates through the system CA bundle.
+- First-party `packages/http2`: HTTP/2 framing, HPACK with Huffman decoding,
+  SETTINGS, flow control, and a one-stream client/server transport
+  (ADR-0013). Root adapters expose `H2Stream` and `H2Dialer`.
+- First-party `packages/ws`: RFC 6455 client/server opening handshake, masked
+  framing, continuation, ping/pong, and close (ADR-0014). Root adapters expose
+  `WsStream` and `WsDialer`.
+- Loopback integration coverage for WebSocket over TLS and HTTP/2 over TLS,
+  including ALPN assertions.
 - Trojan inbound and outbound over TLS: TCP `CONNECT`, UDP `ASSOCIATE` with
   per-packet destinations, SHA-224 password authentication, and an optional
   explicit `fallback` endpoint routed through the router (ADR-0011).

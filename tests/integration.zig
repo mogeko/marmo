@@ -2035,3 +2035,261 @@ test "Trojan fallback receives an unauthenticated HTTP probe" {
     instance.stop();
     _ = fallback_future.await(io);
 }
+
+const WsAdapterContext = struct {
+    listener: *std.Io.net.Server,
+    cert: *tls13.test_cert.Certificate,
+    alpn: []const u8,
+    error_code: ?anyerror = null,
+};
+
+fn wsAdapterServer(io: std.Io, context: *WsAdapterContext) void {
+    wsAdapterServerRun(io, context) catch |err| {
+        context.error_code = err;
+    };
+}
+
+fn wsAdapterServerRun(io: std.Io, context: *WsAdapterContext) !void {
+    const accepted = try context.listener.accept(io);
+    const remote: marmo.Endpoint = .{ .ip = accepted.socket.address };
+    const local: marmo.Endpoint = .{ .ip = context.listener.socket.address };
+    const tcp = try marmo.TcpStream.create(allocator, accepted, local, remote);
+
+    const tls = marmo.TlsServerStream.create(
+        io,
+        allocator,
+        tcp.stream(),
+        .{
+            .certificate_chain = &.{context.cert.der},
+            .private_key = context.cert.key_pair,
+            .alpn_protocols = &.{context.alpn},
+        },
+    ) catch |err| {
+        tcp.stream().close(io);
+        return err;
+    };
+    if (!std.mem.eql(
+        u8,
+        tls.negotiatedProtocol() orelse "",
+        context.alpn,
+    )) return error.TestUnexpectedResult;
+
+    const ws = marmo.WsStream.createServer(
+        io,
+        allocator,
+        tls.stream(),
+        .{ .path = "/ws" },
+    ) catch |err| {
+        tls.stream().close(io);
+        return err;
+    };
+    const stream = ws.stream();
+    defer stream.close(io);
+
+    var buffer: [128]u8 = undefined;
+    while (true) {
+        var buffers = [_][]u8{&buffer};
+        const read_len = try stream.read(io, &buffers);
+        if (read_len == 0) break;
+        _ = try stream.write(io, &.{buffer[0..read_len]});
+    }
+}
+
+test "WebSocket over TLS echoes and negotiates ALPN" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var cert = try tls13.test_cert.generate(allocator, io);
+    defer cert.deinit(allocator);
+
+    var bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var listener = try bind.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+
+    var context: WsAdapterContext = .{
+        .listener = &listener,
+        .cert = &cert,
+        .alpn = "http/1.1",
+    };
+    var server_future = io.async(wsAdapterServer, .{ io, &context });
+
+    var address: std.Io.net.IpAddress = .{
+        .ip4 = .loopback(listener.socket.address.getPort()),
+    };
+    const accepted = try std.Io.net.IpAddress.connect(
+        &address,
+        io,
+        .{ .mode = .stream },
+    );
+    const remote: marmo.Endpoint = .{ .ip = accepted.socket.address };
+    const tcp = try marmo.TcpStream.create(allocator, accepted, remote, remote);
+    const tls = marmo.TlsClientStream.create(
+        io,
+        allocator,
+        tcp.stream(),
+        .{
+            .server_name = "localhost",
+            .insecure = true,
+            .alpn_protocols = &.{"http/1.1"},
+        },
+    ) catch |err| {
+        tcp.stream().close(io);
+        return err;
+    };
+    try std.testing.expectEqualStrings(
+        "http/1.1",
+        tls.negotiatedProtocol() orelse "",
+    );
+
+    const ws = marmo.WsStream.createClient(
+        io,
+        allocator,
+        tls.stream(),
+        .{ .host = "localhost", .path = "/ws" },
+    ) catch |err| {
+        tls.stream().close(io);
+        return err;
+    };
+    const stream = ws.stream();
+    defer stream.close(io);
+
+    _ = try stream.write(io, &.{"hello over ws"});
+    var response: [13]u8 = undefined;
+    try streamReadExact(io, stream, &response);
+    try std.testing.expectEqualStrings("hello over ws", &response);
+
+    stream.shutdown(io, .send) catch |err| switch (err) {
+        error.NotConnected => {},
+        else => return err,
+    };
+    _ = server_future.await(io);
+    if (context.error_code) |err| return err;
+}
+
+const H2AdapterContext = struct {
+    listener: *std.Io.net.Server,
+    cert: *tls13.test_cert.Certificate,
+    error_code: ?anyerror = null,
+};
+
+fn h2AdapterServer(io: std.Io, context: *H2AdapterContext) void {
+    h2AdapterServerRun(io, context) catch |err| {
+        context.error_code = err;
+    };
+}
+
+fn h2AdapterServerRun(io: std.Io, context: *H2AdapterContext) !void {
+    const accepted = try context.listener.accept(io);
+    const remote: marmo.Endpoint = .{ .ip = accepted.socket.address };
+    const local: marmo.Endpoint = .{ .ip = context.listener.socket.address };
+    const tcp = try marmo.TcpStream.create(allocator, accepted, local, remote);
+
+    const tls = marmo.TlsServerStream.create(
+        io,
+        allocator,
+        tcp.stream(),
+        .{
+            .certificate_chain = &.{context.cert.der},
+            .private_key = context.cert.key_pair,
+            .alpn_protocols = &.{"h2"},
+        },
+    ) catch |err| {
+        tcp.stream().close(io);
+        return err;
+    };
+    if (!std.mem.eql(u8, tls.negotiatedProtocol() orelse "", "h2")) {
+        return error.TestUnexpectedResult;
+    }
+
+    const h2 = marmo.H2Stream.createServer(
+        io,
+        allocator,
+        tls.stream(),
+        .{},
+    ) catch |err| {
+        tls.stream().close(io);
+        return err;
+    };
+    const stream = h2.stream();
+    defer stream.close(io);
+
+    var buffer: [128]u8 = undefined;
+    while (true) {
+        var buffers = [_][]u8{&buffer};
+        const read_len = try stream.read(io, &buffers);
+        if (read_len == 0) break;
+        _ = try stream.write(io, &.{buffer[0..read_len]});
+    }
+}
+
+test "HTTP/2 over TLS echoes and negotiates ALPN" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var cert = try tls13.test_cert.generate(allocator, io);
+    defer cert.deinit(allocator);
+
+    var bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var listener = try bind.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+
+    var context: H2AdapterContext = .{
+        .listener = &listener,
+        .cert = &cert,
+    };
+    var server_future = io.async(h2AdapterServer, .{ io, &context });
+
+    var address: std.Io.net.IpAddress = .{
+        .ip4 = .loopback(listener.socket.address.getPort()),
+    };
+    const accepted = try std.Io.net.IpAddress.connect(
+        &address,
+        io,
+        .{ .mode = .stream },
+    );
+    const remote: marmo.Endpoint = .{ .ip = accepted.socket.address };
+    const tcp = try marmo.TcpStream.create(allocator, accepted, remote, remote);
+    const tls = marmo.TlsClientStream.create(
+        io,
+        allocator,
+        tcp.stream(),
+        .{
+            .server_name = "localhost",
+            .insecure = true,
+            .alpn_protocols = &.{"h2"},
+        },
+    ) catch |err| {
+        tcp.stream().close(io);
+        return err;
+    };
+    try std.testing.expectEqualStrings(
+        "h2",
+        tls.negotiatedProtocol() orelse "",
+    );
+
+    const h2 = marmo.H2Stream.createClient(
+        io,
+        allocator,
+        tls.stream(),
+        .{ .host = "localhost", .path = "/" },
+    ) catch |err| {
+        tls.stream().close(io);
+        return err;
+    };
+    const stream = h2.stream();
+    defer stream.close(io);
+
+    _ = try stream.write(io, &.{"hello over h2"});
+    var response: [13]u8 = undefined;
+    try streamReadExact(io, stream, &response);
+    try std.testing.expectEqualStrings("hello over h2", &response);
+
+    stream.shutdown(io, .send) catch |err| switch (err) {
+        error.NotConnected => {},
+        else => return err,
+    };
+    _ = server_future.await(io);
+    if (context.error_code) |err| return err;
+}

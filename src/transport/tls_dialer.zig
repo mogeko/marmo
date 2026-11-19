@@ -14,6 +14,7 @@ pub const TlsDialer = struct {
     server_name: ?[]const u8,
     insecure: bool,
     handshake_timeout_ns: u64,
+    alpn_protocols: []const []const u8 = &.{},
     ca: tls13.Ca,
 
     pub fn init(
@@ -52,6 +53,7 @@ pub const TlsDialer = struct {
             .server_name = self.server_name,
             .insecure = self.insecure,
             .ca = if (self.insecure) null else &self.ca,
+            .alpn_protocols = self.alpn_protocols,
             .handshake_timeout_ns = self.handshake_timeout_ns,
         }) catch |err| {
             inner.close(io);

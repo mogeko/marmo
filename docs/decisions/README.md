@@ -32,11 +32,15 @@ Statuses: `Proposed` → `Accepted` | `Rejected` | `Superseded by ADR-NNNN`.
 | [0009](0009-licensing-and-interop.md) | Licensing and interop hygiene | Accepted | LGPL-2.1; clean-room protocol work |
 | [0010](0010-tls-module-package.md) | TLS module as a replaceable package | Accepted | `packages/tls13`; std-only API; path dependency |
 | [0011](0011-trojan-inbound-fallback.md) | Trojan inbound fallback | Accepted | optional explicit fallback; routed through `Dispatch`; no default |
+| [0012](0012-tls-alpn.md) | TLS ALPN negotiation | Accepted | ALPN on client and server; in-tree TLS 1.3 client |
+| [0013](0013-http2-package.md) | HTTP/2 transport package | Accepted | `packages/http2`; one stream; framing/HPACK/flow control |
+| [0014](0014-websocket-package.md) | WebSocket transport package | Accepted | `packages/ws`; RFC 6455 handshake and framing |
 
 ## Accepted decisions
 
 ADR-0001–0010 were accepted on 2026-11-18 (ADR-0010 on 2026-11-19); ADR-0011
-was accepted on 2026-11-19.
+was accepted on 2026-11-19. ADR-0012–0014 were accepted on 2026-11-19 on the
+direct implementation request.
 
 - **ADR-0002**: Snell deferred, WireGuard abandoned; all other protocols and
   phases accepted.
@@ -45,4 +49,7 @@ was accepted on 2026-11-19.
   that replaces them as soon as Zig's `std` provides the same primitive.
 - **ADR-0011**: Trojan inbound `fallback` is optional and explicit; it is
   routed through `Dispatch` and has no default endpoint.
+- **ADR-0012–0014**: TLS ALPN is negotiated on both sides by an in-tree TLS
+  1.3 client/server; HTTP/2 and WebSocket are std-only first-party packages
+  with one active stream (H2) and bounded RFC 6455 framing (WS).
 - **ADR-0001, 0003–0006, 0008, 0009**: accepted as recommended.

@@ -16,6 +16,8 @@ pub const Options = struct {
     /// `server_name` is present.
     insecure: bool,
     ca: ?*tls13.Ca = null,
+    /// ALPN protocols in preference order.
+    alpn_protocols: []const []const u8 = &.{},
     /// Bounded handshake duration. Zero disables the timeout.
     handshake_timeout_ns: u64 = 10 * std.time.ns_per_s,
 };
@@ -66,7 +68,7 @@ pub const TlsClientStream = struct {
         if (options.handshake_timeout_ns == 0) {
             self.client = clientHandshake(self, options) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
-                error.HandshakeFailed => return error.HandshakeFailed,
+                error.Closed, error.HandshakeFailed => return error.HandshakeFailed,
             };
             return self;
         }
@@ -96,7 +98,7 @@ pub const TlsClientStream = struct {
                 drainClientHandshake(&select);
                 self.client = client_result catch |err| switch (err) {
                     error.Canceled => return error.Canceled,
-                    error.HandshakeFailed => return error.HandshakeFailed,
+                    error.Closed, error.HandshakeFailed => return error.HandshakeFailed,
                 };
                 return self;
             },
@@ -122,10 +124,15 @@ pub const TlsClientStream = struct {
                 .server_name = options.server_name,
                 .verify = !options.insecure,
                 .ca = options.ca,
+                .alpn_protocols = options.alpn_protocols,
                 .read_buffer = &self.plain_read_buffer,
                 .write_buffer = &self.plain_write_buffer,
             },
         );
+    }
+
+    pub fn negotiatedProtocol(self: *const TlsClientStream) ?[]const u8 {
+        return self.client.negotiatedProtocol();
     }
 
     fn drainClientHandshake(select: *std.Io.Select(ClientHandshake)) void {
@@ -218,7 +225,14 @@ pub const TlsClientStream = struct {
     }
 
     fn readFailure(self: *TlsClientStream) Stream.ReadError {
-        return self.socket_reader.err orelse error.ProtocolViolation;
+        const err = self.client.readError() orelse {
+            return self.socket_reader.err orelse error.ProtocolViolation;
+        };
+        return switch (err) {
+            error.Canceled => error.Canceled,
+            error.Closed => error.Unexpected,
+            error.HandshakeFailed => error.ProtocolViolation,
+        };
     }
 
     fn writeFailure(self: *TlsClientStream) Stream.WriteError {

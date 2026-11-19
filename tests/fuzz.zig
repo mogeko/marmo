@@ -12,6 +12,8 @@
 const std = @import("std");
 const marmo = @import("marmo");
 const tls13 = @import("tls13");
+const http2 = @import("http2");
+const ws = @import("ws");
 const Cidr = marmo.Cidr;
 const Endpoint = marmo.Endpoint;
 const config = marmo.internal.config;
@@ -177,6 +179,55 @@ const FakeDispatch = struct {
         .metrics = metricsOf,
     };
 };
+
+fn fuzzWsFrame(_: Context, smith: *std.testing.Smith) anyerror!void {
+    var input: [ws.max_frame_payload]u8 = undefined;
+    const len = smith.slice(&input);
+    var reader = std.Io.Reader.fixed(input[0..len]);
+    var payload: [ws.max_frame_payload]u8 = undefined;
+    _ = ws.frame.read(&reader, .server, &payload) catch |err| switch (err) {
+        error.Canceled,
+        error.EndOfStream,
+        error.ProtocolViolation,
+        error.Unexpected,
+        => return,
+    };
+}
+
+fn fuzzWsHandshake(_: Context, smith: *std.testing.Smith) anyerror!void {
+    var input: [ws.max_handshake]u8 = undefined;
+    const len = smith.slice(&input);
+    var reader = std.Io.Reader.fixed(input[0..len]);
+    var head: ws.handshake.Head = .{};
+    ws.handshake.readHead(&reader, &head) catch return;
+    _ = ws.handshake.headerValue(head.bytes(), "sec-websocket-key");
+    _ = ws.handshake.headerValue(head.bytes(), "upgrade");
+}
+
+fn fuzzHttp2Frame(_: Context, smith: *std.testing.Smith) anyerror!void {
+    var input: [http2.max_frame_size + http2.frame.header_len]u8 = undefined;
+    const len = smith.slice(&input);
+    var reader = std.Io.Reader.fixed(input[0..len]);
+    var payload: [http2.max_frame_size]u8 = undefined;
+    _ = http2.frame.read(&reader, &payload) catch |err| switch (err) {
+        error.Canceled,
+        error.EndOfStream,
+        error.ProtocolViolation,
+        error.Unexpected,
+        => return,
+    };
+}
+
+fn fuzzHttp2Hpack(_: Context, smith: *std.testing.Smith) anyerror!void {
+    var input: [http2.max_header_block]u8 = undefined;
+    const len = smith.slice(&input);
+    var decoder = http2.hpack.Decoder.init();
+    var storage: [http2.max_header_block]u8 = undefined;
+    var headers: [http2.hpack.max_headers]http2.Header = undefined;
+    _ = decoder.decode(input[0..len], &storage, &headers) catch |err| switch (err) {
+        error.Malformed, error.OutOfMemory => return,
+    };
+}
 
 fn fuzzTlsClientHello(_: Context, smith: *std.testing.Smith) anyerror!void {
     var buffer: [tls13.handshake.max_handshake]u8 = undefined;
@@ -834,6 +885,10 @@ pub const targets = [_]Target{
     .{ .name = "tls_server_handshake_mutated", .max_input = 1024, .run = fuzzTlsServerHandshakeMutated },
     .{ .name = "tls_credentials", .max_input = 4096, .run = fuzzTlsCredentials },
     .{ .name = "tls_key_schedule", .max_input = 64, .run = fuzzTlsKeySchedule },
+    .{ .name = "ws_frame", .max_input = ws.max_frame_payload, .run = fuzzWsFrame },
+    .{ .name = "ws_handshake", .max_input = ws.max_handshake, .run = fuzzWsHandshake },
+    .{ .name = "http2_frame", .max_input = http2.max_frame_size + http2.frame.header_len, .run = fuzzHttp2Frame },
+    .{ .name = "http2_hpack", .max_input = http2.max_header_block, .run = fuzzHttp2Hpack },
     .{ .name = "vless_request", .max_input = 1024, .run = fuzzVlessRequest },
     .{ .name = "trojan_auth", .max_input = trojan.auth_prefix_len, .run = fuzzTrojanAuth },
     .{ .name = "trojan_request", .max_input = 1024, .run = fuzzTrojanRequest },
@@ -974,6 +1029,21 @@ test "fuzz corpus: TLS ClientHello" {
     });
     try std.testing.fuzz(testContext(), fuzzTlsClientHelloMutated, .{
         .corpus = &.{tls_client_hello_fixture},
+    });
+}
+
+test "fuzz corpus: WebSocket and HTTP/2 parsers" {
+    try std.testing.fuzz(testContext(), fuzzWsFrame, .{
+        .corpus = &.{"\x82\x05hello"},
+    });
+    try std.testing.fuzz(testContext(), fuzzWsHandshake, .{
+        .corpus = &.{ "GET / HTTP/1.1\r\n\r\n", "HTTP/1.1 101\r\n\r\n" },
+    });
+    try std.testing.fuzz(testContext(), fuzzHttp2Frame, .{
+        .corpus = &.{ "\x00\x00\x03\x00\x01\x00\x00\x00\x01abc", "" },
+    });
+    try std.testing.fuzz(testContext(), fuzzHttp2Hpack, .{
+        .corpus = &.{ "\x82\x86\x84", "\x40\x06x-test\x05value" },
     });
 }
 

@@ -23,6 +23,8 @@ pub const ServerOptions = struct {
     /// DER certificates, leaf first.
     certificate_chain: []const []const u8,
     private_key: Ecdsa.KeyPair,
+    /// ALPN protocols in server preference order. Empty disables selection.
+    alpn_protocols: []const []const u8 = &.{},
     /// Plaintext reader buffer; the caller keeps ownership.
     read_buffer: []u8,
     /// Plaintext writer buffer; the caller keeps ownership.
@@ -42,6 +44,8 @@ pub const Server = struct {
     writer_interface: std.Io.Writer,
     server_name_buf: [handshake.max_server_name]u8 = undefined,
     server_name_len: u8 = 0,
+    alpn_buf: [handshake.max_alpn_protocol]u8 = undefined,
+    alpn_len: u8 = 0,
     pending: [record.max_ciphertext]u8 = undefined,
     pending_len: usize = 0,
     pending_offset: usize = 0,
@@ -103,6 +107,11 @@ pub const Server = struct {
         return self.server_name_buf[0..self.server_name_len];
     }
 
+    pub fn negotiatedProtocol(self: *const Server) ?[]const u8 {
+        if (self.alpn_len == 0) return null;
+        return self.alpn_buf[0..self.alpn_len];
+    }
+
     pub fn readError(self: *const Server) ?Error {
         return self.read_error;
     }
@@ -147,6 +156,12 @@ pub const Server = struct {
         if (client_hello.server_name) |name| {
             self.server_name_len = @intCast(name.len);
         }
+        try selectAlpn(
+            client_hello.alpn_protocols,
+            options.alpn_protocols,
+            &self.alpn_buf,
+            &self.alpn_len,
+        );
         self.transcript.update(client_hello_message);
 
         var key_pair = std.crypto.dh.X25519.KeyPair.generate(io);
@@ -248,8 +263,15 @@ pub const Server = struct {
     }
 
     fn sendEncryptedExtensions(self: *Server) Error!void {
+        var extension_buffer: [512]u8 = undefined;
+        var extensions = handshake.Encoder.init(&extension_buffer);
+        if (self.negotiatedProtocol()) |protocol| {
+            try handshake.writeAlpnExtension(&extensions, &.{protocol});
+        }
+
         var body = handshake.Encoder.init(self.message_buffer[4..]);
-        try body.writeU16(0); // no extensions
+        try body.writeU16(@intCast(extensions.len));
+        try body.append(extensions.bytes());
         const message = try self.finishMessage(
             handshake.handshake_encrypted_extensions,
             body.len,
@@ -553,7 +575,42 @@ pub fn validateCredentials(
     }
 }
 
+fn selectAlpn(
+    client_list: ?[]const u8,
+    server_protocols: []const []const u8,
+    selected_buf: *[handshake.max_alpn_protocol]u8,
+    selected_len: *u8,
+) Error!void {
+    if (server_protocols.len == 0) return;
+    const list = client_list orelse return error.HandshakeFailed;
+    for (server_protocols) |server_protocol| {
+        if (server_protocol.len == 0 or
+            server_protocol.len > handshake.max_alpn_protocol)
+        {
+            return error.HandshakeFailed;
+        }
+        var offset: usize = 0;
+        while (handshake.nextAlpnProtocol(list, &offset)) |client_protocol| {
+            if (!std.mem.eql(u8, server_protocol, client_protocol)) continue;
+            @memcpy(
+                selected_buf[0..server_protocol.len],
+                server_protocol,
+            );
+            selected_len.* = @intCast(server_protocol.len);
+            return;
+        }
+    }
+    return error.HandshakeFailed;
+}
+
 fn validateOptions(options: ServerOptions) Error!void {
+    for (options.alpn_protocols) |protocol| {
+        if (protocol.len == 0 or
+            protocol.len > handshake.max_alpn_protocol)
+        {
+            return error.HandshakeFailed;
+        }
+    }
     if (options.read_buffer.len == 0 or options.write_buffer.len == 0) {
         return error.HandshakeFailed;
     }
@@ -635,6 +692,8 @@ const TestContext = struct {
     cert: *test_cert.Certificate,
     server_name: [64]u8 = undefined,
     server_name_len: usize = 0,
+    alpn: [16]u8 = undefined,
+    alpn_len: usize = 0,
     error_code: ?anyerror = null,
 };
 
@@ -663,6 +722,7 @@ fn testServerRun(io: std.Io, context: *TestContext) !void {
         .{
             .certificate_chain = &.{context.cert.der},
             .private_key = context.cert.key_pair,
+            .alpn_protocols = &.{"h2"},
             .read_buffer = &plain_read,
             .write_buffer = &plain_write,
         },
@@ -675,6 +735,10 @@ fn testServerRun(io: std.Io, context: *TestContext) !void {
     if (tls_server.serverName()) |name| {
         @memcpy(context.server_name[0..name.len], name);
         context.server_name_len = name.len;
+    }
+    if (tls_server.negotiatedProtocol()) |protocol| {
+        @memcpy(context.alpn[0..protocol.len], protocol);
+        context.alpn_len = protocol.len;
     }
 
     var buffer: [128]u8 = undefined;
@@ -769,11 +833,16 @@ test "TLS 1.3 server and client exchange application data" {
         .{
             .server_name = "localhost",
             .verify = false,
+            .alpn_protocols = &.{ "http/1.1", "h2" },
             .read_buffer = &plain_read,
             .write_buffer = &plain_write,
         },
     );
     defer tls_client.deinit();
+    try std.testing.expectEqualStrings(
+        "h2",
+        tls_client.negotiatedProtocol() orelse "",
+    );
 
     try tls_client.writer().writeAll("hello");
     try tls_client.writer().flush();
@@ -796,5 +865,36 @@ test "TLS 1.3 server and client exchange application data" {
         "localhost",
         context.server_name[0..context.server_name_len],
     );
+    try std.testing.expectEqualStrings(
+        "h2",
+        context.alpn[0..context.alpn_len],
+    );
     if (context.error_code) |err| return err;
+}
+
+test "ALPN selects the first server protocol offered" {
+    const client_list = [_]u8{
+        8, 'h', 't', 't', 'p', '/', '1', '.', '1',
+        2, 'h', '2',
+    };
+    var selected: [handshake.max_alpn_protocol]u8 = undefined;
+    var selected_len: u8 = 0;
+    try selectAlpn(&client_list, &.{ "h2", "http/1.1" }, &selected, &selected_len);
+    try std.testing.expectEqualStrings("h2", selected[0..selected_len]);
+
+    try std.testing.expectError(
+        error.HandshakeFailed,
+        selectAlpn(&client_list, &.{"acme-tls/1"}, &selected, &selected_len),
+    );
+    try std.testing.expectError(
+        error.HandshakeFailed,
+        selectAlpn(null, &.{"h2"}, &selected, &selected_len),
+    );
+}
+
+test "ALPN with no server preference leaves the protocol unset" {
+    var selected: [handshake.max_alpn_protocol]u8 = undefined;
+    var selected_len: u8 = 99;
+    try selectAlpn(&.{ 2, 'h', '2' }, &.{}, &selected, &selected_len);
+    try std.testing.expectEqual(@as(u8, 99), selected_len);
 }

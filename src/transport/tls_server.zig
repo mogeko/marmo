@@ -13,6 +13,8 @@ pub const Options = struct {
     /// DER certificate chain, leaf first.
     certificate_chain: []const []const u8,
     private_key: std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair,
+    /// ALPN protocols in server preference order.
+    alpn_protocols: []const []const u8 = &.{},
     /// Bounded handshake duration. Zero disables the timeout.
     handshake_timeout_ns: u64 = 10 * std.time.ns_per_s,
 };
@@ -121,10 +123,15 @@ pub const TlsServerStream = struct {
             .{
                 .certificate_chain = options.certificate_chain,
                 .private_key = options.private_key,
+                .alpn_protocols = options.alpn_protocols,
                 .read_buffer = &self.plain_read_buffer,
                 .write_buffer = &self.plain_write_buffer,
             },
         );
+    }
+
+    pub fn negotiatedProtocol(self: *const TlsServerStream) ?[]const u8 {
+        return self.server.negotiatedProtocol();
     }
 
     fn drainServerHandshake(select: *std.Io.Select(ServerHandshake)) void {

@@ -1,7 +1,7 @@
 # Security audit
 
-- Date: 2026-11-19
-- Base revision: `339db44` ("Bound TLS handshakes with a configurable timeout")
+- Date: 2026-11-20
+- Base revision: post-Trojan plus ALPN/HTTP2/WS transport work
 - Status: internal review plus bounded in-tree fuzzing; no external audit.
 - Scope owners: repository maintainers.
 
@@ -43,8 +43,7 @@ Adversaries considered:
 
 Out of scope: a compromised embedder process, OS/kernel bugs, physical access,
 side-channel and micro-architectural attacks, traffic analysis, and protocols
-not implemented in this revision (QUIC, HTTP/2, WebSocket, VMess, TUIC,
-Hysteria2).
+not implemented in this revision (QUIC, VMess, TUIC, Hysteria2).
 
 ## 3. Findings
 
@@ -69,10 +68,12 @@ exhaustion; Low = local/robustness/spec issue with limited impact.
 | F-12 | Low | Fixed | HTTP CONNECT outbound | A valid response head exactly 8192 bytes long was rejected. |
 | F-13 | Medium | Open | Inbounds | No connect/handshake idle timeout for SOCKS5/HTTP and no maximum connection count. Requires a config/architecture decision (ADR). |
 | F-14 | Medium | Open | Relay | No idle-timeout enforcement after relay start; a silent peer can hold a relay pair open indefinitely. Requires a config/architecture decision (ADR). |
-| F-15 | Low | Open | TLS | KeyUpdate/client auth/PSK/tickets/ALPN are not implemented; post-handshake handling is unit-tested but not end-to-end fuzzed. |
+| F-15 | Low | Open | TLS | KeyUpdate/client auth/PSK/tickets are not implemented (ALPN is implemented). Post-handshake handling is unit-tested but not end-to-end fuzzed. |
 | F-16 | Low | Open | General | No external audit, no side-channel review, and no long-running soak/fuzz campaign. |
 | F-17 | Low | Open | Trojan | The authentication-prefix read and UDP association have no protocol-level idle timeout; a TLS peer that stalls can hold a connection. Same class as F-13. |
 | F-18 | Low | Fixed | TLS client | A partial TLS record could be reported as EOF, losing the final application data when a peer split a record or closed immediately after sending it. Found during trojan-gfw UDP interop; added a regression test. |
+| F-19 | Low | Open | WS/H2 | The WebSocket and HTTP/2 parsers are new: no external audit, and HTTP/2 supports one active stream per connection. Bounded parser fuzz targets exist. |
+| F-20 | Low | Open | WS/H2 | WS accept/close comparisons and frame masking are unit-tested; H2 flow-control stalls are not soak-tested under a peer that stops reading. |
 
 ### F-01 HTTP request-line injection (High, fixed)
 
@@ -225,12 +226,14 @@ under the testing allocator, which reports leaks.
   decoders do not allocate. The fuzz harness uses fixed buffers and bounded
   per-iteration caches.
 - **Caps**: handshake message 16 KiB, TLS record 16 KiB + 256, HTTP head 8 KiB,
-  XUDP meta 512, VLESS domain 255, Trojan request 320 and authentication prefix
-  58, Trojan UDP frame 65535, SS2022 payload 65535, SS UDP sessions 128,
-  config 4 MiB.
-- **Slow peers**: TLS handshakes have a configurable timeout (default 10 s).
-  SOCKS5/HTTP handshakes, Trojan authentication-prefix reads, Trojan UDP
-  associations, and relay idle time are not bounded yet (F-13/F-14/F-17).
+  WS handshake 8 KiB, WS frame 64 KiB, H2 frame 16 KiB, H2 header block 64 KiB,
+  H2 dynamic table 4 KiB, XUDP meta 512, VLESS domain 255, Trojan request 320
+  and authentication prefix 58, Trojan UDP frame 65535, SS2022 payload 65535,
+  SS UDP sessions 128, config 4 MiB.
+- **Slow peers**: TLS, WS, and H2 handshakes have a configurable timeout
+  (default 10 s) in the root adapters. SOCKS5/HTTP handshakes, Trojan
+  authentication-prefix reads, Trojan UDP associations, and relay idle time
+  are not bounded yet (F-13/F-14/F-17).
 - **Trojan fallback**: unauthenticated traffic is replayed to a configured,
   routed TCP endpoint (ADR-0011). Only the consumed prefix is buffered; the
   operator is responsible for the fallback service and for keeping the route
@@ -242,6 +245,25 @@ under the testing allocator, which reports leaks.
   but not stress-tested under cancellation.
 - **Oracles**: handle failures return a generic protocol error or a SOCKS5/HTTP
   status code; no payload or credential is reflected.
+
+### H. WebSocket and HTTP/2 transports
+
+- WebSocket handshake parsing is capped at 8 KiB; the request line, required
+  upgrade headers, version, path, and `Sec-WebSocket-Key` are validated, and
+  `Sec-WebSocket-Accept` is compared in constant time. Frames are capped at
+  64 KiB, control frames at 125 bytes and must not be fragmented, client
+  frames must be masked, and server frames must be unmasked. Text frames are
+  accepted without UTF-8 validation because the transport is byte-oriented.
+- HTTP/2 caps frames at 16 KiB, header blocks at 64 KiB, the HPACK dynamic
+  table at 4 KiB, and each header name/value at 256/4096 bytes. Integer and
+  Huffman decoding are bounded; SETTINGS values are range-checked; only one
+  active stream is accepted. Flow control is replenished per DATA frame, and a
+  writer waits for WINDOW_UPDATE.
+- Fuzzed: WS frame parsing, WS HTTP head parsing, H2 frame parsing, and HPACK
+  decoding. Loopback integration covers WS and H2 over TLS with ALPN.
+- Residual: no external audit; no WS extensions/compression; no H2
+  multiplexing, server push, or PRIORITY effects; a peer that stops reading
+  can stall an H2 writer.
 
 ### G. Licensing and interop
 

@@ -8,6 +8,14 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const http2 = b.dependency("http2", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const ws = b.dependency("ws", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     const marmo = b.addModule("marmo", .{
         .root_source_file = b.path("src/root.zig"),
@@ -15,6 +23,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "tls13", .module = tls13.module("tls13") },
+            .{ .name = "http2", .module = http2.module("http2") },
+            .{ .name = "ws", .module = ws.module("ws") },
         },
     });
 
@@ -39,6 +49,8 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "marmo", .module = marmo },
             .{ .name = "tls13", .module = tls13.module("tls13") },
+            .{ .name = "http2", .module = http2.module("http2") },
+            .{ .name = "ws", .module = ws.module("ws") },
         },
     });
     const integration_tests = b.addTest(.{ .root_module = integration });
@@ -46,12 +58,18 @@ pub fn build(b: *std.Build) void {
 
     const tls13_tests = b.addTest(.{ .root_module = tls13.module("tls13") });
     const run_tls13_tests = b.addRunArtifact(tls13_tests);
+    const http2_tests = b.addTest(.{ .root_module = http2.module("http2") });
+    const run_http2_tests = b.addRunArtifact(http2_tests);
+    const ws_tests = b.addTest(.{ .root_module = ws.module("ws") });
+    const run_ws_tests = b.addRunArtifact(ws_tests);
 
     const test_step = b.step("test", "Run root and package tests");
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_public_api_tests.step);
     test_step.dependOn(&run_integration_tests.step);
     test_step.dependOn(&run_tls13_tests.step);
+    test_step.dependOn(&run_http2_tests.step);
+    test_step.dependOn(&run_ws_tests.step);
 
     const fmt = b.addSystemCommand(&.{
         b.graph.zig_exe,
@@ -85,6 +103,8 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "marmo", .module = marmo },
             .{ .name = "tls13", .module = tls13.module("tls13") },
+            .{ .name = "http2", .module = http2.module("http2") },
+            .{ .name = "ws", .module = ws.module("ws") },
         },
     });
     const fuzz_tests = b.addTest(.{ .root_module = fuzz_module });

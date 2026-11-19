@@ -1,0 +1,468 @@
+//! WebSocket client/server handshake and duplex byte connection.
+
+const std = @import("std");
+const handshake = @import("handshake.zig");
+const frame = @import("frame.zig");
+
+pub const Error = error{
+    Canceled,
+    Closed,
+    HandshakeFailed,
+    ProtocolViolation,
+    Unexpected,
+};
+
+pub const ClientOptions = struct {
+    host: []const u8,
+    path: []const u8 = "/",
+};
+
+pub const ServerOptions = struct {
+    path: []const u8 = "/",
+};
+
+pub const Connection = struct {
+    io: std.Io,
+    input: *std.Io.Reader,
+    output: *std.Io.Writer,
+    role: frame.Role,
+    write_lock: std.Io.Mutex = .init,
+    pending_len: usize = 0,
+    pending_offset: usize = 0,
+    frame_payload: [frame.max_payload]u8 = undefined,
+    mask_buffer: [frame.max_payload]u8 = undefined,
+    in_message: bool = false,
+    eof: bool = false,
+    close_sent: bool = false,
+
+    pub fn read(self: *Connection, buffers: [][]u8) Error!usize {
+        if (self.pending_offset < self.pending_len) {
+            return self.copyPending(buffers);
+        }
+        if (self.eof) return 0;
+
+        while (true) {
+            const parsed = frame.read(
+                self.input,
+                self.role,
+                &self.frame_payload,
+            ) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                error.EndOfStream => return error.ProtocolViolation,
+                error.ProtocolViolation => return error.ProtocolViolation,
+                error.Unexpected => return error.Unexpected,
+            };
+            switch (parsed.opcode) {
+                frame.opcode_binary, frame.opcode_text => {
+                    if (self.in_message) return error.ProtocolViolation;
+                    self.in_message = !parsed.fin;
+                    if (parsed.payload.len == 0) continue;
+                    self.pending_len = parsed.payload.len;
+                    self.pending_offset = 0;
+                    return self.copyPending(buffers);
+                },
+                frame.opcode_continuation => {
+                    if (!self.in_message) return error.ProtocolViolation;
+                    self.in_message = !parsed.fin;
+                    if (parsed.payload.len == 0) continue;
+                    self.pending_len = parsed.payload.len;
+                    self.pending_offset = 0;
+                    return self.copyPending(buffers);
+                },
+                frame.opcode_ping => try self.writeControl(
+                    frame.opcode_pong,
+                    parsed.payload,
+                ),
+                frame.opcode_pong => {},
+                frame.opcode_close => {
+                    try self.receiveClose(parsed.payload);
+                    return 0;
+                },
+                else => return error.ProtocolViolation,
+            }
+        }
+    }
+
+    pub fn write(self: *Connection, buffers: []const []const u8) Error!usize {
+        self.write_lock.lock(self.io) catch return error.Canceled;
+        defer self.write_lock.unlock(self.io);
+
+        var total: usize = 0;
+        for (buffers) |buffer| {
+            try self.writeMessageLocked(buffer);
+            total += buffer.len;
+        }
+        self.output.flush() catch return error.Unexpected;
+        return total;
+    }
+
+    pub fn end(self: *Connection) Error!void {
+        if (self.close_sent) return;
+        const payload = [_]u8{ 0x03, 0xe8 };
+        self.write_lock.lock(self.io) catch return error.Canceled;
+        defer self.write_lock.unlock(self.io);
+        try self.writeFrameLocked(frame.opcode_close, true, &payload);
+        self.close_sent = true;
+        self.output.flush() catch return error.Unexpected;
+    }
+
+    pub fn deinit(self: *Connection) void {
+        std.crypto.secureZero(u8, &self.frame_payload);
+        std.crypto.secureZero(u8, &self.mask_buffer);
+    }
+
+    fn copyPending(self: *Connection, buffers: [][]u8) usize {
+        const available = self.pending_len - self.pending_offset;
+        var copied: usize = 0;
+        for (buffers) |buffer| {
+            if (copied == available) break;
+            const count = @min(buffer.len, available - copied);
+            @memcpy(
+                buffer[0..count],
+                self.frame_payload[self.pending_offset + copied ..][0..count],
+            );
+            copied += count;
+        }
+        self.pending_offset += copied;
+        if (self.pending_offset == self.pending_len) {
+            self.pending_len = 0;
+            self.pending_offset = 0;
+        }
+        return copied;
+    }
+
+    fn writeMessageLocked(self: *Connection, bytes: []const u8) Error!void {
+        if (bytes.len == 0) return;
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const chunk_len = @min(bytes.len - offset, frame.max_payload);
+            const chunk = bytes[offset..][0..chunk_len];
+            const fin = offset + chunk_len == bytes.len;
+            try self.writeFrameLocked(frame.opcode_binary, fin, chunk);
+            offset += chunk_len;
+        }
+    }
+
+    fn writeControl(self: *Connection, opcode: u8, payload: []const u8) Error!void {
+        self.write_lock.lock(self.io) catch return error.Canceled;
+        defer self.write_lock.unlock(self.io);
+        try self.writeFrameLocked(opcode, true, payload);
+        self.output.flush() catch return error.Unexpected;
+    }
+
+    fn writeFrameLocked(
+        self: *Connection,
+        opcode: u8,
+        fin: bool,
+        payload: []const u8,
+    ) Error!void {
+        frame.write(
+            self.io,
+            self.output,
+            self.role,
+            opcode,
+            fin,
+            payload,
+            &self.mask_buffer,
+        ) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            error.ProtocolViolation => return error.ProtocolViolation,
+            else => return error.Unexpected,
+        };
+    }
+
+    fn receiveClose(self: *Connection, payload: []const u8) Error!void {
+        if (payload.len == 1) return error.ProtocolViolation;
+        if (!self.close_sent) {
+            self.write_lock.lock(self.io) catch return error.Canceled;
+            defer self.write_lock.unlock(self.io);
+            try self.writeFrameLocked(
+                frame.opcode_close,
+                true,
+                if (payload.len >= 2) payload[0..2] else &.{},
+            );
+            self.close_sent = true;
+            self.output.flush() catch return error.Unexpected;
+        }
+        self.eof = true;
+    }
+};
+
+pub fn clientHandshake(
+    io: std.Io,
+    input: *std.Io.Reader,
+    output: *std.Io.Writer,
+    connection: *Connection,
+    options: ClientOptions,
+) Error!void {
+    if (!validHost(options.host) or !validPath(options.path)) {
+        return error.HandshakeFailed;
+    }
+    connection.* = .{
+        .io = io,
+        .input = input,
+        .output = output,
+        .role = .client,
+    };
+
+    var key_bytes: [16]u8 = undefined;
+    std.Io.randomSecure(io, &key_bytes) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return error.HandshakeFailed,
+    };
+    var key: [24]u8 = undefined;
+    _ = std.base64.standard.Encoder.encode(&key, &key_bytes);
+
+    var request_buffer: [handshake.max_handshake]u8 = undefined;
+    var request = std.Io.Writer.fixed(&request_buffer);
+    request.print(
+        "GET {s} HTTP/1.1\r\n" ++
+            "Host: {s}\r\n" ++
+            "Upgrade: websocket\r\n" ++
+            "Connection: Upgrade\r\n" ++
+            "Sec-WebSocket-Key: {s}\r\n" ++
+            "Sec-WebSocket-Version: 13\r\n\r\n",
+        .{ options.path, options.host, key },
+    ) catch return error.HandshakeFailed;
+    output.writeAll(request.buffered()) catch return error.HandshakeFailed;
+    output.flush() catch return error.HandshakeFailed;
+
+    var head: handshake.Head = .{};
+    try handshake.readHead(input, &head);
+    try validateClientResponse(head.bytes(), &key);
+}
+
+pub fn serverHandshake(
+    io: std.Io,
+    input: *std.Io.Reader,
+    output: *std.Io.Writer,
+    connection: *Connection,
+    options: ServerOptions,
+) Error!void {
+    if (!validPath(options.path)) return error.HandshakeFailed;
+    connection.* = .{
+        .io = io,
+        .input = input,
+        .output = output,
+        .role = .server,
+    };
+
+    var head: handshake.Head = .{};
+    try handshake.readHead(input, &head);
+    const key = try validateServerRequest(head.bytes(), options.path);
+
+    var accept: [28]u8 = undefined;
+    handshake.acceptValue(key, &accept) catch return error.HandshakeFailed;
+    var response_buffer: [256]u8 = undefined;
+    var response = std.Io.Writer.fixed(&response_buffer);
+    response.print(
+        "HTTP/1.1 101 Switching Protocols\r\n" ++
+            "Upgrade: websocket\r\n" ++
+            "Connection: Upgrade\r\n" ++
+            "Sec-WebSocket-Accept: {s}\r\n\r\n",
+        .{accept},
+    ) catch return error.HandshakeFailed;
+    output.writeAll(response.buffered()) catch return error.HandshakeFailed;
+    output.flush() catch return error.HandshakeFailed;
+}
+
+fn validateClientResponse(head: []const u8, key: *const [24]u8) Error!void {
+    const first_line_end = std.mem.indexOf(u8, head, "\r\n") orelse
+        return error.HandshakeFailed;
+    const status = head[0..first_line_end];
+    if (!std.mem.startsWith(u8, status, "HTTP/1.1 101") or
+        status.len < 13 or status[12] != ' ')
+    {
+        return error.HandshakeFailed;
+    }
+    if (!handshake.headerContainsToken(head, "upgrade", "websocket")) {
+        return error.HandshakeFailed;
+    }
+    if (!handshake.headerContainsToken(head, "connection", "upgrade")) {
+        return error.HandshakeFailed;
+    }
+    const accept = handshake.headerValue(head, "sec-websocket-accept") orelse
+        return error.HandshakeFailed;
+    if (!handshake.validAccept(key, accept)) return error.HandshakeFailed;
+}
+
+fn validateServerRequest(head: []const u8, path: []const u8) Error![]const u8 {
+    const first_line_end = std.mem.indexOf(u8, head, "\r\n") orelse
+        return error.HandshakeFailed;
+    var parts = std.mem.splitScalar(u8, head[0..first_line_end], ' ');
+    const method = parts.next() orelse return error.HandshakeFailed;
+    const request_path = parts.next() orelse return error.HandshakeFailed;
+    const version = parts.next() orelse return error.HandshakeFailed;
+    if (!std.mem.eql(u8, method, "GET")) return error.HandshakeFailed;
+    if (!std.mem.eql(u8, request_path, path)) return error.HandshakeFailed;
+    if (!std.mem.eql(u8, version, "HTTP/1.1")) return error.HandshakeFailed;
+    if (parts.next() != null) return error.HandshakeFailed;
+    const host = handshake.headerValue(head, "host") orelse
+        return error.HandshakeFailed;
+    if (host.len == 0) return error.HandshakeFailed;
+
+    if (!handshake.headerContainsToken(head, "upgrade", "websocket")) {
+        return error.HandshakeFailed;
+    }
+    if (!handshake.headerContainsToken(head, "connection", "upgrade")) {
+        return error.HandshakeFailed;
+    }
+    const version_header = handshake.headerValue(
+        head,
+        "sec-websocket-version",
+    ) orelse return error.HandshakeFailed;
+    if (!std.mem.eql(u8, version_header, "13")) return error.HandshakeFailed;
+    const key = handshake.headerValue(head, "sec-websocket-key") orelse
+        return error.HandshakeFailed;
+    _ = handshake.decodeKey(key) catch return error.HandshakeFailed;
+    return key;
+}
+
+fn validHost(host: []const u8) bool {
+    if (host.len == 0 or host.len > 255) return false;
+    for (host) |byte| {
+        if (byte == '\r' or byte == '\n' or byte == ' ') return false;
+    }
+    return true;
+}
+
+fn validPath(path: []const u8) bool {
+    if (path.len == 0 or path.len > 255 or path[0] != '/') return false;
+    for (path) |byte| {
+        if (byte == '\r' or byte == '\n' or byte == ' ') return false;
+    }
+    return true;
+}
+
+test "server rejects a mismatched path" {
+    const request =
+        "GET /other HTTP/1.1\r\n" ++
+        "Host: example.com\r\n" ++
+        "Upgrade: websocket\r\n" ++
+        "Connection: Upgrade\r\n" ++
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" ++
+        "Sec-WebSocket-Version: 13\r\n\r\n";
+    var input = std.Io.Reader.fixed(request);
+    var output_storage: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output_storage.deinit();
+    var connection: Connection = undefined;
+    try std.testing.expectError(
+        error.HandshakeFailed,
+        serverHandshake(
+            std.testing.io,
+            &input,
+            &output_storage.writer,
+            &connection,
+            .{ .path = "/ws" },
+        ),
+    );
+}
+
+test "server accepts the RFC key and returns the accept value" {
+    const request =
+        "GET /ws HTTP/1.1\r\n" ++
+        "Host: example.com\r\n" ++
+        "Upgrade: websocket\r\n" ++
+        "Connection: keep-alive, Upgrade\r\n" ++
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" ++
+        "Sec-WebSocket-Version: 13\r\n\r\n";
+    var input = std.Io.Reader.fixed(request);
+    var output_storage: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output_storage.deinit();
+    var connection: Connection = undefined;
+    try serverHandshake(
+        std.testing.io,
+        &input,
+        &output_storage.writer,
+        &connection,
+        .{ .path = "/ws" },
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        output_storage.written(),
+        "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=",
+    ) != null);
+}
+
+const LoopContext = struct {
+    listener: *std.Io.net.Server,
+    error_code: ?anyerror = null,
+};
+
+fn loopServer(io: std.Io, context: *LoopContext) void {
+    loopServerRun(io, context) catch |err| {
+        context.error_code = err;
+    };
+}
+
+fn loopServerRun(io: std.Io, context: *LoopContext) !void {
+    const stream = try context.listener.accept(io);
+    defer stream.close(io);
+    var read_buffer: [4096]u8 = undefined;
+    var write_buffer: [4096]u8 = undefined;
+    var input = stream.reader(io, &read_buffer);
+    var output = stream.writer(io, &write_buffer);
+    var connection: Connection = undefined;
+    try serverHandshake(
+        io,
+        &input.interface,
+        &output.interface,
+        &connection,
+        .{ .path = "/ws" },
+    );
+    var buffer: [64]u8 = undefined;
+    var buffers = [_][]u8{&buffer};
+    const len = try connection.read(&buffers);
+    if (len == 0) return error.TestUnexpectedResult;
+    _ = try connection.write(&.{buffer[0..len]});
+    try connection.end();
+}
+
+test "loopback client/server echo" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var listener = try bind.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+
+    var context: LoopContext = .{ .listener = &listener };
+    var server_future = io.async(loopServer, .{ io, &context });
+
+    var address: std.Io.net.IpAddress = .{ .ip4 = .loopback(
+        listener.socket.address.getPort(),
+    ) };
+    const stream = try std.Io.net.IpAddress.connect(
+        &address,
+        io,
+        .{ .mode = .stream },
+    );
+    defer stream.close(io);
+    var read_buffer: [4096]u8 = undefined;
+    var write_buffer: [4096]u8 = undefined;
+    var input = stream.reader(io, &read_buffer);
+    var output = stream.writer(io, &write_buffer);
+    var connection: Connection = undefined;
+    try clientHandshake(
+        io,
+        &input.interface,
+        &output.interface,
+        &connection,
+        .{ .host = "localhost", .path = "/ws" },
+    );
+    _ = try connection.write(&.{"hello"});
+    var response: [5]u8 = undefined;
+    var buffers = [_][]u8{&response};
+    var offset: usize = 0;
+    while (offset < response.len) {
+        var slice = [_][]u8{buffers[0][offset..]};
+        const len = try connection.read(&slice);
+        if (len == 0) return error.EndOfStream;
+        offset += len;
+    }
+    try std.testing.expectEqualStrings("hello", &response);
+    try connection.end();
+    _ = server_future.await(io);
+    if (context.error_code) |err| return err;
+}
