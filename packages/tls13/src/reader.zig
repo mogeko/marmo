@@ -2,11 +2,18 @@
 
 const std = @import("std");
 
-/// Reads whatever is currently available, without trying to fill `buffers`.
+/// Reads the plaintext that is currently buffered after waiting for at least
+/// one complete TLS record.
+///
+/// The TLS client can consume a partial record and return 0 without an error;
+/// this helper keeps filling until a complete record is available or the peer
+/// closes. The reader must be blocking: a non-blocking reader that returns 0
+/// without EOF would cause the retry loop to spin. Returns 0 on clean end of
+/// stream.
 ///
 /// `std.Io.Reader.readVec` treats a full caller buffer as the goal and can block
-/// for more data; a proxy stream needs one record's worth instead. Returns 0 on
-/// clean end of stream.
+/// for more data; a proxy stream needs the currently available plaintext
+/// instead.
 pub fn readSome(
     reader: *std.Io.Reader,
     buffers: [][]u8,

@@ -31,6 +31,7 @@ pub const PasswordHash = [password_hash_len]u8;
 /// Hashes a password the way Trojan expects: lower-case hex SHA-224.
 pub fn hashPassword(password: []const u8) PasswordHash {
     var digest: [28]u8 = undefined;
+    defer std.crypto.secureZero(u8, &digest);
     std.crypto.hash.sha2.Sha224.hash(password, &digest, .{});
     return std.fmt.bytesToHex(digest, .lower);
 }
@@ -114,6 +115,7 @@ pub fn writeRequestHeader(
     command: u8,
 ) !void {
     var buffer: [request_header_max]u8 = undefined;
+    defer std.crypto.secureZero(u8, &buffer);
     const length = try encodeRequestHeader(&buffer, hash, target, command);
     try writeAll(io, stream, buffer[0..length]);
 }
@@ -330,7 +332,10 @@ pub const ClientStream = struct {
     ) !*ClientStream {
         _ = io;
         const self = try gpa.create(ClientStream);
-        errdefer gpa.destroy(self);
+        errdefer {
+            std.crypto.secureZero(u8, std.mem.asBytes(&self.header));
+            gpa.destroy(self);
+        }
 
         self.* = .{
             .gpa = gpa,
@@ -419,6 +424,7 @@ pub const ClientStream = struct {
         const self: *ClientStream = @ptrCast(@alignCast(ctx));
         if (self.closed.swap(true, .acq_rel)) return;
         self.inner.close(io);
+        std.crypto.secureZero(u8, std.mem.asBytes(&self.header));
         self.gpa.destroy(self);
     }
 

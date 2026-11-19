@@ -36,6 +36,7 @@ pub fn handle(
     context: *const Context,
 ) !void {
     var prefix: [trojan.auth_prefix_len]u8 = undefined;
+    defer std.crypto.secureZero(u8, &prefix);
     const auth = trojan.readAuthPrefix(
         io,
         stream,

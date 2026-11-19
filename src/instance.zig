@@ -851,21 +851,25 @@ fn compileInbounds(
             },
             .trojan => {
                 const password = config.password orelse return error.InvalidConfig;
-                inbounds[index].trojan = .{
-                    .password_hash = trojan_protocol.hashPassword(password),
-                    .fallback = if (config.fallback) |text|
-                        Endpoint.parse(text) catch return error.InvalidConfig
-                    else
-                        null,
-                };
                 const tls = config.tls orelse return error.InvalidConfig;
-                inbounds[index].tls = try loadInboundTls(
+                const fallback = if (config.fallback) |text|
+                    Endpoint.parse(text) catch return error.InvalidConfig
+                else
+                    null;
+                const tls_options = try loadInboundTls(
                     allocator,
                     io,
                     tls,
                     index,
                     diagnostic,
                 );
+                var password_hash = trojan_protocol.hashPassword(password);
+                defer std.crypto.secureZero(u8, &password_hash);
+                inbounds[index].trojan = .{
+                    .password_hash = password_hash,
+                    .fallback = fallback,
+                };
+                inbounds[index].tls = tls_options;
             },
             .vless => {
                 const uuid_text = config.uuid orelse return error.InvalidConfig;
