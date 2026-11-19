@@ -30,7 +30,8 @@ zig build run -- server \
   --cert cert.pem --key key.pem
 ```
 
-The server accepts VLESS TCP and UDP command `2` over TLS.
+The server accepts VLESS TCP, simple UDP command `2`, and XUDP command `3`
+over TLS.
 
 ## Run a client
 
@@ -41,6 +42,16 @@ zig build run -- client \
   --server 127.0.0.1:14433 \
   --uuid 00112233-4455-6677-8899-aabbccddeeff \
   --sni localhost --insecure
+```
+
+Add `--xudp` to use XUDP instead of simple UoT:
+
+```sh
+zig build run -- client \
+  --listen 127.0.0.1:11080 \
+  --server 127.0.0.1:14433 \
+  --uuid 00112233-4455-6677-8899-aabbccddeeff \
+  --sni localhost --insecure --xudp
 ```
 
 Then point a SOCKS5 client at `127.0.0.1:11080`:
@@ -77,7 +88,7 @@ openssl x509 -noout -fingerprint -sha256 -in cert.pem
 {
   "inbounds": [
     { "tag": "socks", "listen": "127.0.0.1", "port": 11080,
-      "protocol": "socks", "settings": { "udp": false } }
+      "protocol": "socks", "settings": { "udp": true } }
   ],
   "outbounds": [
     {
@@ -159,6 +170,8 @@ zig build run -- client \
   --sni localhost --insecure
 ```
 
+   Add `--xudp` to exercise XUDP instead of simple UoT.
+
 3. Verify:
 
 ```sh
@@ -172,10 +185,10 @@ Local checks with Xray-core `26.11.9` (not committed, not CI):
 - Xray SOCKS client -> marmo VLESS server over TLS -> direct HTTP: passed.
 - marmo SOCKS client -> Xray VLESS server over TLS -> direct HTTP: passed.
 - marmo UDP client -> Xray VLESS server (simple command `2`): passed.
-- Xray UDP client -> marmo VLESS server: Xray v26 uses XUDP (command `3`)
-  for UDP, which this simple VLESS implementation does not support. The
-  internal VLESS UDP client/server loopback test covers command `2` framing.
-  Use a peer that implements simple UoT for inbound UDP interop.
+- marmo UDP client with `--xudp` -> Xray VLESS server (XUDP command `3`):
+  passed.
+- Xray UDP client -> marmo VLESS server (XUDP command `3`): passed.
+- Internal loopback covers both simple UDP and XUDP outbound/inbound.
 
 ## Notes
 
@@ -184,7 +197,9 @@ Local checks with Xray-core `26.11.9` (not committed, not CI):
 - `--cert` defaults to `cert.pem`; `--key` defaults to `key.pem`.
 - The VLESS inbound always requires TLS. The outbound defaults to TLS; there is
   no plaintext flag in this example.
-- UDP is supported through the same TLS stream. Simple VLESS UDP has one fixed
-  destination per association; `XUDP` is not implemented.
+- UDP is supported through the same TLS stream. Simple UoT is the default
+  outbound encoding; `--xudp` enables XUDP.
+- Both simple UDP and XUDP bind one fixed destination per association. XUDP
+  cone NAT/GlobalID is not implemented.
 - The example depends on the parent package through `../..`; run it from this
   directory so the path resolves.

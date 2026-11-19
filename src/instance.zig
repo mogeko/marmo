@@ -631,6 +631,7 @@ fn compileVless(
         .server = server,
         .uuid = uuid,
         .transport = transport,
+        .xudp = config.xudp,
         .transport_cleanup = transport_cleanup,
         .transport_cleanup_ctx = transport_cleanup_ctx,
     };

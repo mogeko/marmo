@@ -6,6 +6,7 @@ const Metrics = @import("../core/metrics.zig").Metrics;
 const relay = @import("../core/relay.zig");
 const Endpoint = @import("../net/endpoint.zig").Endpoint;
 const vless = @import("../protocol/vless.zig");
+const xudp = @import("../protocol/xudp.zig");
 const Metadata = @import("../routing/metadata.zig").Metadata;
 const PacketConn = @import("../transport/packet.zig").PacketConn;
 const Stream = @import("../transport/stream.zig").Stream;
@@ -14,12 +15,15 @@ pub const Context = struct {
     uuid: vless.Uuid,
 };
 
+const UdpMode = enum { simple, xudp };
+
 const UdpContext = struct {
     io: std.Io,
     stream: Stream,
     outbound: PacketConn,
     target: Endpoint,
     metrics: *Metrics,
+    mode: UdpMode,
 };
 
 pub fn handle(
@@ -54,6 +58,12 @@ pub fn handle(
             dispatch,
             target,
         ),
+        vless.command_mux => {
+            if (!xudp.isMuxTarget(request.target)) {
+                return error.UnsupportedAddress;
+            }
+            try handleXudp(io, stream, inbound_tag, dispatch, arena);
+        },
         else => return error.CommandUnsupported,
     }
 }
@@ -97,27 +107,9 @@ fn handleUdp(
     dispatch: Dispatch,
     target: Endpoint,
 ) !void {
-    const metadata: Metadata = .{
-        .network = .udp,
-        .source = stream.remote(),
-        .destination = target,
-        .domain = switch (target) {
-            .domain => |domain| domain.name,
-            .ip => null,
-        },
-        .inbound = inbound_tag,
-    };
-
-    const action = dispatch.route(&metadata);
-    const tag = switch (action) {
-        .route => |route_tag| route_tag,
-        .direct => "direct",
-        .reject, .hijack_dns => return,
-    };
-
-    const outbound = try dispatch.connect_packet(io, tag, target);
+    const outbound = try openUdp(io, stream, inbound_tag, dispatch, target) orelse
+        return;
     defer outbound.close(io);
-
     try vless.writeResponseHeader(io, stream);
 
     var context: UdpContext = .{
@@ -126,6 +118,7 @@ fn handleUdp(
         .outbound = outbound,
         .target = target,
         .metrics = dispatch.metrics(),
+        .mode = .simple,
     };
     var reply_future = io.concurrent(udpReply, .{&context}) catch |err| switch (err) {
         error.ConcurrencyUnavailable => return error.ConcurrencyUnavailable,
@@ -153,6 +146,116 @@ fn handleUdp(
     }
 }
 
+fn handleXudp(
+    io: std.Io,
+    stream: Stream,
+    inbound_tag: []const u8,
+    dispatch: Dispatch,
+    arena: std.mem.Allocator,
+) !void {
+    var meta_buffer: [xudp.max_meta_len]u8 = undefined;
+    var data_buffer: [xudp.max_data_len]u8 = undefined;
+
+    const first = try xudp.readFrame(io, stream, &meta_buffer, &data_buffer);
+    if (first.status != xudp.status_new) return error.ProtocolViolation;
+    const target = try ownTarget(arena, first.target orelse
+        return error.ProtocolViolation);
+    const outbound = try openUdp(io, stream, inbound_tag, dispatch, target) orelse
+        return;
+    defer outbound.close(io);
+
+    try vless.writeResponseHeader(io, stream);
+
+    var context: UdpContext = .{
+        .io = io,
+        .stream = stream,
+        .outbound = outbound,
+        .target = target,
+        .metrics = dispatch.metrics(),
+        .mode = .xudp,
+    };
+    var reply_future = io.concurrent(udpReply, .{&context}) catch |err| switch (err) {
+        error.ConcurrencyUnavailable => return error.ConcurrencyUnavailable,
+    };
+    defer {
+        _ = reply_future.cancel(io);
+    }
+
+    if (first.data.len != 0) {
+        try sendXudpData(io, outbound, target, first.data, context.metrics);
+    }
+
+    while (true) {
+        const frame = xudp.readFrame(
+            io,
+            stream,
+            &meta_buffer,
+            &data_buffer,
+        ) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            error.EndOfStream => return,
+            error.MessageTooBig => return error.ProtocolViolation,
+            else => return error.ProtocolViolation,
+        };
+        switch (frame.status) {
+            xudp.status_keepalive => continue,
+            xudp.status_end => return,
+            xudp.status_new, xudp.status_keep => {
+                if (frame.target) |frame_target| {
+                    if (!Endpoint.eql(frame_target, target)) {
+                        return error.ProtocolViolation;
+                    }
+                }
+                if (frame.data.len == 0) continue;
+                try sendXudpData(io, outbound, target, frame.data, context.metrics);
+            },
+            else => return error.ProtocolViolation,
+        }
+    }
+}
+
+fn openUdp(
+    io: std.Io,
+    stream: Stream,
+    inbound_tag: []const u8,
+    dispatch: Dispatch,
+    target: Endpoint,
+) !?PacketConn {
+    const metadata: Metadata = .{
+        .network = .udp,
+        .source = stream.remote(),
+        .destination = target,
+        .domain = switch (target) {
+            .domain => |domain| domain.name,
+            .ip => null,
+        },
+        .inbound = inbound_tag,
+    };
+
+    const action = dispatch.route(&metadata);
+    const tag = switch (action) {
+        .route => |route_tag| route_tag,
+        .direct => "direct",
+        .reject, .hijack_dns => return null,
+    };
+    return try dispatch.connect_packet(io, tag, target);
+}
+
+fn sendXudpData(
+    io: std.Io,
+    outbound: PacketConn,
+    target: Endpoint,
+    data: []const u8,
+    metrics: *Metrics,
+) !void {
+    outbound.send_to(io, target, data) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        error.MessageTooBig => return error.MessageTooBig,
+        else => return error.ProtocolViolation,
+    };
+    metrics.addToRemote(data.len);
+}
+
 fn udpReply(context: *UdpContext) void {
     var buffer: [vless.max_udp_payload]u8 = undefined;
     while (true) {
@@ -162,11 +265,18 @@ fn udpReply(context: *UdpContext) void {
             .domain => {},
         }
         if (message.data_len == 0) continue;
-        vless.writeUdpPacket(
-            context.io,
-            context.stream,
-            buffer[0..message.data_len],
-        ) catch return;
+        switch (context.mode) {
+            .simple => vless.writeUdpPacket(
+                context.io,
+                context.stream,
+                buffer[0..message.data_len],
+            ) catch return,
+            .xudp => xudp.writeKeep(
+                context.io,
+                context.stream,
+                buffer[0..message.data_len],
+            ) catch return,
+        }
         context.metrics.addToClient(message.data_len);
     }
 }

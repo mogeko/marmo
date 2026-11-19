@@ -51,6 +51,7 @@ pub const AcceptError = Inbound.AcceptError;
 pub const limits = @import("core/limits.zig");
 
 test {
+    _ = @import("protocol/xudp.zig");
     _ = @import("transport/write.zig");
     std.testing.refAllDecls(@This());
 }

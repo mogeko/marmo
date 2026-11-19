@@ -1355,7 +1355,7 @@ const TestTlsFiles = struct {
     }
 };
 
-test "VLESS UDP outbound and inbound relay datagrams" {
+fn vlessUdpLoop(use_xudp: bool) !void {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -1418,6 +1418,7 @@ test "VLESS UDP outbound and inbound relay datagrams" {
                 .server = server_text,
                 .uuid = vless_test_uuid_text,
                 .tls = .{ .sni = "localhost", .insecure = true },
+                .xudp = use_xudp,
             },
         },
         .route = .{ .final = "vless-out" },
@@ -1487,4 +1488,12 @@ test "VLESS UDP outbound and inbound relay datagrams" {
     client_instance.stop();
     server_instance.stop();
     _ = echo_future.await(io);
+}
+
+test "VLESS UDP outbound and inbound relay datagrams" {
+    try vlessUdpLoop(false);
+}
+
+test "VLESS XUDP outbound and inbound relay datagrams" {
+    try vlessUdpLoop(true);
 }

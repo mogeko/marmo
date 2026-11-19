@@ -11,9 +11,10 @@ and behavior may change between minor releases.
   `least_latency`, with optional active TCP health probes and passive latency
   samples.
 - VLESS outbound over TCP or TLS, with UUID authentication, IPv4/domain/IPv6
-  targets, TCP command `1`, and simple UDP command `2`.
+  targets, TCP command `1`, simple UDP command `2`, and opt-in XUDP command
+  `3` (`"xudp": true`).
 - VLESS inbound over TLS, with UUID authentication, routing, TCP, simple UDP,
-  and PEM/DER ECDSA P-256 TLS credential loading.
+  XUDP (Xray-compatible), and PEM/DER ECDSA P-256 TLS credential loading.
 - In-tree TLS 1.3 server in the first-party `packages/tls13` package, exposed
   through a thin `Stream` adapter. The package also owns the std-backed TLS
   client and CA handling.
@@ -38,11 +39,11 @@ and behavior may change between minor releases.
 
 ### Known limitations
 
-- VLESS UDP implements simple UoT (`[2B length][payload]`) only. XUDP command
-  `3`, cone NAT, and per-packet destinations are not implemented; Xray v26 UDP
-  clients use XUDP by default and are not interoperable with the VLESS inbound.
-- One VLESS UDP stream is fixed to one destination. A SOCKS5 UDP association
-  that switches targets has later datagrams rejected.
+- VLESS UDP supports simple UoT (`[2B length][payload]`) and XUDP
+  (`[2B metadata][2B length][payload]`). XUDP is opt-in on the outbound and
+  supported on the inbound for Xray clients. XUDP cone NAT/GlobalID is not
+  implemented, and one stream is fixed to one destination; per-packet target
+  changes are rejected.
 - The in-tree TLS 1.3 server supports X25519, AES-128-GCM/SHA-256, and ECDSA
   P-256 certificates. It has no client authentication, PSK, session tickets,
   ALPN selection, 0-RTT, KeyUpdate, or handshake timeout. It is not audited for
@@ -56,11 +57,11 @@ and behavior may change between minor releases.
 
 ### Tests
 
-- 52 root tests (33 unit, 4 public API, 15 integration) and 4 TLS package
+- 54 root tests (34 unit, 4 public API, 16 integration) and 4 TLS package
   tests, passing in Debug and ReleaseSafe.
 - Examples build with `zig build examples`.
 - Reference interop was checked locally against Xray-core 26.11.9 for VLESS TCP
-  in both directions and marmo UDP client -> Xray server. The harness is not
+  in both directions and XUDP UDP in both directions. The harness is not
   committed and is not part of CI.
 
 ## 0.0.1 - 2026-11-19

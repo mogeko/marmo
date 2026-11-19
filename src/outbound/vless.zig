@@ -7,12 +7,14 @@ const Dialer = @import("../transport/dialer.zig").Dialer;
 const PacketConn = @import("../transport/packet.zig").PacketConn;
 const Stream = @import("../transport/stream.zig").Stream;
 const UdpClient = @import("vless_udp.zig").UdpClient;
+const XudpClient = @import("vless_xudp.zig").XudpClient;
 
 pub const Vless = struct {
     gpa: std.mem.Allocator,
     server: Endpoint,
     uuid: vless.Uuid,
     transport: Dialer,
+    xudp: bool = false,
     transport_cleanup: ?*const fn (ctx: *anyopaque) void = null,
     transport_cleanup_ctx: ?*anyopaque = null,
 
@@ -52,6 +54,19 @@ pub const Vless = struct {
     ) Dialer.ConnectError!PacketConn {
         const self: *Vless = @ptrCast(@alignCast(ctx));
         const inner = try self.transport.connect(io, self.server);
+        if (self.xudp) {
+            const client = XudpClient.create(
+                io,
+                self.gpa,
+                inner,
+                &self.uuid,
+                target,
+            ) catch |err| {
+                inner.close(io);
+                return mapUdpError(err);
+            };
+            return client.packetConn();
+        }
         const client = UdpClient.create(
             io,
             self.gpa,

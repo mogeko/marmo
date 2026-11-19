@@ -9,7 +9,8 @@ retrieved 2026-11-19. TLS record details come from RFC 8446. The client uses
 
 ## Implemented
 
-- VLESS outbound and inbound; TCP command `1` and UDP command `2`.
+- VLESS outbound and inbound; TCP command `1`, simple UDP command `2`, and
+  Xray-compatible XUDP command `3`.
 - Outbound transport is optional TLS 1.2/1.3 via `std.crypto.tls.Client`.
 - Inbound transport is mandatory TLS 1.3 via `packages/tls13`; the accepted
   TCP stream is wrapped before the VLESS header is parsed.
@@ -26,17 +27,24 @@ retrieved 2026-11-19. TLS record details come from RFC 8446. The client uses
     verification is enabled;
   - inbound `tls.certificate` and `tls.private_key` are required and must not
     be empty;
+  - outbound `xudp` is optional and defaults to `false`;
   - `uuid` and `tls` are rejected on other outbound/inbound protocols.
 - Request header: version `0`, 16-byte UUID, zero addon length, command `1`
   (TCP) or `2` (UDP), big-endian port, address type (`1` IPv4, `2` domain,
-  `3` IPv6), address.
+  `3` IPv6), address. Command `3` (Mux/XUDP) omits the address on the wire and
+  is represented internally as `v1.mux.cool:666`.
 - Response header is read lazily: version `0`, addon length, addons. The
   response payload is passed through unchanged.
-- UDP uses one fixed destination per stream and `[2B length BE][payload]`
-  frames. The outbound sends one request with the destination and rejects a
-  different `send_to` destination; the inbound creates one outbound
-  `PacketConn` for the request destination and writes replies with the same
-  framing.
+- Simple UDP uses one fixed destination per stream and
+  `[2B length BE][payload]` frames. The outbound sends one request with the
+  destination and rejects a different `send_to` destination; the inbound
+  creates one outbound `PacketConn` for the request destination and writes
+  replies with the same framing.
+- XUDP is implemented for both directions. The inbound accepts VLESS Mux
+  command `3` with the synthetic `v1.mux.cool` target and parses New/Keep
+  frames; the outbound can opt into XUDP with `"xudp": true`.
+- The outbound defaults to simple UoT, which is more interoperable with
+  non-Xray servers.
 - Zero-length UDP frames are skipped on receive and dropped on send, matching
   the base Xray behavior.
 - Request header is written once, in a single vectored write where possible.
@@ -56,6 +64,21 @@ retrieved 2026-11-19. TLS record details come from RFC 8446. The client uses
 - The TLS adapters implement the public `Stream` interface and preserve the
   underlying endpoints. TLS lives in `packages/tls13`: the outbound uses the
   std-backed client and the inbound uses the in-tree TLS 1.3 server.
+
+### XUDP framing
+
+XUDP is a Mux.Cool subset carried after the VLESS request header:
+
+```text
+[2B metadata length][metadata][2B data length][data]
+```
+
+Metadata begins with the 2-byte session ID (XUDP uses `0`), a status byte, and
+an option byte. New frames (`status=1`) carry a UDP network byte, big-endian
+port, address type/address, and an 8-byte GlobalID; Keep frames (`status=2`)
+may carry a per-packet address or no destination. The data flag is option bit
+`1`. Replies use Keep frames with no destination. This implementation ignores
+GlobalID/cone NAT and binds the stream to the first New frame's target.
 
 ### Config example
 
@@ -79,7 +102,8 @@ retrieved 2026-11-19. TLS record details come from RFC 8446. The client uses
       "protocol": "vless",
       "server": "example.com:443",
       "uuid": "00112233-4455-6677-8899-aabbccddeeff",
-      "tls": { "sni": "cdn.example.com" }
+      "tls": { "sni": "cdn.example.com" },
+      "xudp": true
     }
   ],
   "route": { "final": "proxy" }
@@ -92,9 +116,12 @@ The inbound always requires TLS; plaintext VLESS inbound is not supported.
 
 ## Limits and known gaps
 
-- Simple UDP only: no XUDP/cone NAT and no per-packet destination addressing.
-  One destination is fixed per VLESS UDP stream. A SOCKS5 UDP association that
-  switches targets will have later datagrams rejected by the VLESS outbound.
+- Simple UDP and XUDP both support one fixed destination per stream. XUDP
+  GlobalID/cone NAT is not implemented; per-packet destination changes are
+  rejected. A SOCKS5 UDP association that switches targets will have later
+  datagrams rejected by the VLESS outbound.
+- XUDP outbound is opt-in (`"xudp": true`); the default remains simple UoT for
+  broader interoperability. XUDP uses a synthetic `v1.mux.cool:666` request.
 - UDP replies carry no source address; the client reports the bound target (or
   its resolved IP) as the source.
 - Empty UDP datagrams are dropped/skipped, so peers cannot rely on preserving
@@ -133,9 +160,12 @@ The inbound always requires TLS; plaintext VLESS inbound is not supported.
   the handshake failure is reported as a SOCKS5 failure reply.
 - Integration: TLS client -> VLESS inbound over the in-tree TLS 1.3 server ->
   direct TCP echo, including PEM credential loading and response-header order.
-- Integration: SOCKS5 UDP ASSOCIATE -> VLESS UDP outbound -> TLS -> VLESS UDP
-  inbound -> direct UDP echo, covering length-prefixed framing in both
-  directions.
+- Integration: SOCKS5 UDP ASSOCIATE -> VLESS UDP outbound (simple and XUDP) ->
+  TLS -> VLESS UDP inbound (command `2` and XUDP command `3`) -> direct UDP
+  echo.
+- Unit: XUDP New/Keep frame roundtrip and address encoding.
+- Local interop with Xray-core 26.11.9: TCP in both directions; UDP/XUDP in
+  both directions.
 - Local-only interop: the TLS adapter and VLESS-over-TLS request/response were
   checked against a Python/OpenSSL TLS echo and VLESS mock. The harness is not
   committed.

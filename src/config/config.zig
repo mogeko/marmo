@@ -47,6 +47,7 @@ pub const Config = struct {
         password: ?[]const u8 = null,
         uuid: ?[]const u8 = null,
         tls: ?Tls = null,
+        xudp: bool = false,
         nodes: ?[]const []const u8 = null,
         strategy: ?Strategy = null,
         health_check: ?HealthCheck = null,
@@ -348,8 +349,11 @@ fn rejectVlessFields(
     index: usize,
     diagnostic: *Diagnostic,
 ) ValidationError!void {
-    if (outbound.uuid != null or outbound.tls != null) {
-        diagnostic.set("outbounds[{d}]: uuid/tls only apply to vless", .{index});
+    if (outbound.uuid != null or outbound.tls != null or outbound.xudp) {
+        diagnostic.set(
+            "outbounds[{d}]: uuid/tls/xudp only apply to vless",
+            .{index},
+        );
         return error.InvalidConfig;
     }
 }
@@ -656,7 +660,8 @@ test "vless config validates uuid and TLS options" {
         \\    { "tag": "proxy", "protocol": "vless",
         \\      "server": "example.com:443",
         \\      "uuid": "00112233-4455-6677-8899-aabbccddeeff",
-        \\      "tls": { "sni": "cdn.example.com" } }
+        \\      "tls": { "sni": "cdn.example.com" },
+        \\      "xudp": true }
         \\  ],
         \\  "route": { "final": "proxy" }
         \\}
@@ -715,7 +720,7 @@ test "vless config validates uuid and TLS options" {
         validate(tls_on_direct.inner.value, &diagnostic),
     );
     try std.testing.expectEqualStrings(
-        "outbounds[0]: uuid/tls only apply to vless",
+        "outbounds[0]: uuid/tls/xudp only apply to vless",
         diagnostic.message(),
     );
 }
