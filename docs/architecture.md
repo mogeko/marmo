@@ -1,8 +1,9 @@
 # Architecture
 
-Status: Phase 1 MVP implemented; Phase 2 started with outbound selectors.
-SS2022 TCP/UDP interop was verified locally against shadowsocks-rust 1.25.0 in
-both directions; the interop harness is not part of the repository. Protocol and
+Status: Phase 1 MVP implemented; Phase 2 started with outbound selectors and
+active TCP health probes, followed by a VLESS outbound over TCP or TLS. SS2022
+TCP/UDP interop was verified locally against shadowsocks-rust 1.25.0 in both
+directions; the interop harness is not part of the repository. Protocol and
 Phase 2 gaps are tracked in `docs/protocols/` and §11.
 
 ## 1. Purpose
@@ -380,8 +381,9 @@ Health checks are explicit per group: `tcp_connect` to a host:port or
 by default; no traffic is generated unless configured.
 
 Implementation status: `manual`, `round_robin`, `random`, `fallback`, and
-`least_latency` are implemented. Latency is currently measured passively from
-successful connects (EWMA); active health probes and `http_head` are pending.
+`least_latency` are implemented. Latency comes from passive connect samples and,
+when configured, active `tcp_connect` probes with a timeout. Probes use a fixed
+interval; `http_head`, jitter, and exponential backoff are pending.
 
 Per-connection selection is independent. UDP sessions keep the selected node
 for the session lifetime. Selection state is shared across tasks; use atomics
@@ -396,7 +398,7 @@ for counters and a mutex only around node-set replacement (config reload).
 | HTTP proxy | TCP | yes | no | yes | yes | 1 | CONNECT + forward implemented |
 | Shadowsocks | TCP/UDP | yes | yes | yes | yes | 1 | 2022 TCP + UDP implemented |
 | Trojan | TLS | yes | yes | yes | yes | 2 | inbound needs in-tree TLS server |
-| VLESS | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | XTLS Vision later; gRPC in phase 3 |
+| VLESS | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | TCP outbound + TLS client done; UDP/inbound/WS/H2 pending |
 | VMess | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | legacy CFB not planned; gRPC in phase 3 |
 | TUIC | QUIC | yes | yes | yes | yes | 3 | in-tree QUIC |
 | Hysteria2 | QUIC + TLS | yes | yes | yes | yes | 3 | Salamander, Brutal CC |
@@ -411,8 +413,9 @@ Phasing:
   config, counters.
 - **Phase 2**: VLESS/Trojan/VMess, in-tree TLS 1.3 server and WS/H2 transports,
   sniffing, compiled rule sets, process rules, groups and health checks, DNS
-  cache/DoH. Outbound selectors are implemented with passive latency; active
-  health probes and the remaining items are next.
+  cache/DoH. Implemented: selectors, TCP health probes, and a VLESS outbound
+  over TCP or TLS (client side). `http_head`, jitter, backoff, VLESS UDP and
+  inbound, and the remaining items are next.
 - **Phase 3**: in-tree QUIC, TUIC, Hysteria2, gRPC transport.
 - **Phase 4**: optional TUN/transparent proxying, Windows, transport hardening
   and external audit.
@@ -422,7 +425,9 @@ WireGuard is explicitly out of scope (ADR-0002).
 
 Implementation status: Phase 1 MVP is implemented. See
 [`docs/protocols/shadowsocks.md`](protocols/shadowsocks.md) for the remaining
-SIP022 hardening and interoperability gaps.
+SIP022 hardening and interoperability gaps, and
+[`docs/protocols/vless.md`](protocols/vless.md) for the VLESS outbound and TLS
+client scope.
 
 ## 13. Dependencies and in-tree transports
 
@@ -432,7 +437,9 @@ implemented in this repository, but in-tree code is always second choice:
 re-check every transport on each Zig upgrade and migrate to `std` as soon as it
 provides the same primitive, deleting the in-tree version.
 
-- **TLS client**: `std.crypto.tls.Client` (Phase 1/2).
+- **TLS client**: `std.crypto.tls.Client`, adapted to the public `Stream`
+  interface in `src/transport/tls_client.zig` and composed as a transport
+  dialer in `src/transport/tls_dialer.zig` (Phase 1/2).
 - **TLS 1.3 server**: in-tree on `std.crypto`, Phase 2; TLS 1.3 only, ALPN/SNI,
   caller-provided certificate and key, no renegotiation or weak ciphers.
 - **WebSocket / HTTP/2 / gRPC**: in-tree, Phase 2/3; HTTP/2 is limited to

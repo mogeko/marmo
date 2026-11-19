@@ -23,6 +23,7 @@ pub const RejectReason = @import("routing/router.zig").RejectReason;
 pub const Router = @import("routing/router.zig").Router;
 pub const RuleSet = @import("routing/rules.zig").RuleSet;
 pub const Shadowsocks2022 = @import("protocol/shadowsocks2022.zig");
+pub const VlessProtocol = @import("protocol/vless.zig");
 
 pub const Dialer = @import("transport/dialer.zig").Dialer;
 pub const ConnectError = Dialer.ConnectError;
@@ -31,11 +32,14 @@ pub const Received = PacketConn.Received;
 pub const Stream = @import("transport/stream.zig").Stream;
 pub const ShutdownHow = Stream.ShutdownHow;
 pub const TcpStream = @import("transport/tcp.zig").TcpStream;
+pub const TlsClientStream = @import("transport/tls_client.zig").TlsClientStream;
+pub const TlsDialer = @import("transport/tls_dialer.zig").TlsDialer;
 pub const UdpPacketConn = @import("transport/udp.zig").UdpPacketConn;
 
 pub const Outbound = @import("outbound/outbound.zig").Outbound;
 pub const Direct = @import("outbound/direct.zig").Direct;
 pub const HttpConnect = @import("outbound/http_connect.zig").HttpConnect;
+pub const Vless = @import("outbound/vless.zig").Vless;
 
 pub const Instance = @import("instance.zig").Instance;
 

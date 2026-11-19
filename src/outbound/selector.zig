@@ -10,17 +10,30 @@ const PacketConn = @import("../transport/packet.zig").PacketConn;
 const Stream = @import("../transport/stream.zig").Stream;
 const Outbound = @import("outbound.zig").Outbound;
 
+pub const Health = struct {
+    target: Endpoint,
+    interval_ns: u64,
+    timeout_ns: u64,
+};
+
+const ProbeResult = union(enum) {
+    connect: ConnectError!Stream,
+    timeout: std.Io.Cancelable!void,
+};
+
 pub const Selector = struct {
     nodes: []*const Outbound,
     strategy: Strategy,
     latency_ms: []std.atomic.Value(u64),
     failures: []std.atomic.Value(u32),
     next: std.atomic.Value(u64) = .init(0),
+    health: ?Health = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
         nodes: []*const Outbound,
         strategy: Strategy,
+        health: ?Health,
     ) !*Selector {
         const self = try allocator.create(Selector);
         const latencies = try allocator.alloc(std.atomic.Value(u64), nodes.len);
@@ -34,8 +47,75 @@ pub const Selector = struct {
             .strategy = strategy,
             .latency_ms = latencies,
             .failures = failures,
+            .health = health,
         };
         return self;
+    }
+
+    pub fn hasHealth(self: *const Selector) bool {
+        return self.health != null;
+    }
+
+    pub fn runHealth(self: *Selector, io: std.Io) std.Io.Cancelable!void {
+        const health = self.health orelse return;
+        while (true) {
+            for (self.nodes, 0..) |_, index| {
+                self.probeNode(io, index) catch |err| switch (err) {
+                    error.Canceled => return,
+                };
+            }
+            try std.Io.sleep(io, .{ .nanoseconds = health.interval_ns }, .awake);
+        }
+    }
+
+    fn probeNode(self: *Selector, io: std.Io, index: usize) std.Io.Cancelable!void {
+        const health = self.health orelse return;
+        var buffer: [2]ProbeResult = undefined;
+        var select: std.Io.Select(ProbeResult) = .init(io, &buffer);
+
+        select.concurrent(.connect, probeConnect, .{
+            self.nodes[index],
+            io,
+            health.target,
+        }) catch {
+            drainProbe(&select, io);
+            return;
+        };
+        select.concurrent(.timeout, probeSleep, .{
+            io,
+            health.timeout_ns,
+        }) catch {
+            drainProbe(&select, io);
+            return;
+        };
+
+        const begin = std.Io.Timestamp.now(io, .awake);
+        const result = select.await() catch |err| {
+            drainProbe(&select, io);
+            switch (err) {
+                error.Canceled => return error.Canceled,
+            }
+        };
+        const end = std.Io.Timestamp.now(io, .awake);
+        drainProbe(&select, io);
+
+        switch (result) {
+            .connect => |connected| {
+                if (connected) |stream| {
+                    stream.close(io);
+                    self.recordSuccess(index, elapsedMs(begin, end));
+                } else |err| {
+                    if (err == error.Canceled) return error.Canceled;
+                    self.recordFailure(index);
+                }
+            },
+            .timeout => |timed_out| {
+                timed_out catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                };
+                self.recordFailure(index);
+            },
+        }
     }
 
     pub fn asDialer(self: *Selector) Dialer {
@@ -224,6 +304,29 @@ pub const Selector = struct {
         .connect_packet = connectPacket,
     };
 };
+
+fn probeConnect(
+    node: *const Outbound,
+    io: std.Io,
+    target: Endpoint,
+) ConnectError!Stream {
+    return node.connect(io, target);
+}
+
+fn probeSleep(io: std.Io, timeout_ns: u64) std.Io.Cancelable!void {
+    try std.Io.sleep(io, .{ .nanoseconds = @intCast(timeout_ns) }, .awake);
+}
+
+fn drainProbe(select: *std.Io.Select(ProbeResult), io: std.Io) void {
+    while (select.cancel()) |result| {
+        switch (result) {
+            .connect => |connected| {
+                if (connected) |stream| stream.close(io) else |_| {}
+            },
+            .timeout => |timed_out| timed_out catch {},
+        }
+    }
+}
 
 fn elapsedMs(begin: std.Io.Timestamp, end: std.Io.Timestamp) u64 {
     const nanoseconds = begin.durationTo(end).nanoseconds;

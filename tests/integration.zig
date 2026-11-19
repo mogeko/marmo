@@ -61,6 +61,12 @@ fn mockHttpProxyLoop(io: std.Io, server: *std.Io.net.Server) void {
     stream.close(io);
 }
 
+fn acceptOnceSignal(io: std.Io, server: *std.Io.net.Server, event: *std.Io.Event) void {
+    const stream = server.accept(io) catch return;
+    event.set(io);
+    stream.close(io);
+}
+
 fn udpEchoOnce(io: std.Io, socket: *std.Io.net.Socket) void {
     var buffer: [1500]u8 = undefined;
     const message = socket.receive(io, &buffer) catch return;
@@ -711,6 +717,216 @@ test "HTTP forward proxy rewrites absolute-form requests" {
     _ = origin_future.await(io);
 }
 
+const vless_test_uuid_text = "00112233-4455-6677-8899-aabbccddeeff";
+const vless_test_uuid = [16]u8{
+    0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+    0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+};
+
+fn vlessReadHeader(
+    io: std.Io,
+    stream: std.Io.net.Stream,
+    expected_port: u16,
+) !void {
+    var fixed: [18]u8 = undefined;
+    try tcpReadExact(io, stream, &fixed);
+    if (fixed[0] != 0) return error.InvalidVlessVersion;
+    if (!std.mem.eql(u8, fixed[1..17], &vless_test_uuid)) {
+        return error.InvalidVlessUuid;
+    }
+
+    var scratch: [255]u8 = undefined;
+    const addon_len = fixed[17];
+    if (addon_len != 0) try tcpReadExact(io, stream, scratch[0..addon_len]);
+
+    var command: [1]u8 = undefined;
+    try tcpReadExact(io, stream, &command);
+    if (command[0] != 1) return error.InvalidVlessCommand;
+
+    var port_bytes: [2]u8 = undefined;
+    try tcpReadExact(io, stream, &port_bytes);
+    const port = (@as(u16, port_bytes[0]) << 8) | port_bytes[1];
+    if (port != expected_port) return error.InvalidVlessPort;
+
+    var atyp: [1]u8 = undefined;
+    try tcpReadExact(io, stream, &atyp);
+    switch (atyp[0]) {
+        1 => {
+            var address: [4]u8 = undefined;
+            try tcpReadExact(io, stream, &address);
+            if (!std.mem.eql(u8, &address, &.{ 127, 0, 0, 1 })) {
+                return error.InvalidVlessAddress;
+            }
+        },
+        2 => {
+            var name_len: [1]u8 = undefined;
+            try tcpReadExact(io, stream, &name_len);
+            try tcpReadExact(io, stream, scratch[0..name_len[0]]);
+        },
+        3 => {
+            var address: [16]u8 = undefined;
+            try tcpReadExact(io, stream, &address);
+        },
+        else => return error.InvalidVlessAddress,
+    }
+}
+
+fn mockVlessLoop(
+    io: std.Io,
+    server: *std.Io.net.Server,
+    expected_port: u16,
+) void {
+    const stream = server.accept(io) catch return;
+    defer stream.close(io);
+
+    vlessReadHeader(io, stream, expected_port) catch return;
+    // Version 0, two addon bytes, then payload.
+    tcpWrite(io, stream, &.{ 0, 2, 0xaa, 0xbb }) catch return;
+    echoConnection(io, stream);
+}
+
+test "VLESS TCP outbound reaches a mock VLESS server" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var vless_bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var vless_server = try vless_bind.listen(io, .{ .reuse_address = true });
+    defer vless_server.deinit(io);
+    const target_port = vless_server.socket.address.getPort();
+    var vless_future = io.async(
+        mockVlessLoop,
+        .{ io, &vless_server, target_port },
+    );
+
+    var server_text_buffer: [32]u8 = undefined;
+    const server_text = try std.fmt.bufPrint(
+        &server_text_buffer,
+        "127.0.0.1:{d}",
+        .{target_port},
+    );
+
+    var diagnostic: marmo.Diagnostic = .{};
+    const config: marmo.Config = .{
+        .inbounds = &.{
+            .{ .tag = "socks", .protocol = .socks5, .listen = "127.0.0.1:0" },
+        },
+        .outbounds = &.{
+            .{
+                .tag = "proxy",
+                .protocol = .vless,
+                .server = server_text,
+                .uuid = vless_test_uuid_text,
+            },
+        },
+        .route = .{ .final = "proxy" },
+    };
+    var instance = try marmo.Instance.init(allocator, io, config, &diagnostic);
+    defer instance.deinit();
+    try instance.start();
+
+    const socks_endpoint = instance.inboundEndpoint("socks") orelse
+        return error.TestUnexpectedResult;
+    const socks_address = switch (socks_endpoint) {
+        .ip => |ip| ip,
+        .domain => return error.TestUnexpectedResult,
+    };
+    const client = try std.Io.net.IpAddress.connect(
+        &socks_address,
+        io,
+        .{ .mode = .stream },
+    );
+    defer client.close(io);
+
+    try socksNegotiate(io, client);
+    try tcpWrite(io, client, &.{
+        5,                          1,                            0, 1, 127, 0, 0, 1,
+        @intCast(target_port >> 8), @intCast(target_port & 0xff),
+    });
+
+    var reply: [10]u8 = undefined;
+    try tcpReadExact(io, client, &reply);
+    try std.testing.expectEqual(@as(u8, 5), reply[0]);
+    try std.testing.expectEqual(@as(u8, 0), reply[1]);
+
+    try tcpWrite(io, client, "hello");
+    var echoed: [5]u8 = undefined;
+    try tcpReadExact(io, client, &echoed);
+    try std.testing.expectEqualStrings("hello", &echoed);
+
+    instance.stop();
+    _ = vless_future.await(io);
+}
+
+test "VLESS TLS handshake failure is reported to SOCKS5" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tls_bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var tls_server = try tls_bind.listen(io, .{ .reuse_address = true });
+    defer tls_server.deinit(io);
+    const target_port = tls_server.socket.address.getPort();
+
+    var event: std.Io.Event = .unset;
+    var accept_future = io.concurrent(
+        acceptOnceSignal,
+        .{ io, &tls_server, &event },
+    ) catch return error.TestUnexpectedResult;
+
+    var server_text_buffer: [32]u8 = undefined;
+    const server_text = try std.fmt.bufPrint(
+        &server_text_buffer,
+        "127.0.0.1:{d}",
+        .{target_port},
+    );
+
+    var diagnostic: marmo.Diagnostic = .{};
+    const config: marmo.Config = .{
+        .inbounds = &.{
+            .{ .tag = "socks", .protocol = .socks5, .listen = "127.0.0.1:0" },
+        },
+        .outbounds = &.{
+            .{
+                .tag = "proxy",
+                .protocol = .vless,
+                .server = server_text,
+                .uuid = vless_test_uuid_text,
+                .tls = .{ .sni = "localhost", .insecure = true },
+            },
+        },
+        .route = .{ .final = "proxy" },
+    };
+    var instance = try marmo.Instance.init(allocator, io, config, &diagnostic);
+    defer instance.deinit();
+    try instance.start();
+
+    const socks_endpoint = instance.inboundEndpoint("socks") orelse
+        return error.TestUnexpectedResult;
+    const socks_address = switch (socks_endpoint) {
+        .ip => |ip| ip,
+        .domain => return error.TestUnexpectedResult,
+    };
+    const client = try std.Io.net.IpAddress.connect(
+        &socks_address,
+        io,
+        .{ .mode = .stream },
+    );
+    defer client.close(io);
+
+    try socksNegotiate(io, client);
+    try tcpWrite(io, client, &.{ 5, 1, 0, 1, 127, 0, 0, 1, 0, 80 });
+
+    var reply: [10]u8 = undefined;
+    try tcpReadExact(io, client, &reply);
+    try std.testing.expectEqual(@as(u8, 5), reply[0]);
+    try std.testing.expect(reply[1] != 0);
+
+    try event.wait(io);
+    instance.stop();
+    _ = accept_future.await(io);
+}
+
 test "selector fallback skips a failing outbound" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -785,4 +1001,53 @@ test "selector fallback skips a failing outbound" {
 
     instance.stop();
     _ = echo_future.await(io);
+}
+
+test "selector health check probes a node" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var health_bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var health_server = try health_bind.listen(io, .{ .reuse_address = true });
+    defer health_server.deinit(io);
+
+    var health_text_buffer: [32]u8 = undefined;
+    const health_text = try std.fmt.bufPrint(
+        &health_text_buffer,
+        "127.0.0.1:{d}",
+        .{health_server.socket.address.getPort()},
+    );
+
+    var event: std.Io.Event = .unset;
+    var health_future = io.concurrent(
+        acceptOnceSignal,
+        .{ io, &health_server, &event },
+    ) catch return error.TestUnexpectedResult;
+
+    var diagnostic: marmo.Diagnostic = .{};
+    const config: marmo.Config = .{
+        .outbounds = &.{
+            .{ .tag = "direct", .protocol = .direct },
+            .{
+                .tag = "auto",
+                .protocol = .selector,
+                .nodes = &.{"direct"},
+                .strategy = .least_latency,
+                .health_check = .{
+                    .target = health_text,
+                    .interval_s = 1,
+                    .timeout_s = 1,
+                },
+            },
+        },
+        .route = .{ .final = "auto" },
+    };
+    var instance = try marmo.Instance.init(allocator, io, config, &diagnostic);
+    defer instance.deinit();
+    try instance.start();
+
+    try event.wait(io);
+    instance.stop();
+    _ = health_future.await(io);
 }

@@ -17,9 +17,10 @@ repository ships the library only: no CLI, daemon, or `app` layer.
 ## Repo state
 
 - Phase 1 MVP is implemented. Phase 2 has started with outbound selectors:
-  manual, round-robin, random, fallback, and least-latency using passive
-  latency samples. Active health probes, VLESS/Trojan/VMess, TLS server, WS/H2,
-  sniffing, rule sets, process rules, and DNS cache/DoH remain.
+  manual, round-robin, random, fallback, and least-latency, plus active TCP
+  health probes and a VLESS outbound over TCP or TLS. `http_head`, jitter, and
+  exponential backoff remain, along with Trojan/VMess, VLESS UDP and inbound,
+  TLS server, WS/H2, sniffing, rule sets, process rules, and DNS cache/DoH.
 - `examples/shadowsocks2022/` is standalone: it has its own `build.zig` and
   `build.zig.zon` and is not part of the root build.
 - ADR-0001–0009 are accepted; new architecture decisions need a new ADR.
@@ -159,7 +160,7 @@ Adapted from TigerBeetle's
 
 ## Commands and tests
 
-- `zig build test` runs the unit, public API, and integration tests (37 tests
+- `zig build test` runs the unit, public API, and integration tests (47 tests
   today). Reference-implementation interop is local-only and not part of this
   repository or CI.
 - `zig test src/root.zig` runs the module tests directly; use

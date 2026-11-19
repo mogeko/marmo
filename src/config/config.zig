@@ -6,6 +6,7 @@ const Endpoint = @import("../net/endpoint.zig").Endpoint;
 const Cidr = @import("../net/cidr.zig").Cidr;
 const Network = @import("../routing/metadata.zig").Network;
 const s2022 = @import("../protocol/shadowsocks2022.zig");
+const vless = @import("../protocol/vless.zig");
 
 pub const Config = struct {
     version: u8 = 1,
@@ -35,13 +36,27 @@ pub const Config = struct {
         server: ?[]const u8 = null,
         method: ?[]const u8 = null,
         password: ?[]const u8 = null,
+        uuid: ?[]const u8 = null,
+        tls: ?Tls = null,
         nodes: ?[]const []const u8 = null,
         strategy: ?Strategy = null,
+        health_check: ?HealthCheck = null,
     };
 
-    pub const OutboundProtocol = enum { direct, http, selector, shadowsocks };
+    pub const OutboundProtocol = enum { direct, http, selector, shadowsocks, vless };
+
+    pub const Tls = struct {
+        sni: ?[]const u8 = null,
+        insecure: bool = false,
+    };
 
     pub const Strategy = enum { fallback, least_latency, manual, random, round_robin };
+
+    pub const HealthCheck = struct {
+        target: []const u8,
+        interval_s: u16 = 30,
+        timeout_s: u16 = 5,
+    };
 
     pub const Route = struct {
         rules: []const Rule = &.{},
@@ -200,6 +215,7 @@ fn validateOutbounds(
             .http => try validateHttp(outbound, index, diagnostic),
             .shadowsocks => try validateShadowsocks(outbound, index, diagnostic),
             .selector => try validateSelector(outbound, index, outbounds, diagnostic),
+            .vless => try validateVless(outbound, index, diagnostic),
         }
     }
 }
@@ -210,6 +226,7 @@ fn validateDirect(
     diagnostic: *Diagnostic,
 ) ValidationError!void {
     try rejectSelectorFields(outbound, index, diagnostic);
+    try rejectVlessFields(outbound, index, diagnostic);
     if (outbound.server != null or outbound.method != null or outbound.password != null) {
         diagnostic.set("outbounds[{d}]: direct does not take server or credentials", .{index});
         return error.InvalidConfig;
@@ -222,6 +239,7 @@ fn validateHttp(
     diagnostic: *Diagnostic,
 ) ValidationError!void {
     try rejectSelectorFields(outbound, index, diagnostic);
+    try rejectVlessFields(outbound, index, diagnostic);
     const server = outbound.server orelse {
         diagnostic.set("outbounds[{d}].server: required for http", .{index});
         return error.InvalidConfig;
@@ -245,6 +263,7 @@ fn validateShadowsocks(
     diagnostic: *Diagnostic,
 ) ValidationError!void {
     try rejectSelectorFields(outbound, index, diagnostic);
+    try rejectVlessFields(outbound, index, diagnostic);
     const server = outbound.server orelse {
         diagnostic.set("outbounds[{d}].server: required for shadowsocks", .{index});
         return error.InvalidConfig;
@@ -277,13 +296,79 @@ fn validateShadowsocks(
     key.deinit();
 }
 
+fn rejectVlessFields(
+    outbound: Config.Outbound,
+    index: usize,
+    diagnostic: *Diagnostic,
+) ValidationError!void {
+    if (outbound.uuid != null or outbound.tls != null) {
+        diagnostic.set("outbounds[{d}]: uuid/tls only apply to vless", .{index});
+        return error.InvalidConfig;
+    }
+}
+
+fn validateVless(
+    outbound: Config.Outbound,
+    index: usize,
+    diagnostic: *Diagnostic,
+) ValidationError!void {
+    try rejectSelectorFields(outbound, index, diagnostic);
+    if (outbound.method != null or outbound.password != null) {
+        diagnostic.set("outbounds[{d}]: vless does not take method or password", .{index});
+        return error.InvalidConfig;
+    }
+
+    const server_text = outbound.server orelse {
+        diagnostic.set("outbounds[{d}].server: required for vless", .{index});
+        return error.InvalidConfig;
+    };
+    const server = Endpoint.parse(server_text) catch {
+        diagnostic.set("outbounds[{d}].server: invalid endpoint '{s}'", .{
+            index,
+            server_text,
+        });
+        return error.InvalidConfig;
+    };
+
+    const uuid_text = outbound.uuid orelse {
+        diagnostic.set("outbounds[{d}].uuid: required for vless", .{index});
+        return error.InvalidConfig;
+    };
+    _ = vless.parseUuid(uuid_text) catch {
+        diagnostic.set("outbounds[{d}].uuid: invalid UUID", .{index});
+        return error.InvalidConfig;
+    };
+
+    const tls_config = outbound.tls orelse return;
+    if (tls_config.sni) |sni| {
+        if (sni.len == 0) {
+            diagnostic.set("outbounds[{d}].tls.sni: must not be empty", .{index});
+            return error.InvalidConfig;
+        }
+    }
+    if (!tls_config.insecure and tls_config.sni == null) {
+        switch (server) {
+            .domain => {},
+            .ip => {
+                diagnostic.set(
+                    "outbounds[{d}].tls.sni: required for an IP server",
+                    .{index},
+                );
+                return error.InvalidConfig;
+            },
+        }
+    }
+}
+
 fn rejectSelectorFields(
     outbound: Config.Outbound,
     index: usize,
     diagnostic: *Diagnostic,
 ) ValidationError!void {
-    if (outbound.nodes != null or outbound.strategy != null) {
-        diagnostic.set("outbounds[{d}]: nodes/strategy only apply to selector", .{index});
+    if (outbound.nodes != null or outbound.strategy != null or
+        outbound.health_check != null)
+    {
+        diagnostic.set("outbounds[{d}]: group fields only apply to selector", .{index});
         return error.InvalidConfig;
     }
 }
@@ -294,6 +379,7 @@ fn validateSelector(
     outbounds: []const Config.Outbound,
     diagnostic: *Diagnostic,
 ) ValidationError!void {
+    try rejectVlessFields(outbound, index, diagnostic);
     if (outbound.server != null or outbound.method != null or outbound.password != null) {
         diagnostic.set("outbounds[{d}]: selector does not take server or credentials", .{index});
         return error.InvalidConfig;
@@ -310,6 +396,20 @@ fn validateSelector(
         diagnostic.set("outbounds[{d}].strategy: required for selector", .{index});
         return error.InvalidConfig;
     };
+    if (outbound.health_check) |health| {
+        _ = Endpoint.parse(health.target) catch {
+            diagnostic.set("outbounds[{d}].health_check.target: invalid endpoint", .{index});
+            return error.InvalidConfig;
+        };
+        if (health.interval_s == 0 or health.timeout_s == 0) {
+            diagnostic.set("outbounds[{d}].health_check: intervals must be positive", .{index});
+            return error.InvalidConfig;
+        }
+        if (health.timeout_s > health.interval_s) {
+            diagnostic.set("outbounds[{d}].health_check: timeout exceeds interval", .{index});
+            return error.InvalidConfig;
+        }
+    }
 
     for (nodes, 0..) |node_tag, node_index| {
         if (node_tag.len == 0) {
@@ -472,7 +572,9 @@ test "selector config validates node references" {
         \\  "outbounds": [
         \\    { "tag": "direct", "protocol": "direct" },
         \\    { "tag": "auto", "protocol": "selector",
-        \\      "nodes": ["direct"], "strategy": "fallback" }
+        \\      "nodes": ["direct"], "strategy": "fallback",
+        \\      "health_check": { "target": "127.0.0.1:1",
+        \\                        "interval_s": 30, "timeout_s": 5 } }
         \\  ],
         \\  "route": { "final": "auto" }
         \\}
@@ -495,6 +597,78 @@ test "selector config validates node references" {
     );
     try std.testing.expectEqualStrings(
         "outbounds[0].nodes[0]: unknown 'missing'",
+        diagnostic.message(),
+    );
+}
+
+test "vless config validates uuid and TLS options" {
+    var diagnostic: Diagnostic = .{};
+    var valid = try fromJson(std.testing.allocator,
+        \\{
+        \\  "outbounds": [
+        \\    { "tag": "proxy", "protocol": "vless",
+        \\      "server": "example.com:443",
+        \\      "uuid": "00112233-4455-6677-8899-aabbccddeeff",
+        \\      "tls": { "sni": "cdn.example.com" } }
+        \\  ],
+        \\  "route": { "final": "proxy" }
+        \\}
+    );
+    defer valid.deinit();
+    try validate(valid.inner.value, &diagnostic);
+
+    var bad_uuid = try fromJson(std.testing.allocator,
+        \\{
+        \\  "outbounds": [
+        \\    { "tag": "proxy", "protocol": "vless",
+        \\      "server": "example.com:443", "uuid": "not-a-uuid" }
+        \\  ]
+        \\}
+    );
+    defer bad_uuid.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(bad_uuid.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "outbounds[0].uuid: invalid UUID",
+        diagnostic.message(),
+    );
+
+    var ip_without_sni = try fromJson(std.testing.allocator,
+        \\{
+        \\  "outbounds": [
+        \\    { "tag": "proxy", "protocol": "vless",
+        \\      "server": "127.0.0.1:443",
+        \\      "uuid": "00112233445566778899aabbccddeeff",
+        \\      "tls": {} }
+        \\  ]
+        \\}
+    );
+    defer ip_without_sni.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(ip_without_sni.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "outbounds[0].tls.sni: required for an IP server",
+        diagnostic.message(),
+    );
+
+    var tls_on_direct = try fromJson(std.testing.allocator,
+        \\{
+        \\  "outbounds": [
+        \\    { "tag": "direct", "protocol": "direct", "tls": {} }
+        \\  ]
+        \\}
+    );
+    defer tls_on_direct.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(tls_on_direct.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "outbounds[0]: uuid/tls only apply to vless",
         diagnostic.message(),
     );
 }
