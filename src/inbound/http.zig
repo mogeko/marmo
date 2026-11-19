@@ -10,7 +10,7 @@ const Stream = @import("../transport/stream.zig").Stream;
 const headers_max = 8192;
 const forward_head_max = headers_max + 1024;
 
-const AbsoluteTarget = struct {
+pub const AbsoluteTarget = struct {
     endpoint: Endpoint,
     authority: []const u8,
     path: []const u8,
@@ -104,7 +104,7 @@ fn handleForward(
         try respond(io, stream, "400 Bad Request");
         return;
     }
-    if (!std.mem.startsWith(u8, version, "HTTP/1.")) {
+    if (!isHttpVersion(version)) {
         try respond(io, stream, "505 HTTP Version Not Supported");
         return;
     }
@@ -180,9 +180,15 @@ fn routeTag(action: @import("../routing/router.zig").Action) ?[]const u8 {
     };
 }
 
-fn parseAbsolute(uri: []const u8) !AbsoluteTarget {
+/// Parses an absolute-form `http://` request target.
+pub fn parseAbsolute(uri: []const u8) !AbsoluteTarget {
     if (uri.len < 7 or !std.ascii.eqlIgnoreCase(uri[0..7], "http://")) {
         return error.UnsupportedScheme;
+    }
+    // A raw control character in the request target would be copied into the
+    // upstream request line and become header/request injection.
+    for (uri) |byte| {
+        if (byte <= 0x20 or byte == 0x7f) return error.BadRequest;
     }
     const rest = uri[7..];
     if (std.mem.findScalar(u8, rest, '#') != null) return error.BadRequest;
@@ -218,7 +224,9 @@ fn parseAbsolute(uri: []const u8) !AbsoluteTarget {
     };
 }
 
-fn parseAuthority(authority: []const u8) !Endpoint {
+/// Parses an HTTP authority (`host[:port]` or `[ipv6][:port]`).
+pub fn parseAuthority(authority: []const u8) !Endpoint {
+    if (authority.len == 0) return error.BadRequest;
     if (std.mem.findScalar(u8, authority, '@') != null) return error.BadRequest;
     for (authority) |byte| {
         if (byte <= 0x20 or byte == 0x7f) return error.BadRequest;
@@ -265,7 +273,9 @@ fn parsePort(text: []const u8) !u16 {
     return port;
 }
 
-fn buildForwardHead(
+/// Rewrites an absolute-form request into origin-form and strips hop-by-hop
+/// headers. `out` must hold `forward_head_max` bytes.
+pub fn buildForwardHead(
     out: []u8,
     method: []const u8,
     version: []const u8,
@@ -336,6 +346,14 @@ fn append(out: []u8, length: *usize, bytes: []const u8) !void {
     length.* += bytes.len;
 }
 
+/// Accepts exactly `HTTP/1.<digit>`; anything else would be copied into the
+/// upstream request line.
+fn isHttpVersion(text: []const u8) bool {
+    if (text.len != 8) return false;
+    if (!std.mem.startsWith(u8, text, "HTTP/1.")) return false;
+    return text[7] >= '0' and text[7] <= '9';
+}
+
 fn isToken(text: []const u8) bool {
     if (text.len == 0) return false;
     for (text) |byte| {
@@ -356,7 +374,8 @@ fn isValidHeaderValue(value: []const u8) bool {
     return true;
 }
 
-fn readHeaders(io: std.Io, stream: Stream, buffer: []u8) !usize {
+/// Reads one HTTP/1.1 head, including the terminating blank line.
+pub fn readHeaders(io: std.Io, stream: Stream, buffer: []u8) !usize {
     var len: usize = 0;
     while (len < buffer.len) {
         var buffers = [_][]u8{buffer[len .. len + 1]};
@@ -378,4 +397,30 @@ fn respond(io: std.Io, stream: Stream, status: []const u8) !void {
         .{status},
     ) catch return error.Unexpected;
     _ = try stream.write(io, &.{response});
+}
+
+test "HTTP authority rejects an empty host" {
+    try std.testing.expectError(error.BadRequest, parseAuthority(""));
+    try std.testing.expectError(error.BadRequest, parseAuthority(":80"));
+    try std.testing.expectError(error.BadRequest, parseAuthority("user@host:80"));
+}
+
+test "absolute targets reject control-character injection" {
+    try std.testing.expectError(
+        error.BadRequest,
+        parseAbsolute("http://example.com/a\nInjected: yes"),
+    );
+    try std.testing.expectError(
+        error.BadRequest,
+        parseAbsolute("http://example.com/a\tb"),
+    );
+    _ = try parseAbsolute("http://example.com/a%0Ab");
+}
+
+test "HTTP versions are restricted to the exact token" {
+    try std.testing.expect(isHttpVersion("HTTP/1.1"));
+    try std.testing.expect(isHttpVersion("HTTP/1.0"));
+    try std.testing.expect(!isHttpVersion("HTTP/1.1\nX: y"));
+    try std.testing.expect(!isHttpVersion("HTTP/1."));
+    try std.testing.expect(!isHttpVersion("HTTP/2.0"));
 }

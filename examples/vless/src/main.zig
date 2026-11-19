@@ -19,6 +19,7 @@ const Options = struct {
     private_key: []const u8 = "key.pem",
     sni: []const u8 = "localhost",
     insecure: bool = false,
+    xudp: bool = false,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -59,6 +60,7 @@ pub fn main(init: std.process.Init) !void {
                         .sni = options.sni,
                         .insecure = options.insecure,
                     },
+                    .xudp = options.xudp,
                 },
             },
             .route = .{ .final = "vless-out" },
@@ -103,6 +105,8 @@ fn parseOptions(args: []const []const u8) !Options {
         const argument = args[index];
         if (std.mem.eql(u8, argument, "--insecure")) {
             options.insecure = true;
+        } else if (std.mem.eql(u8, argument, "--xudp")) {
+            options.xudp = true;
         } else if (std.mem.eql(u8, argument, "--listen")) {
             index += 1;
             if (index >= args.len) return error.InvalidArguments;
@@ -146,6 +150,7 @@ fn usage() void {
         \\  --key <path>       ECDSA P-256 private key for server mode
         \\  --sni <name>       TLS server name for client mode
         \\  --insecure         skip CA verification for self-signed test certs
+        \\  --xudp             use XUDP framing for client UDP
         \\
     , .{});
 }

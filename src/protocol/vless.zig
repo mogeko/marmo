@@ -17,6 +17,8 @@ comptime {
 
 pub const command_tcp: u8 = 1;
 pub const command_udp: u8 = 2;
+pub const command_mux: u8 = 3;
+pub const command_rvs: u8 = 4;
 pub const max_udp_payload: usize = 65535;
 pub const address_ipv4: u8 = 1;
 pub const address_domain: u8 = 2;
@@ -124,6 +126,19 @@ pub const Request = struct {
     target: Endpoint,
 };
 
+pub fn writeMuxRequestHeader(
+    io: std.Io,
+    stream: Stream,
+    uuid: *const Uuid,
+) !void {
+    var buffer: [1 + uuid_len + 1 + 1]u8 = undefined;
+    buffer[0] = version;
+    @memcpy(buffer[1 .. 1 + uuid_len], uuid);
+    buffer[1 + uuid_len] = 0; // No addons.
+    buffer[1 + uuid_len + 1] = command_mux;
+    try writeAll(io, stream, &buffer);
+}
+
 pub fn writeRequestHeader(
     io: std.Io,
     stream: Stream,
@@ -191,6 +206,19 @@ pub fn readRequestHeader(
 
     var command_bytes: [1]u8 = undefined;
     try readExact(io, stream, &command_bytes);
+    if (command_bytes[0] == command_mux) {
+        // Mux and Reverse omit the address on the wire; XUDP uses the
+        // synthetic Mux target below and carries destinations per frame.
+        return .{
+            .command = command_mux,
+            .target = .{ .domain = .{
+                .name = "v1.mux.cool",
+                .port = 666,
+            } },
+        };
+    }
+    if (command_bytes[0] == command_rvs) return error.CommandUnsupported;
+
     var port_bytes: [2]u8 = undefined;
     try readExact(io, stream, &port_bytes);
     const port = std.mem.readInt(u16, &port_bytes, .big);

@@ -90,7 +90,8 @@ through the handshake. `Server.end` sends `close_notify`; `deinit` does not.
 
 `validateCredentials` checks chain bounds, the leaf key algorithm, and that the
 key pair matches the leaf. It is used by config loading before a listener
-starts.
+starts. The package API itself is synchronous and unbounded; the root adapters
+race handshakes with `handshake_timeout_s` (default 10 seconds).
 
 `readSome` reads only what is already available. Use it instead of
 `Reader.readVec` for proxy streams: `readVec` tries to fill the caller's whole
@@ -99,6 +100,11 @@ buffer and may block waiting for more data than the peer sent.
 A replacement package must provide the same exports and semantics:
 `Client`, `Options`, `Ca`, `Server`, `ServerOptions`, `validateCredentials`,
 `readSome`, and `min_buffer_len`.
+
+The package also exports `test_cert` (runtime-generated self-signed
+certificates; no private key is committed) and the `handshake`/`record` wire
+modules. The latter two are used by the root fuzz harness and have no API
+stability guarantee.
 
 ## Server scope
 
@@ -110,8 +116,9 @@ The server is TLS 1.3 only:
   must match `private_key`.
 - No client authentication, PSK, session tickets, ALPN selection, 0-RTT, or
   KeyUpdate. Post-handshake handshake messages are rejected.
-- A middlebox-compatibility `change_cipher_spec` is sent after `ServerHello`
-  and incoming dummy CCS records are ignored.
+- A middlebox-compatibility `change_cipher_spec` is sent after `ServerHello`.
+  Incoming dummy CCS records are ignored only while the handshake is still in
+  progress; a post-handshake CCS is a protocol error (RFC 8446 §5).
 - The server accepts fragmented ClientHello messages up to 16 KiB and
   certificate chains up to 16 KiB after encoding.
 - One task may read while another writes, but writes must be serialized by the

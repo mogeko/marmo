@@ -1355,7 +1355,7 @@ const TestTlsFiles = struct {
     }
 };
 
-test "VLESS UDP outbound and inbound relay datagrams" {
+fn vlessUdpLoop(use_xudp: bool) !void {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -1418,6 +1418,7 @@ test "VLESS UDP outbound and inbound relay datagrams" {
                 .server = server_text,
                 .uuid = vless_test_uuid_text,
                 .tls = .{ .sni = "localhost", .insecure = true },
+                .xudp = use_xudp,
             },
         },
         .route = .{ .final = "vless-out" },
@@ -1487,4 +1488,137 @@ test "VLESS UDP outbound and inbound relay datagrams" {
     client_instance.stop();
     server_instance.stop();
     _ = echo_future.await(io);
+}
+
+test "VLESS UDP outbound and inbound relay datagrams" {
+    try vlessUdpLoop(false);
+}
+
+test "VLESS XUDP outbound and inbound relay datagrams" {
+    try vlessUdpLoop(true);
+}
+
+fn acceptAndHold(
+    io: std.Io,
+    server: *std.Io.net.Server,
+    event: *std.Io.Event,
+) void {
+    const stream = server.accept(io) catch return;
+    event.set(io);
+    std.Io.sleep(io, .{ .nanoseconds = 200 * std.time.ns_per_ms }, .awake) catch {};
+    stream.close(io);
+}
+
+test "TLS client handshake times out" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var listener = try bind.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    const port = listener.socket.address.getPort();
+
+    var event: std.Io.Event = .unset;
+    var accept_future = io.concurrent(
+        acceptAndHold,
+        .{ io, &listener, &event },
+    ) catch return error.TestUnexpectedResult;
+
+    var address: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
+    const net_stream = try std.Io.net.IpAddress.connect(
+        &address,
+        io,
+        .{ .mode = .stream },
+    );
+    const remote: marmo.Endpoint = .{ .ip = net_stream.socket.address };
+    const tcp = try marmo.TcpStream.create(allocator, net_stream, remote, remote);
+
+    try event.wait(io);
+    const result = marmo.TlsClientStream.create(
+        io,
+        allocator,
+        tcp.stream(),
+        .{
+            .server_name = "localhost",
+            .insecure = true,
+            .handshake_timeout_ns = 50 * std.time.ns_per_ms,
+        },
+    );
+    try std.testing.expectError(error.TimedOut, result);
+
+    tcp.stream().close(io);
+    _ = accept_future.await(io);
+}
+
+const ServerTimeoutContext = struct {
+    listener: *std.Io.net.Server,
+    cert: *tls13.test_cert.Certificate,
+    started: std.Io.Event = .unset,
+    error_code: ?anyerror = null,
+};
+
+fn tlsServerTimeoutTask(io: std.Io, context: *ServerTimeoutContext) void {
+    tlsServerTimeoutRun(io, context) catch |err| {
+        context.error_code = err;
+    };
+}
+
+fn tlsServerTimeoutRun(io: std.Io, context: *ServerTimeoutContext) !void {
+    const accepted = try context.listener.accept(io);
+    const remote: marmo.Endpoint = .{ .ip = accepted.socket.address };
+    const local: marmo.Endpoint = .{ .ip = context.listener.socket.address };
+    const tcp = try marmo.TcpStream.create(allocator, accepted, local, remote);
+
+    context.started.set(io);
+    const result = marmo.TlsServerStream.create(
+        io,
+        allocator,
+        tcp.stream(),
+        .{
+            .certificate_chain = &.{context.cert.der},
+            .private_key = context.cert.key_pair,
+            .handshake_timeout_ns = 50 * std.time.ns_per_ms,
+        },
+    );
+    if (result) |tls| {
+        tls.stream().close(io);
+    } else |err| {
+        context.error_code = err;
+        tcp.stream().close(io);
+    }
+}
+
+test "TLS server handshake times out" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var cert = try tls13.test_cert.generate(allocator, io);
+    defer cert.deinit(allocator);
+
+    var bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var listener = try bind.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    const port = listener.socket.address.getPort();
+
+    var context: ServerTimeoutContext = .{
+        .listener = &listener,
+        .cert = &cert,
+    };
+    var server_future = io.async(tlsServerTimeoutTask, .{ io, &context });
+
+    var address: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
+    const client = try std.Io.net.IpAddress.connect(
+        &address,
+        io,
+        .{ .mode = .stream },
+    );
+    defer client.close(io);
+
+    try context.started.wait(io);
+    try std.Io.sleep(io, .{ .nanoseconds = 150 * std.time.ns_per_ms }, .awake);
+
+    _ = server_future.await(io);
+    try std.testing.expectEqual(error.TimedOut, context.error_code.?);
 }

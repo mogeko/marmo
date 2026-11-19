@@ -12,12 +12,13 @@ pub const Diagnostic = struct {
 
     /// Format a message into the fixed buffer. Long messages are truncated;
     /// diagnostics must never fail or allocate.
+    ///
+    /// The writer reports what it actually wrote, so a truncated message never
+    /// exposes uninitialized bytes past the formatted prefix.
     pub fn set(self: *Diagnostic, comptime fmt: []const u8, args: anytype) void {
-        const written = std.fmt.bufPrint(&self.buffer, fmt, args) catch {
-            self.len = self.buffer.len;
-            return;
-        };
-        self.len = written.len;
+        var writer = std.Io.Writer.fixed(&self.buffer);
+        writer.print(fmt, args) catch {};
+        self.len = writer.end;
     }
 
     pub fn message(self: *const Diagnostic) []const u8 {
@@ -31,4 +32,15 @@ test "diagnostic formats and clears" {
     try std.testing.expectEqualStrings("inbounds[0].listen: invalid", diagnostic.message());
     diagnostic.clear();
     try std.testing.expectEqualStrings("", diagnostic.message());
+}
+
+test "diagnostic truncation never exposes unwritten bytes" {
+    var diagnostic: Diagnostic = .{};
+    const long = @as([256 + 32]u8, @splat('x'));
+    diagnostic.set("tag: {s}", .{long});
+    // The reported length is the formatted prefix, not the whole buffer.
+    const message = diagnostic.message();
+    try std.testing.expectEqual(@as(usize, 256), message.len);
+    try std.testing.expectEqualStrings("tag: ", message[0..5]);
+    for (message[5..]) |byte| try std.testing.expectEqual(@as(u8, 'x'), byte);
 }

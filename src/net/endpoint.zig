@@ -65,6 +65,9 @@ pub const Endpoint = union(enum) {
 
         const host = text[0..colon];
         if (host.len == 0) return error.EmptyHost;
+        for (host) |byte| {
+            if (byte <= 0x20 or byte == 0x7f) return error.InvalidEndpoint;
+        }
 
         const port_number = std.fmt.parseInt(u16, text[colon + 1 ..], 10) catch
             return error.InvalidPort;
@@ -143,6 +146,10 @@ test "reject malformed endpoints" {
     try std.testing.expectError(error.InvalidPort, Endpoint.parse("example.com:https"));
     try std.testing.expectError(error.InvalidEndpoint, Endpoint.parse("::1:443"));
     try std.testing.expectError(error.InvalidEndpoint, Endpoint.parse(""));
+    try std.testing.expectError(
+        error.InvalidEndpoint,
+        Endpoint.parse("example.com\n:443"),
+    );
 }
 
 test "format endpoints" {

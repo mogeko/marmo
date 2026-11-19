@@ -13,12 +13,20 @@ pub const Options = struct {
     /// DER certificate chain, leaf first.
     certificate_chain: []const []const u8,
     private_key: std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair,
+    /// Bounded handshake duration. Zero disables the timeout.
+    handshake_timeout_ns: u64 = 10 * std.time.ns_per_s,
 };
 
 pub const CreateError = error{
     Canceled,
     HandshakeFailed,
     OutOfMemory,
+    TimedOut,
+};
+
+const ServerHandshake = union(enum) {
+    server: anyerror!*tls13.Server,
+    timeout: std.Io.Cancelable!void,
 };
 
 pub const TlsServerStream = struct {
@@ -52,9 +60,62 @@ pub const TlsServerStream = struct {
         self.socket_reader = SocketReader.init(inner, io, &self.socket_read_buffer);
         self.socket_writer = SocketWriter.init(inner, io, &self.socket_write_buffer);
 
-        self.server = tls13.Server.create(
+        if (options.handshake_timeout_ns == 0) {
+            self.server = serverHandshake(self, options) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.HandshakeFailed,
+            };
+            return self;
+        }
+
+        var buffer: [2]ServerHandshake = undefined;
+        var select: std.Io.Select(ServerHandshake) = .init(io, &buffer);
+        select.concurrent(.server, serverHandshake, .{ self, options }) catch {
+            drainServerHandshake(&select);
+            return error.HandshakeFailed;
+        };
+        select.concurrent(.timeout, handshakeTimeout, .{
             io,
-            gpa,
+            options.handshake_timeout_ns,
+        }) catch {
+            drainServerHandshake(&select);
+            return error.HandshakeFailed;
+        };
+
+        const result = select.await() catch |err| {
+            drainServerHandshake(&select);
+            switch (err) {
+                error.Canceled => return error.Canceled,
+            }
+        };
+        switch (result) {
+            .server => |server_result| {
+                drainServerHandshake(&select);
+                self.server = server_result catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.HandshakeFailed,
+                };
+                return self;
+            },
+            .timeout => |timed_out| {
+                drainServerHandshake(&select);
+                timed_out catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                };
+                return error.TimedOut;
+            },
+        }
+    }
+
+    fn serverHandshake(
+        self: *TlsServerStream,
+        options: Options,
+    ) anyerror!*tls13.Server {
+        return tls13.Server.create(
+            self.io,
+            self.gpa,
             &self.socket_reader.interface,
             &self.socket_writer.interface,
             .{
@@ -63,12 +124,18 @@ pub const TlsServerStream = struct {
                 .read_buffer = &self.plain_read_buffer,
                 .write_buffer = &self.plain_write_buffer,
             },
-        ) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.HandshakeFailed,
-        };
-        return self;
+        );
+    }
+
+    fn drainServerHandshake(select: *std.Io.Select(ServerHandshake)) void {
+        while (select.cancel()) |result| {
+            switch (result) {
+                .server => |server_result| {
+                    if (server_result) |server| server.deinit() else |_| {}
+                },
+                .timeout => |timed_out| timed_out catch {},
+            }
+        }
     }
 
     pub fn stream(self: *TlsServerStream) Stream {
@@ -175,6 +242,10 @@ pub const TlsServerStream = struct {
         .remote = remote,
     };
 };
+
+fn handshakeTimeout(io: std.Io, timeout_ns: u64) std.Io.Cancelable!void {
+    try std.Io.sleep(io, .{ .nanoseconds = @intCast(timeout_ns) }, .awake);
+}
 
 const SocketReader = struct {
     io: std.Io,

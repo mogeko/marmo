@@ -619,6 +619,7 @@ fn compileVless(
             direct.dialer(),
             server_name,
             tls.insecure,
+            @as(u64, tls.handshake_timeout_s) * std.time.ns_per_s,
         );
         transport = tls_dialer.asDialer();
         transport_cleanup = cleanupTlsDialer;
@@ -631,6 +632,7 @@ fn compileVless(
         .server = server,
         .uuid = uuid,
         .transport = transport,
+        .xudp = config.xudp,
         .transport_cleanup = transport_cleanup,
         .transport_cleanup_ctx = transport_cleanup_ctx,
     };
@@ -734,7 +736,7 @@ fn compileInbounds(
                 inbounds[index].vless_uuid = vless_protocol.parseUuid(uuid_text) catch
                     return error.InvalidConfig;
                 const tls = config.tls orelse return error.InvalidConfig;
-                inbounds[index].tls = tls_credentials.loadOptions(
+                var options = tls_credentials.loadOptions(
                     allocator,
                     io,
                     tls.certificate,
@@ -749,6 +751,9 @@ fn compileInbounds(
                         return error.InvalidConfig;
                     },
                 };
+                options.handshake_timeout_ns =
+                    @as(u64, tls.handshake_timeout_s) * std.time.ns_per_s;
+                inbounds[index].tls = options;
             },
             .http, .socks5 => {},
         }

@@ -1,11 +1,11 @@
 # Architecture
 
 Status: Phase 1 MVP implemented; Phase 2 started with outbound selectors and
-active TCP health probes, followed by VLESS outbound/inbound over TLS (TCP and
-UDP) and a TLS 1.3 server package. SS2022 TCP/UDP interop was verified locally against
-shadowsocks-rust 1.25.0 in both directions; the interop harness is not part of
-the repository. Protocol and Phase 2 gaps are tracked in `docs/protocols/` and
-§11.
+active TCP health probes, followed by VLESS outbound/inbound over TLS (TCP,
+simple UoT, and XUDP) and a TLS 1.3 server package. SS2022 TCP/UDP interop was
+verified locally against shadowsocks-rust 1.25.0 in both directions; the
+interop harness is not part of the repository. Protocol and Phase 2 gaps are
+tracked in `docs/protocols/` and §11.
 
 ## 1. Purpose
 
@@ -399,7 +399,7 @@ for counters and a mutex only around node-set replacement (config reload).
 | HTTP proxy | TCP | yes | no | yes | yes | 1 | CONNECT + forward implemented |
 | Shadowsocks | TCP/UDP | yes | yes | yes | yes | 1 | 2022 TCP + UDP implemented |
 | Trojan | TLS | yes | yes | yes | yes | 2 | inbound needs in-tree TLS server |
-| VLESS | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | TCP/UDP inbound/outbound over TLS done; WS/H2/XUDP pending |
+| VLESS | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | TCP/UDP (simple + XUDP) inbound/outbound over TLS done; WS/H2 pending |
 | VMess | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | legacy CFB not planned; gRPC in phase 3 |
 | TUIC | QUIC | yes | yes | yes | yes | 3 | in-tree QUIC |
 | Hysteria2 | QUIC + TLS | yes | yes | yes | yes | 3 | Salamander, Brutal CC |
@@ -415,8 +415,8 @@ Phasing:
 - **Phase 2**: VLESS/Trojan/VMess, in-tree TLS 1.3 server and WS/H2 transports,
   sniffing, compiled rule sets, process rules, groups and health checks, DNS
   cache/DoH. Implemented: selectors, TCP health probes, VLESS outbound and
-  inbound over TLS (TCP and UDP), and the TLS 1.3 server package. `http_head`,
-  jitter, backoff, and the remaining items are next.
+  inbound over TLS (TCP, simple UoT, and XUDP), and the TLS 1.3 server
+  package. `http_head`, jitter, backoff, and the remaining items are next.
 - **Phase 3**: in-tree QUIC, TUIC, Hysteria2, gRPC transport.
 - **Phase 4**: optional TUN/transparent proxying, Windows, transport hardening
   and external audit.
@@ -524,7 +524,8 @@ docs/
   architecture.md
   decisions/
   protocols/              per-protocol notes and sources
-tests/                    protocol fixtures and loopback integration tests
+  security/               threat model, audit findings, residual risks
+tests/                    fuzz harness, fixtures, loopback integration tests
 ```
 
 Module boundaries are enforced by review, not by the compiler; do not import
@@ -537,13 +538,21 @@ Module boundaries are enforced by review, not by the compiler; do not import
 - Integration tests bind loopback listeners on port 0 and exercise real
   sockets through `Io.Threaded`; run the same suite with `Io.Evented` where the
   architecture supports fibers.
-- Protocol tests use captured byte fixtures: handshake transcripts and packet
-  captures in `tests/fixtures/<protocol>/`. No live third-party servers in CI.
-- Every decoder has a fuzz target: `zig build fuzz -Dcodec=<name>` (once the
-  build scaffold exists); malformed input must return an error, never panic.
+- Protocol tests use synthetic byte fixtures built from the public protocol
+  specifications in `tests/fixtures/<protocol>/`. No live third-party servers
+  in CI.
+- Each inbound decoder and the TLS handshake/record parsers has a bounded fuzz
+  target; stateful handlers rely on unit and integration tests:
+  `zig build fuzz` runs fixed seeds and iteration counts by default
+  (`-Dfuzz-seed`, `-Dfuzz-iterations`). Malformed input must return a typed
+  error, never panic. The deterministic corpus smoke runs in `zig build test`;
+  `zig build test --fuzz` is opt-in and unbounded.
 - CI matrix: Linux x86_64 and macOS arm64 at minimum; a single-threaded build
   catches hidden thread assumptions.
 - Benchmarks are opt-in and never part of `zig build test`.
+- Security review, threat model, findings, and residual risks live in
+  [`docs/security/audit.md`](security/audit.md). Protocol sources and fixture
+  provenance are in [`docs/protocols/`](protocols/README.md).
 
 ## 17. Observability
 

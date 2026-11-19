@@ -37,6 +37,7 @@ pub const Config = struct {
         certificate: []const u8,
         /// PEM or DER ECDSA P-256 private key file.
         private_key: []const u8,
+        handshake_timeout_s: u16 = 10,
     };
 
     pub const Outbound = struct {
@@ -47,6 +48,7 @@ pub const Config = struct {
         password: ?[]const u8 = null,
         uuid: ?[]const u8 = null,
         tls: ?Tls = null,
+        xudp: bool = false,
         nodes: ?[]const []const u8 = null,
         strategy: ?Strategy = null,
         health_check: ?HealthCheck = null,
@@ -57,6 +59,7 @@ pub const Config = struct {
     pub const Tls = struct {
         sni: ?[]const u8 = null,
         insecure: bool = false,
+        handshake_timeout_s: u16 = 10,
     };
 
     pub const Strategy = enum { fallback, least_latency, manual, random, round_robin };
@@ -86,6 +89,11 @@ pub const ValidationError = error{InvalidConfig};
 
 pub const ParseError = error{ InvalidJson, OutOfMemory };
 
+/// Upper bound for a configuration document. It is far above any realistic
+/// deployment and keeps a hostile or accidental huge input from allocating
+/// without bound during JSON parsing.
+pub const max_config_bytes: usize = 4 * 1024 * 1024;
+
 pub const Parsed = struct {
     inner: std.json.Parsed(Config),
 
@@ -101,7 +109,10 @@ pub const Parsed = struct {
 };
 
 pub fn fromJson(gpa: std.mem.Allocator, text: []const u8) ParseError!Parsed {
-    const inner = std.json.parseFromSlice(Config, gpa, text, .{}) catch |err| switch (err) {
+    if (text.len > max_config_bytes) return error.InvalidJson;
+    const inner = std.json.parseFromSlice(Config, gpa, text, .{
+        .max_value_len = max_config_bytes,
+    }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.InvalidJson,
     };
@@ -228,6 +239,13 @@ fn validateVlessInbound(
         diagnostic.set("inbounds[{d}].tls.private_key: must not be empty", .{index});
         return error.InvalidConfig;
     }
+    if (tls.handshake_timeout_s == 0) {
+        diagnostic.set(
+            "inbounds[{d}].tls.handshake_timeout_s: must be positive",
+            .{index},
+        );
+        return error.InvalidConfig;
+    }
 }
 
 fn validateOutbounds(
@@ -348,8 +366,11 @@ fn rejectVlessFields(
     index: usize,
     diagnostic: *Diagnostic,
 ) ValidationError!void {
-    if (outbound.uuid != null or outbound.tls != null) {
-        diagnostic.set("outbounds[{d}]: uuid/tls only apply to vless", .{index});
+    if (outbound.uuid != null or outbound.tls != null or outbound.xudp) {
+        diagnostic.set(
+            "outbounds[{d}]: uuid/tls/xudp only apply to vless",
+            .{index},
+        );
         return error.InvalidConfig;
     }
 }
@@ -404,6 +425,13 @@ fn validateVless(
                 return error.InvalidConfig;
             },
         }
+    }
+    if (tls_config.handshake_timeout_s == 0) {
+        diagnostic.set(
+            "outbounds[{d}].tls.handshake_timeout_s: must be positive",
+            .{index},
+        );
+        return error.InvalidConfig;
     }
 }
 
@@ -562,6 +590,19 @@ fn isValidRouteTarget(tag: []const u8, outbounds: []const Config.Outbound) bool 
     return false;
 }
 
+test "config rejects oversized documents" {
+    const oversized = try std.testing.allocator.alloc(
+        u8,
+        max_config_bytes + 1,
+    );
+    defer std.testing.allocator.free(oversized);
+    @memset(oversized, ' ');
+    try std.testing.expectError(
+        error.InvalidJson,
+        fromJson(std.testing.allocator, oversized),
+    );
+}
+
 test "config parses defaults and validates" {
     var diagnostic: Diagnostic = .{};
     var parsed = try fromJson(std.testing.allocator,
@@ -656,7 +697,8 @@ test "vless config validates uuid and TLS options" {
         \\    { "tag": "proxy", "protocol": "vless",
         \\      "server": "example.com:443",
         \\      "uuid": "00112233-4455-6677-8899-aabbccddeeff",
-        \\      "tls": { "sni": "cdn.example.com" } }
+        \\      "tls": { "sni": "cdn.example.com" },
+        \\      "xudp": true }
         \\  ],
         \\  "route": { "final": "proxy" }
         \\}
@@ -715,7 +757,28 @@ test "vless config validates uuid and TLS options" {
         validate(tls_on_direct.inner.value, &diagnostic),
     );
     try std.testing.expectEqualStrings(
-        "outbounds[0]: uuid/tls only apply to vless",
+        "outbounds[0]: uuid/tls/xudp only apply to vless",
+        diagnostic.message(),
+    );
+
+    var zero_timeout = try fromJson(std.testing.allocator,
+        \\{
+        \\  "outbounds": [
+        \\    { "tag": "proxy", "protocol": "vless",
+        \\      "server": "example.com:443",
+        \\      "uuid": "00112233-4455-6677-8899-aabbccddeeff",
+        \\      "tls": { "sni": "cdn.example.com",
+        \\               "handshake_timeout_s": 0 } }
+        \\  ]
+        \\}
+    );
+    defer zero_timeout.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(zero_timeout.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "outbounds[0].tls.handshake_timeout_s: must be positive",
         diagnostic.message(),
     );
 }

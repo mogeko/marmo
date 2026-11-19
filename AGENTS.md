@@ -18,10 +18,10 @@ repository ships the library only: no CLI, daemon, or `app` layer.
 
 - Phase 1 MVP is implemented. Phase 2 has started with outbound selectors:
   manual, round-robin, random, fallback, and least-latency, plus active TCP
-  health probes, VLESS outbound and inbound over TLS (TCP and UDP), and a
-  TLS 1.3 server. `http_head`, jitter, and exponential backoff remain, along
-  with Trojan/VMess, other TLS inbounds, WS/H2, sniffing, rule sets, process
-  rules, and DNS cache/DoH.
+  health probes, VLESS outbound and inbound over TLS (TCP, simple UoT, and
+  XUDP), and a TLS 1.3 server. `http_head`, jitter, and exponential backoff
+  remain, along with Trojan/VMess, other TLS inbounds, WS/H2, sniffing, rule
+  sets, process rules, and DNS cache/DoH.
 - `packages/tls13/` is a first-party package (ADR-0010) with its own build;
   the root depends on it by path. It has no marmo imports. Root adapters live
   in `src/transport/tls_{client,dialer,server}.zig`; inbound credentials are
@@ -29,7 +29,11 @@ repository ships the library only: no CLI, daemon, or `app` layer.
   handles the protocol, and `src/outbound/vless_udp.zig` implements UDP
   framing. Package rules are in
   `packages/README.md`; root `build.zig` aggregates package tests and exposes
-  `check` and `examples` steps.
+  `check`, `fuzz`, and `examples` steps.
+- The bounded fuzz harness lives in `tests/fuzz.zig`; synthetic corpus fixtures
+  are under `tests/fixtures/`. The threat model, audit findings, and residual
+  risks are in `docs/security/audit.md`. TLS wire details are in
+  `docs/protocols/tls.md`.
 - `examples/shadowsocks2022/` and `examples/vless/` are standalone: each has
   its own `build.zig` and `build.zig.zon` and is not part of the root build.
 - ADR-0001–0010 are accepted; new architecture decisions need a new ADR.
@@ -170,13 +174,18 @@ Adapted from TigerBeetle's
 
 ## Commands and tests
 
-- `zig build test` runs the root unit, public API, and integration tests plus
-  every package's tests (56 today: 52 root + 4 package). `zig build check`
-  adds the formatting check, and `zig build examples` builds all examples.
-  CI runs `zig build check` and `zig build test -Doptimize=ReleaseSafe`.
+- `zig build test` runs the root unit, public API, and integration tests, the
+  package tests, and the deterministic fuzz corpus smoke (77 today: 38 root
+  unit, 4 public API, 18 integration, 7 tls13, 10 fuzz). `zig build check` adds
+  the formatting check, and `zig build examples` builds all examples. CI runs
+  `zig build check` and `zig build test -Doptimize=ReleaseSafe`.
+- `zig build fuzz` runs the bounded harness with a fixed seed and 1024 inputs
+  per target. `-Dfuzz-seed=<decimal>` and `-Dfuzz-iterations=<count>` change
+  those values; long runs stay opt-in.
 - `(cd packages/tls13 && zig build test)` runs one package in isolation.
 - `zig test src/root.zig` runs the module tests directly; use
   `zig test src/net/endpoint.zig --test-filter <name>` for one file or test.
 - `zig fmt build.zig src tests packages examples` before finishing.
 - Integration tests will use loopback port 0 and never live servers.
-- Protocol tests use captured fixtures under `tests/fixtures/<protocol>/`.
+- Protocol tests use synthetic fixtures under `tests/fixtures/<protocol>/`;
+  provenance and license are recorded in `tests/fixtures/README.md`.
