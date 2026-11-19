@@ -9,7 +9,7 @@ retrieved 2026-11-19. TLS record details come from RFC 8446. The client uses
 
 ## Implemented
 
-- VLESS outbound and inbound, TCP command 1 only.
+- VLESS outbound and inbound; TCP command `1` and UDP command `2`.
 - Outbound transport is optional TLS 1.2/1.3 via `std.crypto.tls.Client`.
 - Inbound transport is mandatory TLS 1.3 via `packages/tls13`; the accepted
   TCP stream is wrapped before the VLESS header is parsed.
@@ -27,10 +27,18 @@ retrieved 2026-11-19. TLS record details come from RFC 8446. The client uses
   - inbound `tls.certificate` and `tls.private_key` are required and must not
     be empty;
   - `uuid` and `tls` are rejected on other outbound/inbound protocols.
-- Request header: version `0`, 16-byte UUID, zero addon length, command `1`,
-  big-endian port, address type (`1` IPv4, `2` domain, `3` IPv6), address.
-- Response header is read lazily on the first `read`: version `0`, addon
-  length, addons. The response payload is passed through unchanged.
+- Request header: version `0`, 16-byte UUID, zero addon length, command `1`
+  (TCP) or `2` (UDP), big-endian port, address type (`1` IPv4, `2` domain,
+  `3` IPv6), address.
+- Response header is read lazily: version `0`, addon length, addons. The
+  response payload is passed through unchanged.
+- UDP uses one fixed destination per stream and `[2B length BE][payload]`
+  frames. The outbound sends one request with the destination and rejects a
+  different `send_to` destination; the inbound creates one outbound
+  `PacketConn` for the request destination and writes replies with the same
+  framing.
+- Zero-length UDP frames are skipped on receive and dropped on send, matching
+  the base Xray behavior.
 - Request header is written once, in a single vectored write where possible.
 - TLS:
   - SNI and hostname verification use `tls.sni`, or the server domain name when
@@ -84,8 +92,13 @@ The inbound always requires TLS; plaintext VLESS inbound is not supported.
 
 ## Limits and known gaps
 
-- No UDP command 2 on either side; `supports_udp` is false and SOCKS5 UDP
-  ASSOCIATE cannot use the outbound.
+- Simple UDP only: no XUDP/cone NAT and no per-packet destination addressing.
+  One destination is fixed per VLESS UDP stream. A SOCKS5 UDP association that
+  switches targets will have later datagrams rejected by the VLESS outbound.
+- UDP replies carry no source address; the client reports the bound target (or
+  its resolved IP) as the source.
+- Empty UDP datagrams are dropped/skipped, so peers cannot rely on preserving
+  zero-length datagrams.
 - The inbound requires TLS and has no fallback to another protocol on the same
   listener. TLS credentials are loaded at `Instance.init`; there is no hot
   reload.
@@ -120,6 +133,9 @@ The inbound always requires TLS; plaintext VLESS inbound is not supported.
   the handshake failure is reported as a SOCKS5 failure reply.
 - Integration: TLS client -> VLESS inbound over the in-tree TLS 1.3 server ->
   direct TCP echo, including PEM credential loading and response-header order.
+- Integration: SOCKS5 UDP ASSOCIATE -> VLESS UDP outbound -> TLS -> VLESS UDP
+  inbound -> direct UDP echo, covering length-prefixed framing in both
+  directions.
 - Local-only interop: the TLS adapter and VLESS-over-TLS request/response were
   checked against a Python/OpenSSL TLS echo and VLESS mock. The harness is not
   committed.

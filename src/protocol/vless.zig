@@ -1,4 +1,4 @@
-//! VLESS client protocol (TCP).
+//! VLESS client and inbound codec (TCP and UDP).
 
 const std = @import("std");
 const Endpoint = @import("../net/endpoint.zig").Endpoint;
@@ -16,6 +16,8 @@ comptime {
 }
 
 pub const command_tcp: u8 = 1;
+pub const command_udp: u8 = 2;
+pub const max_udp_payload: usize = 65535;
 pub const address_ipv4: u8 = 1;
 pub const address_domain: u8 = 2;
 pub const address_ipv6: u8 = 3;
@@ -89,11 +91,20 @@ pub fn encodeRequest(
     uuid: *const Uuid,
     target: Endpoint,
 ) !usize {
+    return encodeRequestCommand(out, uuid, target, command_tcp);
+}
+
+pub fn encodeRequestCommand(
+    out: []u8,
+    uuid: *const Uuid,
+    target: Endpoint,
+    command: u8,
+) !usize {
     if (out.len < 1 + uuid_len + 1 + 1 + 2) return error.NoSpace;
     out[0] = version;
     @memcpy(out[1 .. 1 + uuid_len], uuid);
     out[1 + uuid_len] = 0; // No addons.
-    out[1 + uuid_len + 1] = command_tcp;
+    out[1 + uuid_len + 1] = command;
     std.mem.writeInt(
         u16,
         out[1 + uuid_len + 2 ..][0..2],
@@ -113,7 +124,48 @@ pub const Request = struct {
     target: Endpoint,
 };
 
-/// Reads a VLESS TCP request from a server-side stream. Domain names are
+pub fn writeRequestHeader(
+    io: std.Io,
+    stream: Stream,
+    uuid: *const Uuid,
+    target: Endpoint,
+    command: u8,
+) !void {
+    var buffer: [request_header_max]u8 = undefined;
+    const length = try encodeRequestCommand(&buffer, uuid, target, command);
+    try writeAll(io, stream, buffer[0..length]);
+}
+
+/// Writes one UDP frame. Callers normally skip empty datagrams.
+pub fn writeUdpPacket(
+    io: std.Io,
+    stream: Stream,
+    payload: []const u8,
+) !void {
+    if (payload.len > max_udp_payload) return error.MessageTooBig;
+    var length: [2]u8 = undefined;
+    std.mem.writeInt(u16, &length, @intCast(payload.len), .big);
+    const written = try stream.write(io, &.{ length[0..], payload });
+    if (written != length.len + payload.len) return error.BrokenPipe;
+}
+
+/// Reads one UDP frame. A zero-length frame returns 0; callers decide whether
+/// to skip it. If `buffer` is too small the frame body is left unread and the
+/// caller must close the stream.
+pub fn readUdpPacket(
+    io: std.Io,
+    stream: Stream,
+    buffer: []u8,
+) !usize {
+    var length: [2]u8 = undefined;
+    try readExact(io, stream, &length);
+    const payload_len = std.mem.readInt(u16, &length, .big);
+    if (payload_len > buffer.len) return error.MessageTooBig;
+    try readExact(io, stream, buffer[0..payload_len]);
+    return payload_len;
+}
+
+/// Reads a VLESS TCP/UDP request from a server-side stream. Domain names are
 /// copied into `domain_buffer`; the caller must keep that buffer alive for as
 /// long as the returned endpoint is used.
 pub fn readRequestHeader(

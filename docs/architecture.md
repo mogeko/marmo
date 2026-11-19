@@ -1,8 +1,8 @@
 # Architecture
 
 Status: Phase 1 MVP implemented; Phase 2 started with outbound selectors and
-active TCP health probes, followed by VLESS outbound/inbound over TLS and a
-TLS 1.3 server package. SS2022 TCP/UDP interop was verified locally against
+active TCP health probes, followed by VLESS outbound/inbound over TLS (TCP and
+UDP) and a TLS 1.3 server package. SS2022 TCP/UDP interop was verified locally against
 shadowsocks-rust 1.25.0 in both directions; the interop harness is not part of
 the repository. Protocol and Phase 2 gaps are tracked in `docs/protocols/` and
 §11.
@@ -399,7 +399,7 @@ for counters and a mutex only around node-set replacement (config reload).
 | HTTP proxy | TCP | yes | no | yes | yes | 1 | CONNECT + forward implemented |
 | Shadowsocks | TCP/UDP | yes | yes | yes | yes | 1 | 2022 TCP + UDP implemented |
 | Trojan | TLS | yes | yes | yes | yes | 2 | inbound needs in-tree TLS server |
-| VLESS | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | TCP inbound/outbound over TLS done; UDP/WS/H2 pending |
+| VLESS | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | TCP/UDP inbound/outbound over TLS done; WS/H2/XUDP pending |
 | VMess | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | legacy CFB not planned; gRPC in phase 3 |
 | TUIC | QUIC | yes | yes | yes | yes | 3 | in-tree QUIC |
 | Hysteria2 | QUIC + TLS | yes | yes | yes | yes | 3 | Salamander, Brutal CC |
@@ -415,8 +415,8 @@ Phasing:
 - **Phase 2**: VLESS/Trojan/VMess, in-tree TLS 1.3 server and WS/H2 transports,
   sniffing, compiled rule sets, process rules, groups and health checks, DNS
   cache/DoH. Implemented: selectors, TCP health probes, VLESS outbound and
-  inbound over TLS, and the TLS 1.3 server package. `http_head`, jitter,
-  backoff, VLESS UDP, and the remaining items are next.
+  inbound over TLS (TCP and UDP), and the TLS 1.3 server package. `http_head`,
+  jitter, backoff, and the remaining items are next.
 - **Phase 3**: in-tree QUIC, TUIC, Hysteria2, gRPC transport.
 - **Phase 4**: optional TUN/transparent proxying, Windows, transport hardening
   and external audit.

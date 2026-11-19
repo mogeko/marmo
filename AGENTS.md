@@ -18,15 +18,16 @@ repository ships the library only: no CLI, daemon, or `app` layer.
 
 - Phase 1 MVP is implemented. Phase 2 has started with outbound selectors:
   manual, round-robin, random, fallback, and least-latency, plus active TCP
-  health probes, VLESS outbound and inbound over TLS, and a TLS 1.3 server.
-  `http_head`, jitter, and exponential backoff remain, along with Trojan/VMess,
-  VLESS UDP, other TLS inbounds, WS/H2, sniffing, rule sets, process rules, and
-  DNS cache/DoH.
+  health probes, VLESS outbound and inbound over TLS (TCP and UDP), and a
+  TLS 1.3 server. `http_head`, jitter, and exponential backoff remain, along
+  with Trojan/VMess, other TLS inbounds, WS/H2, sniffing, rule sets, process
+  rules, and DNS cache/DoH.
 - `packages/tls13/` is a first-party package (ADR-0010) with its own build;
   the root depends on it by path. It has no marmo imports. Root adapters live
   in `src/transport/tls_{client,dialer,server}.zig`; inbound credentials are
-  loaded by `src/transport/tls_credentials.zig` and `src/inbound/vless.zig`
-  handles the protocol. Package rules are in
+  loaded by `src/transport/tls_credentials.zig`, `src/inbound/vless.zig`
+  handles the protocol, and `src/outbound/vless_udp.zig` implements UDP
+  framing. Package rules are in
   `packages/README.md`; root `build.zig` aggregates package tests and exposes
   `check` and `examples` steps.
 - `examples/shadowsocks2022/` is standalone: it has its own `build.zig` and
@@ -170,7 +171,7 @@ Adapted from TigerBeetle's
 ## Commands and tests
 
 - `zig build test` runs the root unit, public API, and integration tests plus
-  every package's tests (54 today: 50 root + 4 package). `zig build check`
+  every package's tests (55 today: 51 root + 4 package). `zig build check`
   adds the formatting check, and `zig build examples` builds all examples.
   CI runs `zig build check` and `zig build test -Doptimize=ReleaseSafe`.
 - `(cd packages/tls13 && zig build test)` runs one package in isolation.

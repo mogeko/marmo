@@ -1,10 +1,12 @@
-//! VLESS outbound (TCP over any stream transport).
+//! VLESS outbound (TCP and UDP over any stream transport).
 
 const std = @import("std");
 const Endpoint = @import("../net/endpoint.zig").Endpoint;
 const vless = @import("../protocol/vless.zig");
 const Dialer = @import("../transport/dialer.zig").Dialer;
+const PacketConn = @import("../transport/packet.zig").PacketConn;
 const Stream = @import("../transport/stream.zig").Stream;
+const UdpClient = @import("vless_udp.zig").UdpClient;
 
 pub const Vless = struct {
     gpa: std.mem.Allocator,
@@ -43,8 +45,39 @@ pub const Vless = struct {
         return client.stream();
     }
 
-    const vtable: Dialer.VTable = .{ .connect = connect };
+    fn connectPacket(
+        ctx: *anyopaque,
+        io: std.Io,
+        target: Endpoint,
+    ) Dialer.ConnectError!PacketConn {
+        const self: *Vless = @ptrCast(@alignCast(ctx));
+        const inner = try self.transport.connect(io, self.server);
+        const client = UdpClient.create(
+            io,
+            self.gpa,
+            inner,
+            &self.uuid,
+            target,
+        ) catch |err| {
+            inner.close(io);
+            return mapUdpError(err);
+        };
+        return client.packetConn();
+    }
+
+    const vtable: Dialer.VTable = .{
+        .connect = connect,
+        .connect_packet = connectPacket,
+    };
 };
+
+fn mapUdpError(err: anyerror) Dialer.ConnectError {
+    return switch (err) {
+        error.Canceled => error.Canceled,
+        error.OutOfMemory => error.Unexpected,
+        else => error.ProtocolViolation,
+    };
+}
 
 fn mapCreateError(err: anyerror) Dialer.ConnectError {
     return switch (err) {

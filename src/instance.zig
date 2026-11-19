@@ -637,7 +637,7 @@ fn compileVless(
     return .{
         .tag = config.tag,
         .dialer = vless.asDialer(),
-        .supports_udp = false,
+        .supports_udp = true,
         .cleanup = cleanupVless,
         .cleanup_ctx = vless,
     };

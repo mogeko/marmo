@@ -1294,3 +1294,197 @@ test "VLESS inbound over TLS proxies to a direct target" {
     instance.stop();
     _ = echo_future.await(io);
 }
+
+const TestTlsFiles = struct {
+    tmp: std.testing.TmpDir,
+    cert_path: [160]u8 = undefined,
+    cert_path_len: usize = 0,
+    key_path: [160]u8 = undefined,
+    key_path_len: usize = 0,
+
+    fn init(
+        io: std.Io,
+        gpa: std.mem.Allocator,
+        cert: *tls13.test_cert.Certificate,
+    ) !TestTlsFiles {
+        var files: TestTlsFiles = .{ .tmp = std.testing.tmpDir(.{}) };
+        errdefer files.tmp.cleanup();
+
+        const cert_pem = try tls13.test_cert.certificatePem(gpa, cert.der);
+        defer gpa.free(cert_pem);
+        const key_pem = try tls13.test_cert.privateKeyPem(gpa, cert.key_pair);
+        defer {
+            std.crypto.secureZero(u8, key_pem);
+            gpa.free(key_pem);
+        }
+
+        try files.tmp.dir.writeFile(
+            io,
+            .{ .sub_path = "cert.pem", .data = cert_pem },
+        );
+        try files.tmp.dir.writeFile(
+            io,
+            .{ .sub_path = "key.pem", .data = key_pem },
+        );
+
+        const cert_path = try std.fmt.bufPrint(
+            &files.cert_path,
+            ".zig-cache/tmp/{s}/cert.pem",
+            .{files.tmp.sub_path},
+        );
+        files.cert_path_len = cert_path.len;
+        const key_path = try std.fmt.bufPrint(
+            &files.key_path,
+            ".zig-cache/tmp/{s}/key.pem",
+            .{files.tmp.sub_path},
+        );
+        files.key_path_len = key_path.len;
+        return files;
+    }
+
+    fn certificatePath(self: *const TestTlsFiles) []const u8 {
+        return self.cert_path[0..self.cert_path_len];
+    }
+
+    fn privateKeyPath(self: *const TestTlsFiles) []const u8 {
+        return self.key_path[0..self.key_path_len];
+    }
+
+    fn deinit(self: *TestTlsFiles) void {
+        self.tmp.cleanup();
+    }
+};
+
+test "VLESS UDP outbound and inbound relay datagrams" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var echo_bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var echo_socket = try echo_bind.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer echo_socket.close(io);
+    var echo_future = io.async(udpEchoOnce, .{ io, &echo_socket });
+
+    var cert = try tls13.test_cert.generate(allocator, io);
+    defer cert.deinit(allocator);
+    var files = try TestTlsFiles.init(io, allocator, &cert);
+    defer files.deinit();
+
+    var diagnostic: marmo.Diagnostic = .{};
+    const server_config: marmo.Config = .{
+        .inbounds = &.{
+            .{
+                .tag = "vless-in",
+                .protocol = .vless,
+                .listen = "127.0.0.1:0",
+                .uuid = vless_test_uuid_text,
+                .tls = .{
+                    .certificate = files.certificatePath(),
+                    .private_key = files.privateKeyPath(),
+                },
+            },
+        },
+        .route = .{ .final = "direct" },
+    };
+    var server_instance = marmo.Instance.init(
+        allocator,
+        io,
+        server_config,
+        &diagnostic,
+    ) catch |err| {
+        std.debug.print("vless udp server init: {s}\n", .{diagnostic.message()});
+        return err;
+    };
+    defer server_instance.deinit();
+    try server_instance.start();
+
+    const vless_endpoint = server_instance.inboundEndpoint("vless-in") orelse
+        return error.TestUnexpectedResult;
+    var server_text_buffer: [32]u8 = undefined;
+    const server_text = try std.fmt.bufPrint(
+        &server_text_buffer,
+        "127.0.0.1:{d}",
+        .{vless_endpoint.port()},
+    );
+
+    const client_config: marmo.Config = .{
+        .inbounds = &.{
+            .{ .tag = "socks", .protocol = .socks5, .listen = "127.0.0.1:0" },
+        },
+        .outbounds = &.{
+            .{
+                .tag = "vless-out",
+                .protocol = .vless,
+                .server = server_text,
+                .uuid = vless_test_uuid_text,
+                .tls = .{ .sni = "localhost", .insecure = true },
+            },
+        },
+        .route = .{ .final = "vless-out" },
+    };
+    var client_instance = marmo.Instance.init(
+        allocator,
+        io,
+        client_config,
+        &diagnostic,
+    ) catch |err| {
+        std.debug.print("vless udp client init: {s}\n", .{diagnostic.message()});
+        return err;
+    };
+    defer client_instance.deinit();
+    try client_instance.start();
+
+    const socks_endpoint = client_instance.inboundEndpoint("socks") orelse
+        return error.TestUnexpectedResult;
+    const socks_address = switch (socks_endpoint) {
+        .ip => |ip| ip,
+        .domain => return error.TestUnexpectedResult,
+    };
+    const client = try std.Io.net.IpAddress.connect(
+        &socks_address,
+        io,
+        .{ .mode = .stream },
+    );
+    defer client.close(io);
+
+    try socksNegotiate(io, client);
+    try tcpWrite(io, client, &[_]u8{ 5, 3, 0, 1, 0, 0, 0, 0, 0, 0 });
+
+    var reply: [10]u8 = undefined;
+    try tcpReadExact(io, client, &reply);
+    try std.testing.expectEqual(@as(u8, 5), reply[0]);
+    try std.testing.expectEqual(@as(u8, 0), reply[1]);
+    try std.testing.expectEqual(@as(u8, 1), reply[3]);
+
+    const relay_port = (@as(u16, reply[8]) << 8) | reply[9];
+    const relay_address: std.Io.net.IpAddress = .{ .ip4 = .{
+        .bytes = .{ 127, 0, 0, 1 },
+        .port = relay_port,
+    } };
+
+    var local_bind: std.Io.net.IpAddress = .{ .ip4 = .unspecified(0) };
+    const udp_socket = try local_bind.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer udp_socket.close(io);
+
+    const echo_port = echo_socket.address.getPort();
+    var packet: [15]u8 = undefined;
+    packet[0] = 0;
+    packet[1] = 0;
+    packet[2] = 0;
+    packet[3] = 1;
+    @memcpy(packet[4..8], &[_]u8{ 127, 0, 0, 1 });
+    packet[8] = @intCast(echo_port >> 8);
+    packet[9] = @intCast(echo_port & 0xff);
+    @memcpy(packet[10..15], "hello");
+    try udp_socket.send(io, &relay_address, &packet);
+
+    var receive_buffer: [1500]u8 = undefined;
+    const message = try udp_socket.receive(io, &receive_buffer);
+    try std.testing.expectEqual(@as(usize, 15), message.data.len);
+    try std.testing.expectEqual(@as(u8, 1), message.data[3]);
+    try std.testing.expectEqualStrings("hello", message.data[10..15]);
+
+    client_instance.stop();
+    server_instance.stop();
+    _ = echo_future.await(io);
+}
