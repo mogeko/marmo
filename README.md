@@ -24,6 +24,19 @@ WebSocket, and gRPC are not implemented (ADR-0007).
 - [Shadowsocks 2022 example](examples/shadowsocks2022/)
 - [Agent instructions and Zig style](AGENTS.md)
 
+## Workspace
+
+This is a small monorepo: root library, `packages/`, and `examples/`.
+
+```sh
+zig build test       # root and package tests
+zig build check      # formatting check plus tests
+zig build examples   # build every example
+```
+
+Package rules and the workspace contract are in
+[`packages/README.md`](packages/README.md).
+
 ## Design highlights
 
 - `std.Io`-based runtime; the library never owns threads or an event loop.

@@ -24,7 +24,9 @@ repository ships the library only: no CLI, daemon, or `app` layer.
   rules, and DNS cache/DoH.
 - `packages/tls13/` is a first-party package (ADR-0010) with its own build;
   the root depends on it by path. It has no marmo imports. Root adapters live
-  in `src/transport/tls_{client,dialer,server}.zig`.
+  in `src/transport/tls_{client,dialer,server}.zig`. Package rules are in
+  `packages/README.md`; root `build.zig` aggregates package tests and exposes
+  `check` and `examples` steps.
 - `examples/shadowsocks2022/` is standalone: it has its own `build.zig` and
   `build.zig.zon` and is not part of the root build.
 - ADR-0001–0010 are accepted; new architecture decisions need a new ADR.
@@ -165,13 +167,13 @@ Adapted from TigerBeetle's
 
 ## Commands and tests
 
-- `zig build test` runs the root unit, public API, and integration tests (48
-  tests today). `(cd packages/tls13 && zig build test)` runs the TLS package
-  tests (4 today). Reference-implementation interop is local-only and not part
-  of this repository or CI.
+- `zig build test` runs the root unit, public API, and integration tests plus
+  every package's tests (52 today: 48 root + 4 package). `zig build check`
+  adds the formatting check, and `zig build examples` builds all examples.
+  CI runs `zig build check` and `zig build test -Doptimize=ReleaseSafe`.
+- `(cd packages/tls13 && zig build test)` runs one package in isolation.
 - `zig test src/root.zig` runs the module tests directly; use
   `zig test src/net/endpoint.zig --test-filter <name>` for one file or test.
-- `zig fmt build.zig src tests packages` before finishing; CI runs
-  `zig fmt --check build.zig src tests packages` and tests each package.
+- `zig fmt build.zig src tests packages examples` before finishing.
 - Integration tests will use loopback port 0 and never live servers.
 - Protocol tests use captured fixtures under `tests/fixtures/<protocol>/`.

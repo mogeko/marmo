@@ -44,8 +44,33 @@ pub fn build(b: *std.Build) void {
     const integration_tests = b.addTest(.{ .root_module = integration });
     const run_integration_tests = b.addRunArtifact(integration_tests);
 
-    const test_step = b.step("test", "Run unit, public API, and integration tests");
+    const tls13_tests = b.addTest(.{ .root_module = tls13.module("tls13") });
+    const run_tls13_tests = b.addRunArtifact(tls13_tests);
+
+    const test_step = b.step("test", "Run root and package tests");
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_public_api_tests.step);
     test_step.dependOn(&run_integration_tests.step);
+    test_step.dependOn(&run_tls13_tests.step);
+
+    const fmt = b.addSystemCommand(&.{
+        b.graph.zig_exe,
+        "fmt",
+        "--check",
+        "build.zig",
+        "src",
+        "tests",
+        "packages",
+        "examples",
+    });
+    const check_step = b.step("check", "Check formatting and run tests");
+    check_step.dependOn(&fmt.step);
+    check_step.dependOn(test_step);
+
+    const examples_step = b.step("examples", "Build all examples");
+    for ([_][]const u8{"shadowsocks2022"}) |name| {
+        const run = b.addSystemCommand(&.{ b.graph.zig_exe, "build" });
+        run.setCwd(b.path(b.fmt("examples/{s}", .{name})));
+        examples_step.dependOn(&run.step);
+    }
 }

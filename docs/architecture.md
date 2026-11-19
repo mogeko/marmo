@@ -435,6 +435,9 @@ client scope.
 First-party packages live under `packages/` and are consumed by path
 dependencies (ADR-0010). `packages/tls13` owns TLS handshake, record, and CA
 policy; the root package only adapts `Stream` to its `Reader`/`Writer` API.
+Root `zig build test` aggregates package tests, `zig build check` adds the
+formatting check, and `zig build examples` builds the standalone examples.
+Package rules are in `packages/README.md`.
 
 There is exactly one build configuration: std-only, no C toolchain, no optional
 backend selected by a flag (ADR-0007). A transport that `std` lacks is
