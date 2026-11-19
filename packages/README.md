@@ -60,8 +60,8 @@ zig build test
 
 ## Versions and releases
 
-Packages version independently. Root and packages start at `0.0.0`/`0.0.1`
-while the API is unstable. When a package is published separately, use a
+Packages version independently. Root and packages use `0.0.x` while the API is
+unstable. When a package is published separately, use a
 per-package tag (for example `tls13-v0.1.0`), keep a changelog, and switch
 external consumers to a fetched dependency with a hash. Local development keeps
 path dependencies.

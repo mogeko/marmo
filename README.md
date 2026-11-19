@@ -3,7 +3,7 @@
 A TCP/UDP proxy library written in Zig: L4/L7 inbounds, multiple proxy
 protocols, rule-based routing, and latency-aware node selection.
 
-**Version:** 0.0.1 (Not production-ready; API is unstable and may change without notice.)
+**Version:** 0.0.2 (Not production-ready; API is unstable and may change without notice.)
 
 **Status:** Phase 1 MVP implemented; Phase 2 has started with outbound selectors
 (manual, round-robin, random, fallback, least-latency), active TCP health
@@ -23,6 +23,7 @@ WebSocket, and gRPC are not implemented (ADR-0007).
 - [Architecture decisions](docs/decisions/)
 - [Packages](packages/)
 - [Examples](examples/)
+- [Changelog](CHANGELOG.md)
 - [Agent instructions and Zig style](AGENTS.md)
 
 ## Workspace
