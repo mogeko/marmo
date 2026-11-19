@@ -72,6 +72,7 @@ exhaustion; Low = local/robustness/spec issue with limited impact.
 | F-15 | Low | Open | TLS | KeyUpdate/client auth/PSK/tickets/ALPN are not implemented; post-handshake handling is unit-tested but not end-to-end fuzzed. |
 | F-16 | Low | Open | General | No external audit, no side-channel review, and no long-running soak/fuzz campaign. |
 | F-17 | Low | Open | Trojan | The authentication-prefix read and UDP association have no protocol-level idle timeout; a TLS peer that stalls can hold a connection. Same class as F-13. |
+| F-18 | Low | Fixed | TLS client | A partial TLS record could be reported as EOF, losing the final application data when a peer split a record or closed immediately after sending it. Found during trojan-gfw UDP interop; added a regression test. |
 
 ### F-01 HTTP request-line injection (High, fixed)
 

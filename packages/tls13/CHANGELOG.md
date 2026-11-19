@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `readSome` now waits for a complete TLS record instead of returning 0 when a
+  record is split across reads. Peers that close after sending a record could
+  otherwise lose the final application data; found during trojan-gfw UDP
+  interop. Added a regression test.
+
 ## 0.0.1 - 2026-11-19
 
 - Initial release of the first-party TLS package.

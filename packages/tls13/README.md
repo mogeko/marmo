@@ -93,9 +93,12 @@ key pair matches the leaf. It is used by config loading before a listener
 starts. The package API itself is synchronous and unbounded; the root adapters
 race handshakes with `handshake_timeout_s` (default 10 seconds).
 
-`readSome` reads only what is already available. Use it instead of
-`Reader.readVec` for proxy streams: `readVec` tries to fill the caller's whole
-buffer and may block waiting for more data than the peer sent.
+`readSome` reads at most one record's worth of plaintext. It waits for a
+complete TLS record rather than treating a partial record as EOF, so a peer
+that splits a record across reads or closes immediately after sending data is
+handled correctly. Use it instead of `Reader.readVec` for proxy streams:
+`readVec` tries to fill the caller's whole buffer and may block waiting for
+more data than the peer sent.
 
 A replacement package must provide the same exports and semantics:
 `Client`, `Options`, `Ca`, `Server`, `ServerOptions`, `validateCredentials`,

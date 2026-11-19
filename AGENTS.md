@@ -177,8 +177,8 @@ Adapted from TigerBeetle's
 ## Commands and tests
 
 - `zig build test` runs the root unit, public API, and integration tests, the
-  package tests, and the deterministic fuzz corpus smoke (94 today: 51 root
-  unit, 4 public API, 21 integration, 7 tls13, 11 fuzz). `zig build check` adds
+  package tests, and the deterministic fuzz corpus smoke (95 today: 51 root
+  unit, 4 public API, 21 integration, 8 tls13, 11 fuzz). `zig build check` adds
   the formatting check, and `zig build examples` builds all examples. CI runs
   `zig build check` and `zig build test -Doptimize=ReleaseSafe`.
 - `zig build fuzz` runs the bounded harness with a fixed seed and 1024 inputs

@@ -87,6 +87,34 @@ routing rules; see `docs/protocols/trojan.md` and ADR-0011.
 Without `--fallback`, an authentication failure closes the connection, which
 is observable to an active prober.
 
+## Reference interop (local-only)
+
+Local checks were run against self-hosted Xray-core 26.11.9 and trojan-gfw
+1.16.0. Binaries, configs, certificates, and the harness are not committed and
+are not part of CI.
+
+| Client | Server | TCP | UDP |
+| --- | --- | --- | --- |
+| Xray SOCKS | marmo `server` | passed | passed |
+| marmo `client` | Xray Trojan inbound | passed | passed |
+| trojan-gfw SOCKS | marmo `server` | passed | passed |
+| marmo `client` | trojan-gfw server | passed | passed |
+
+Practical notes from the checks:
+
+- The Xray client pins the self-signed certificate:
+  `xray tls hash --cert cert.pem` prints the value for
+  `pinnedPeerCertSha256`. Xray v26 removed `allowInsecure`.
+- trojan-gfw needs `"alpn": []` on both sides because the in-tree TLS 1.3
+  server does not negotiate ALPN. The trojan-gfw server also used
+  `cipher_tls13: TLS_AES_128_GCM_SHA256`.
+- trojan-gfw was run with `verify: false`; the marmo client used `--insecure`.
+- trojan-gfw sends UDP ASSOCIATE to `0.0.0.0:0` when the target is the marmo
+  server. marmo routes the first datagram, so the association works.
+- The checks found and fixed a TLS client bug where a partial TLS record could
+  be reported as EOF, losing split trojan-gfw UDP replies. See
+  `packages/tls13/src/reader.zig`.
+
 ## Notes
 
 - `--listen` defaults to `127.0.0.1:4433` for server mode and
@@ -105,5 +133,5 @@ is observable to an active prober.
   install signal handlers; the example process is terminated with Ctrl-C.
 - The example depends on the parent package through `../..`; run it from this
   directory so the path resolves.
-- Reference-implementation interop has not been recorded yet. The protocol
-  notes in `docs/protocols/trojan.md` track the remaining interop work.
+- Interop results are recorded above; the reference binaries and harness are
+  local-only and not committed.

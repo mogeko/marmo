@@ -145,6 +145,42 @@ that points at the same listener.
   (no captured traffic).
 - Standalone example: `examples/trojan/` runs a server and a SOCKS5 client,
   with an optional fallback HTTP service for local probes.
-- No reference-implementation interop has been recorded in the repository yet.
-  A local self-hosted trojan-gfw or Xray-core check is the next step; the
-  reference implementation is not committed.
+
+## Interop
+
+Local, self-hosted checks only. Reference binaries, configs, certificates, and
+the harness are not committed and are not part of CI.
+
+### Xray-core 26.11.9 (darwin/arm64)
+
+- Xray SOCKS client -> marmo Trojan server over TLS -> direct TCP: passed.
+- Xray SOCKS UDP client -> marmo Trojan server -> direct UDP: passed.
+- marmo SOCKS client -> Xray Trojan server over TLS -> direct TCP: passed.
+- marmo SOCKS UDP client -> Xray Trojan server -> direct UDP: passed.
+- Xray 26 warns that Trojan without Flow is deprecated; the wire behavior is
+  still the standard Trojan protocol.
+- The Xray client used `pinnedPeerCertSha256` from `xray tls hash --cert
+  cert.pem` against the local self-signed ECDSA P-256 certificate. The Xray
+  server needed `finalRules` to allow loopback targets for this local setup.
+
+### trojan-gfw 1.16.0 (macOS x86_64 under Rosetta 2)
+
+- trojan-gfw SOCKS client -> marmo Trojan server over TLS: TCP and UDP passed.
+- marmo SOCKS client -> trojan-gfw server over TLS: TCP and UDP passed.
+- Both sides used a self-signed ECDSA P-256 certificate for `localhost`.
+  trojan-gfw used `verify: false` (client) and `--insecure` (marmo client).
+- Both directions set `"alpn": []`; the in-tree TLS 1.3 server does not
+  negotiate ALPN.
+- The trojan-gfw server used `cipher_tls13: TLS_AES_128_GCM_SHA256`, matching
+  the in-tree server and the std TLS client.
+- The trojan-gfw client sends UDP ASSOCIATE to `0.0.0.0:0` when talking to the
+  marmo server. marmo routes the first datagram, so the association works.
+- A local check exposed a TLS client bug: a partial TLS record could be
+  reported as EOF by `packages/tls13/src/reader.zig`, which lost a
+  trojan-gfw UDP reply split across TCP reads. `readSome` now waits for a
+  complete record and has a regression test. This affects all TLS-client
+  streams, not just Trojan.
+
+No live third-party servers were used. The reference implementations are
+GPL-3.0/MPL-2.0; only their published behavior was exercised, and no code or
+binary is committed (ADR-0009).
