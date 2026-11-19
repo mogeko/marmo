@@ -35,12 +35,14 @@ Statuses: `Proposed` → `Accepted` | `Rejected` | `Superseded by ADR-NNNN`.
 | [0012](0012-tls-alpn.md) | TLS ALPN negotiation | Accepted | ALPN on client and server; in-tree TLS 1.3 client |
 | [0013](0013-http2-package.md) | HTTP/2 transport package | Accepted | `packages/http2`; one stream; framing/HPACK/flow control |
 | [0014](0014-websocket-package.md) | WebSocket transport package | Accepted | `packages/ws`; RFC 6455 handshake and framing |
+| [0015](0015-connection-limits-and-timeouts.md) | Connection limits and idle timeouts | Accepted | global limits 1024/10/300/1/1; per-connection watchdog; UDP excluded |
 
 ## Accepted decisions
 
 ADR-0001–0010 were accepted on 2026-11-18 (ADR-0010 on 2026-11-19); ADR-0011
 was accepted on 2026-11-19. ADR-0012–0014 were accepted on 2026-11-19 on the
-direct implementation request.
+direct implementation request. ADR-0015 was accepted on 2026-11-20 after
+reference-implementation research.
 
 - **ADR-0002**: Snell deferred, WireGuard abandoned; all other protocols and
   phases accepted.
@@ -52,4 +54,6 @@ direct implementation request.
 - **ADR-0012–0014**: TLS ALPN is negotiated on both sides by an in-tree TLS
   1.3 client/server; HTTP/2 and WebSocket are std-only first-party packages
   with one active stream (H2) and bounded RFC 6455 framing (WS).
+- **ADR-0015**: a global `limits` policy caps TCP connections and applies
+  handshake, idle, and half-close grace timeouts. Implementation is pending.
 - **ADR-0001, 0003–0006, 0008, 0009**: accepted as recommended.

@@ -300,7 +300,10 @@ and returns `error.Malformed` rather than panicking.
    streams are closed and metrics are recorded once.
 
 Handshake (protocol auth) and connect timeouts share a `connect_timeout`;
-`idle_timeout` applies only after the relay starts.
+`idle_timeout` applies only after the relay starts. ADR-0015 (accepted,
+implementation pending) adds a global `limits` policy: `max_connections`,
+`handshake_timeout_s`, `idle_timeout_s`, `uplink_only_s`, and
+`downlink_only_s`, enforced by one watchdog per connection.
 
 ### 9.2 UDP
 
@@ -318,6 +321,8 @@ Handshake (protocol auth) and connect timeouts share a `connect_timeout`;
 
 UDP sessions are the unit of limits: `max_udp_sessions`, per-session queue
 depth, and idle timeout. No unbounded per-packet allocation is allowed.
+ADR-0015 keeps UDP session caps out of `max_connections` and applies the
+configured idle timeout per datagram (implementation pending).
 
 Trojan and SOCKS5 UDP associations are per-stream rather than table entries.
 Each datagram is routed independently; the first accepted datagram selects the
@@ -617,3 +622,4 @@ Module boundaries are enforced by review, not by the compiler; do not import
 | [0012](decisions/0012-tls-alpn.md) | TLS ALPN negotiation | Accepted |
 | [0013](decisions/0013-http2-package.md) | HTTP/2 transport package | Accepted |
 | [0014](decisions/0014-websocket-package.md) | WebSocket transport package | Accepted |
+| [0015](decisions/0015-connection-limits-and-timeouts.md) | Connection limits and idle timeouts | Accepted |

@@ -42,7 +42,9 @@ repository ships the library only: no CLI, daemon, or `app` layer.
 - `examples/shadowsocks2022/`, `examples/trojan/`, and `examples/vless/` are
   standalone: each has its own `build.zig` and `build.zig.zon` and is not part
   of the root build.
-- ADR-0001–0014 are accepted; new architecture decisions need a new ADR.
+- ADR-0001–0015 are accepted; ADR-0015 (connection limits/timeouts) is
+  accepted but its implementation is pending. New architecture decisions need
+  a new ADR.
 - Snell is deferred and WireGuard is out of scope (ADR-0002).
 
 ## Toolchain gotchas (verified Zig 0.17.1)
