@@ -171,4 +171,9 @@ The inbound always requires TLS; plaintext VLESS inbound is not supported.
 - Local-only interop: the TLS adapter and VLESS-over-TLS request/response were
   checked against a Python/OpenSSL TLS echo and VLESS mock. The harness is not
   committed.
-- Fixtures: none yet. No reference-implementation interop has been recorded.
+- Fixtures: `tests/fixtures/vless/request_ipv4.bin` and
+  `tests/fixtures/vless/xudp_new.bin` are synthetic, spec-derived inputs (no
+  captured traffic).
+- Fuzz targets: `vless_request` and `xudp_frame` under `zig build fuzz`; the
+  short corpus smoke runs in `zig build test`. See `docs/security/audit.md`.
+- No reference-implementation interop has been recorded in the repository.

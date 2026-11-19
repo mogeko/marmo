@@ -54,4 +54,11 @@ Source: [SIP022 AEAD-2022 Ciphers](https://github.com/shadowsocks/shadowsocks-or
   Shadowsocks 2022 UDP server -> direct UDP echo.
 - Reference interop: verified locally against shadowsocks-rust 1.25.0, TCP/UDP
   in both directions; the harness is intentionally not committed.
-- Fixtures: none yet. Add captured reference transcripts for offline CI.
+- Fixtures: `tests/fixtures/shadowsocks2022/` contains synthetic malformed
+  request and datagram bytes; the layout fuzz targets construct authenticated
+  inputs so address/padding/length parsing is reached after AEAD.
+- Fuzz targets: `ss2022_request`, `ss2022_request_layout`, `ss2022_chunks`,
+  `ss2022_udp_raw`, and `ss2022_udp_layout` under `zig build fuzz`; the short
+  corpus smoke runs in `zig build test`. See `docs/security/audit.md`.
+- Add captured reference transcripts for offline CI when their provenance and
+  license can be recorded.
