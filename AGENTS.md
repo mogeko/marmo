@@ -171,7 +171,7 @@ Adapted from TigerBeetle's
 ## Commands and tests
 
 - `zig build test` runs the root unit, public API, and integration tests plus
-  every package's tests (58 today: 54 root + 4 package). `zig build check`
+  every package's tests (60 today: 56 root + 4 package). `zig build check`
   adds the formatting check, and `zig build examples` builds all examples.
   CI runs `zig build check` and `zig build test -Doptimize=ReleaseSafe`.
 - `(cd packages/tls13 && zig build test)` runs one package in isolation.

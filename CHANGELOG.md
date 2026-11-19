@@ -18,6 +18,8 @@ and behavior may change between minor releases.
 - In-tree TLS 1.3 server in the first-party `packages/tls13` package, exposed
   through a thin `Stream` adapter. The package also owns the std-backed TLS
   client and CA handling.
+- Bounded TLS handshakes for both directions: `handshake_timeout_s` defaults
+  to 10 seconds and is rejected when zero.
 - Standalone `examples/vless` server/client, including local Xray interop notes.
 - Workspace commands: `zig build test` aggregates package tests,
   `zig build check` adds formatting, and `zig build examples` builds examples.
@@ -46,8 +48,9 @@ and behavior may change between minor releases.
   changes are rejected.
 - The in-tree TLS 1.3 server supports X25519, AES-128-GCM/SHA-256, and ECDSA
   P-256 certificates. It has no client authentication, PSK, session tickets,
-  ALPN selection, 0-RTT, KeyUpdate, or handshake timeout. It is not audited for
-  production use.
+  ALPN selection, 0-RTT, or KeyUpdate. TLS handshakes are bounded by the root
+  adapters' `handshake_timeout_s`; the package API itself is synchronous. It is
+  not audited for production use.
 - The std-backed TLS client can negotiate TLS 1.2. A server-initiated TLS 1.3
   KeyUpdate is not synchronized with a concurrent write; this is documented and
   will be removed with the in-tree record layer.
@@ -57,7 +60,7 @@ and behavior may change between minor releases.
 
 ### Tests
 
-- 54 root tests (34 unit, 4 public API, 16 integration) and 4 TLS package
+- 56 root tests (34 unit, 4 public API, 18 integration) and 4 TLS package
   tests, passing in Debug and ReleaseSafe.
 - Examples build with `zig build examples`.
 - Reference interop was checked locally against Xray-core 26.11.9 for VLESS TCP

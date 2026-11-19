@@ -90,7 +90,8 @@ through the handshake. `Server.end` sends `close_notify`; `deinit` does not.
 
 `validateCredentials` checks chain bounds, the leaf key algorithm, and that the
 key pair matches the leaf. It is used by config loading before a listener
-starts.
+starts. The package API itself is synchronous and unbounded; the root adapters
+race handshakes with `handshake_timeout_s` (default 10 seconds).
 
 `readSome` reads only what is already available. Use it instead of
 `Reader.readVec` for proxy streams: `readVec` tries to fill the caller's whole

@@ -12,6 +12,7 @@ pub const test_cert = if (builtin.is_test) @import("test_cert.zig") else struct 
 
 pub const Ca = @import("ca.zig").Ca;
 pub const Client = @import("client.zig").Client;
+pub const InitError = @import("client.zig").InitError;
 pub const Options = @import("client.zig").Options;
 pub const Server = @import("server.zig").Server;
 pub const ServerOptions = @import("server.zig").ServerOptions;

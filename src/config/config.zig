@@ -37,6 +37,7 @@ pub const Config = struct {
         certificate: []const u8,
         /// PEM or DER ECDSA P-256 private key file.
         private_key: []const u8,
+        handshake_timeout_s: u16 = 10,
     };
 
     pub const Outbound = struct {
@@ -58,6 +59,7 @@ pub const Config = struct {
     pub const Tls = struct {
         sni: ?[]const u8 = null,
         insecure: bool = false,
+        handshake_timeout_s: u16 = 10,
     };
 
     pub const Strategy = enum { fallback, least_latency, manual, random, round_robin };
@@ -227,6 +229,13 @@ fn validateVlessInbound(
     }
     if (tls.private_key.len == 0) {
         diagnostic.set("inbounds[{d}].tls.private_key: must not be empty", .{index});
+        return error.InvalidConfig;
+    }
+    if (tls.handshake_timeout_s == 0) {
+        diagnostic.set(
+            "inbounds[{d}].tls.handshake_timeout_s: must be positive",
+            .{index},
+        );
         return error.InvalidConfig;
     }
 }
@@ -408,6 +417,13 @@ fn validateVless(
                 return error.InvalidConfig;
             },
         }
+    }
+    if (tls_config.handshake_timeout_s == 0) {
+        diagnostic.set(
+            "outbounds[{d}].tls.handshake_timeout_s: must be positive",
+            .{index},
+        );
+        return error.InvalidConfig;
     }
 }
 
@@ -721,6 +737,27 @@ test "vless config validates uuid and TLS options" {
     );
     try std.testing.expectEqualStrings(
         "outbounds[0]: uuid/tls/xudp only apply to vless",
+        diagnostic.message(),
+    );
+
+    var zero_timeout = try fromJson(std.testing.allocator,
+        \\{
+        \\  "outbounds": [
+        \\    { "tag": "proxy", "protocol": "vless",
+        \\      "server": "example.com:443",
+        \\      "uuid": "00112233-4455-6677-8899-aabbccddeeff",
+        \\      "tls": { "sni": "cdn.example.com",
+        \\               "handshake_timeout_s": 0 } }
+        \\  ]
+        \\}
+    );
+    defer zero_timeout.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(zero_timeout.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "outbounds[0].tls.handshake_timeout_s: must be positive",
         diagnostic.message(),
     );
 }

@@ -28,6 +28,8 @@ retrieved 2026-11-19. TLS record details come from RFC 8446. The client uses
   - inbound `tls.certificate` and `tls.private_key` are required and must not
     be empty;
   - outbound `xudp` is optional and defaults to `false`;
+  - inbound/outbound TLS `handshake_timeout_s` defaults to 10 and must be
+    positive;
   - `uuid` and `tls` are rejected on other outbound/inbound protocols.
 - Request header: version `0`, 16-byte UUID, zero addon length, command `1`
   (TCP) or `2` (UDP), big-endian port, address type (`1` IPv4, `2` domain,
@@ -129,15 +131,13 @@ The inbound always requires TLS; plaintext VLESS inbound is not supported.
 - The inbound requires TLS and has no fallback to another protocol on the same
   listener. TLS credentials are loaded at `Instance.init`; there is no hot
   reload.
-- The inbound listener has no explicit TLS handshake timeout; cancellation
-  comes from the `Io.Group` that owns the connection.
+- TLS handshakes are bounded by `handshake_timeout_s` (default 10 seconds) in
+  both directions. A timed-out handshake is canceled and the connection is
+  closed.
 - No request addons are generated; response addons are skipped. No
   `flow`/XTLS Vision.
 - No WebSocket, HTTP/2, or gRPC transport; only TCP and TLS.
 - One request per stream and no multiplexing (Mux.Cool).
-- The outbound TLS handshake has no explicit timeout; cancellation comes from
-  the `Io.Group` that owns the connection. Add a bounded handshake timeout with
-  the health-check/jitter work.
 - No custom CA file or pinning yet for the outbound; verification uses the host
   bundle or `insecure`.
 - Certificate verification and SNI cannot be configured independently because
@@ -158,6 +158,8 @@ The inbound always requires TLS; plaintext VLESS inbound is not supported.
   address.
 - Integration: a TLS VLESS outbound against a listener that closes immediately;
   the handshake failure is reported as a SOCKS5 failure reply.
+- Integration: client and server TLS handshakes against peers that never send
+  TLS records, asserting `TimedOut` with a short test timeout.
 - Integration: TLS client -> VLESS inbound over the in-tree TLS 1.3 server ->
   direct TCP echo, including PEM credential loading and response-header order.
 - Integration: SOCKS5 UDP ASSOCIATE -> VLESS UDP outbound (simple and XUDP) ->
