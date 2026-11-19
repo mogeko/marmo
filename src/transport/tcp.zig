@@ -4,6 +4,7 @@ const std = @import("std");
 const Endpoint = @import("../net/endpoint.zig").Endpoint;
 const Stream = @import("stream.zig").Stream;
 const writeSlices = @import("write.zig").writeSlices;
+const Guard = @import("lifetime.zig").Guard;
 
 pub const TcpStream = struct {
     gpa: std.mem.Allocator,
@@ -11,6 +12,7 @@ pub const TcpStream = struct {
     local_endpoint: Endpoint,
     remote_endpoint: Endpoint,
     closed: std.atomic.Value(bool) = .init(false),
+    guard: Guard = .{},
 
     pub fn create(
         gpa: std.mem.Allocator,
@@ -34,6 +36,9 @@ pub const TcpStream = struct {
 
     fn read(ctx: *anyopaque, io: std.Io, buffers: [][]u8) Stream.ReadError!usize {
         const self: *TcpStream = @ptrCast(@alignCast(ctx));
+        self.guard.enter();
+        defer self.guard.leave(io);
+        if (self.closed.load(.acquire)) return error.Canceled;
         return self.inner.read(io, buffers) catch |err| switch (err) {
             error.Canceled => error.Canceled,
             error.ConnectionResetByPeer => error.ConnectionReset,
@@ -47,6 +52,9 @@ pub const TcpStream = struct {
         buffers: []const []const u8,
     ) Stream.WriteError!usize {
         const self: *TcpStream = @ptrCast(@alignCast(ctx));
+        self.guard.enter();
+        defer self.guard.leave(io);
+        if (self.closed.load(.acquire)) return error.Canceled;
         var writer = std.Io.net.Stream.Writer.init(self.inner, io, &.{});
         writeSlices(&writer.interface, buffers) catch {
             return writeError(writer.err);
@@ -74,6 +82,9 @@ pub const TcpStream = struct {
         how: Stream.ShutdownHow,
     ) Stream.ShutdownError!void {
         const self: *TcpStream = @ptrCast(@alignCast(ctx));
+        self.guard.enter();
+        defer self.guard.leave(io);
+        if (self.closed.load(.acquire)) return error.Canceled;
         const inner_how: std.Io.net.ShutdownHow = switch (how) {
             .recv => .recv,
             .send => .send,
@@ -90,6 +101,7 @@ pub const TcpStream = struct {
         const self: *TcpStream = @ptrCast(@alignCast(ctx));
         if (self.closed.swap(true, .acq_rel)) return;
         self.inner.close(io);
+        self.guard.waitIdle(io);
         self.gpa.destroy(self);
     }
 

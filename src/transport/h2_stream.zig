@@ -4,6 +4,7 @@ const std = @import("std");
 const http2 = @import("http2");
 const Endpoint = @import("../net/endpoint.zig").Endpoint;
 const Stream = @import("stream.zig").Stream;
+const Guard = @import("lifetime.zig").Guard;
 
 pub const socket_buffer_len = 16 * 1024;
 pub const default_handshake_timeout_ns = 10 * std.time.ns_per_s;
@@ -46,6 +47,7 @@ pub const H2Stream = struct {
     io: std.Io,
     inner: Stream,
     closed: std.atomic.Value(bool) = .init(false),
+    guard: Guard = .{},
     socket_reader: SocketReader,
     socket_writer: SocketWriter,
     mode: Mode,
@@ -87,6 +89,7 @@ pub const H2Stream = struct {
         self.io = io;
         self.inner = inner;
         self.closed = .init(false);
+        self.guard = .{};
         self.socket_reader = SocketReader.init(inner, io, &self.socket_read_buffer);
         self.socket_writer = SocketWriter.init(inner, io, &self.socket_write_buffer);
         self.mode = undefined;
@@ -101,11 +104,22 @@ pub const H2Stream = struct {
     fn read(ctx: *anyopaque, io: std.Io, buffers: [][]u8) Stream.ReadError!usize {
         _ = io;
         const self: *H2Stream = @ptrCast(@alignCast(ctx));
-        return self.h2_stream.read(buffers) catch |err| switch (err) {
-            error.Canceled => error.Canceled,
-            error.Closed => 0,
-            error.ProtocolViolation => error.ProtocolViolation,
-            else => error.Unexpected,
+        self.guard.enter();
+        defer self.guard.leave(self.io);
+        if (self.closed.load(.acquire)) return error.Canceled;
+        return self.h2_stream.read(buffers) catch |err| {
+            if (self.socket_reader.err) |inner| switch (inner) {
+                error.Canceled => return error.Canceled,
+                error.ConnectionReset => return error.ConnectionReset,
+                else => {},
+            };
+            return switch (err) {
+                error.Canceled => error.Canceled,
+                error.Closed => 0,
+                error.ConnectionReset => error.ConnectionReset,
+                error.ProtocolViolation => error.ProtocolViolation,
+                else => error.Unexpected,
+            };
         };
     }
 
@@ -116,11 +130,22 @@ pub const H2Stream = struct {
     ) Stream.WriteError!usize {
         _ = io;
         const self: *H2Stream = @ptrCast(@alignCast(ctx));
-        return self.h2_stream.write(buffers) catch |err| switch (err) {
-            error.Canceled => error.Canceled,
-            error.Closed => error.BrokenPipe,
-            error.ProtocolViolation => error.ProtocolViolation,
-            else => error.Unexpected,
+        self.guard.enter();
+        defer self.guard.leave(self.io);
+        if (self.closed.load(.acquire)) return error.Canceled;
+        return self.h2_stream.write(buffers) catch |err| {
+            if (self.socket_writer.err) |inner| switch (inner) {
+                error.Canceled => return error.Canceled,
+                error.BrokenPipe => return error.BrokenPipe,
+                else => {},
+            };
+            return switch (err) {
+                error.Canceled => error.Canceled,
+                error.Closed => error.BrokenPipe,
+                error.ConnectionReset => error.BrokenPipe,
+                error.ProtocolViolation => error.ProtocolViolation,
+                else => error.Unexpected,
+            };
         };
     }
 
@@ -130,12 +155,18 @@ pub const H2Stream = struct {
         how: Stream.ShutdownHow,
     ) Stream.ShutdownError!void {
         const self: *H2Stream = @ptrCast(@alignCast(ctx));
+        self.guard.enter();
+        defer self.guard.leave(io);
+        if (self.closed.load(.acquire)) return error.Canceled;
         switch (how) {
             .recv => return self.inner.shutdown(io, .recv),
             .send => {
                 self.h2_stream.close() catch |err| switch (err) {
                     error.Canceled => return error.Canceled,
-                    error.Closed, error.ProtocolViolation => {},
+                    error.Closed,
+                    error.ConnectionReset,
+                    error.ProtocolViolation,
+                    => {},
                     else => return error.Unexpected,
                 };
                 return self.inner.shutdown(io, .send);
@@ -147,7 +178,12 @@ pub const H2Stream = struct {
     fn close(ctx: *anyopaque, io: std.Io) void {
         const self: *H2Stream = @ptrCast(@alignCast(ctx));
         if (self.closed.swap(true, .acq_rel)) return;
+        switch (self.mode) {
+            .client => |*client| client.connection.cancel(),
+            .server => |*server| server.connection.cancel(),
+        }
         self.inner.close(io);
+        self.guard.waitIdle(io);
         switch (self.mode) {
             .client => |*client| client.deinit(),
             .server => |*server| server.deinit(),

@@ -4,6 +4,7 @@ const std = @import("std");
 const ws = @import("ws");
 const Endpoint = @import("../net/endpoint.zig").Endpoint;
 const Stream = @import("stream.zig").Stream;
+const Guard = @import("lifetime.zig").Guard;
 
 pub const socket_buffer_len = 4096;
 pub const default_handshake_timeout_ns = 10 * std.time.ns_per_s;
@@ -36,6 +37,7 @@ pub const WsStream = struct {
     io: std.Io,
     inner: Stream,
     closed: std.atomic.Value(bool) = .init(false),
+    guard: Guard = .{},
     socket_reader: SocketReader,
     socket_writer: SocketWriter,
     connection: ws.Connection,
@@ -76,6 +78,7 @@ pub const WsStream = struct {
         self.io = io;
         self.inner = inner;
         self.closed = .init(false);
+        self.guard = .{};
         self.socket_reader = SocketReader.init(inner, io, &self.socket_read_buffer);
         self.socket_writer = SocketWriter.init(inner, io, &self.socket_write_buffer);
         self.connection = undefined;
@@ -93,11 +96,21 @@ pub const WsStream = struct {
     fn read(ctx: *anyopaque, io: std.Io, buffers: [][]u8) Stream.ReadError!usize {
         _ = io;
         const self: *WsStream = @ptrCast(@alignCast(ctx));
-        return self.connection.read(buffers) catch |err| switch (err) {
-            error.Canceled => error.Canceled,
-            error.Closed => 0,
-            error.ProtocolViolation => error.ProtocolViolation,
-            else => error.Unexpected,
+        self.guard.enter();
+        defer self.guard.leave(self.io);
+        if (self.closed.load(.acquire)) return error.Canceled;
+        return self.connection.read(buffers) catch |err| {
+            if (self.socket_reader.err) |inner| switch (inner) {
+                error.Canceled => return error.Canceled,
+                error.ConnectionReset => return error.ConnectionReset,
+                else => {},
+            };
+            return switch (err) {
+                error.Canceled => error.Canceled,
+                error.Closed => 0,
+                error.ProtocolViolation => error.ProtocolViolation,
+                else => error.Unexpected,
+            };
         };
     }
 
@@ -108,10 +121,21 @@ pub const WsStream = struct {
     ) Stream.WriteError!usize {
         _ = io;
         const self: *WsStream = @ptrCast(@alignCast(ctx));
-        return self.connection.write(buffers) catch |err| switch (err) {
-            error.Canceled => error.Canceled,
-            error.Closed, error.ProtocolViolation => error.ProtocolViolation,
-            else => error.Unexpected,
+        self.guard.enter();
+        defer self.guard.leave(self.io);
+        if (self.closed.load(.acquire)) return error.Canceled;
+        return self.connection.write(buffers) catch |err| {
+            if (self.socket_writer.err) |inner| switch (inner) {
+                error.Canceled => return error.Canceled,
+                error.BrokenPipe => return error.BrokenPipe,
+                else => {},
+            };
+            return switch (err) {
+                error.Canceled => error.Canceled,
+                error.Closed => error.BrokenPipe,
+                error.ProtocolViolation => error.ProtocolViolation,
+                else => error.Unexpected,
+            };
         };
     }
 
@@ -121,6 +145,9 @@ pub const WsStream = struct {
         how: Stream.ShutdownHow,
     ) Stream.ShutdownError!void {
         const self: *WsStream = @ptrCast(@alignCast(ctx));
+        self.guard.enter();
+        defer self.guard.leave(io);
+        if (self.closed.load(.acquire)) return error.Canceled;
         switch (how) {
             .recv => return self.inner.shutdown(io, .recv),
             .send => {
@@ -139,6 +166,7 @@ pub const WsStream = struct {
         const self: *WsStream = @ptrCast(@alignCast(ctx));
         if (self.closed.swap(true, .acq_rel)) return;
         self.inner.close(io);
+        self.guard.waitIdle(io);
         self.connection.deinit();
         std.crypto.secureZero(u8, &self.socket_read_buffer);
         std.crypto.secureZero(u8, &self.socket_write_buffer);
@@ -350,3 +378,94 @@ const SocketWriter = struct {
         }
     }
 };
+
+const BlockingInner = struct {
+    started: std.Io.Event = .unset,
+    release: std.Io.Event = .unset,
+
+    fn stream(self: *BlockingInner) Stream {
+        return .{ .ctx = self, .vtable = &vtable };
+    }
+
+    fn read(
+        ctx: *anyopaque,
+        io: std.Io,
+        buffers: [][]u8,
+    ) Stream.ReadError!usize {
+        _ = buffers;
+        const self: *BlockingInner = @ptrCast(@alignCast(ctx));
+        self.started.set(io);
+        self.release.waitUncancelable(io);
+        return error.Canceled;
+    }
+
+    fn write(
+        ctx: *anyopaque,
+        io: std.Io,
+        buffers: []const []const u8,
+    ) Stream.WriteError!usize {
+        _ = ctx;
+        _ = io;
+        return buffers[0].len;
+    }
+
+    fn shutdown(
+        ctx: *anyopaque,
+        io: std.Io,
+        how: Stream.ShutdownHow,
+    ) Stream.ShutdownError!void {
+        _ = ctx;
+        _ = io;
+        _ = how;
+    }
+
+    fn close(ctx: *anyopaque, io: std.Io) void {
+        const self: *BlockingInner = @ptrCast(@alignCast(ctx));
+        self.release.set(io);
+    }
+
+    fn local(ctx: *anyopaque) Endpoint {
+        _ = ctx;
+        return .{ .ip = .{ .ip4 = .loopback(0) } };
+    }
+
+    fn remote(ctx: *anyopaque) Endpoint {
+        _ = ctx;
+        return .{ .ip = .{ .ip4 = .loopback(0) } };
+    }
+
+    const vtable: Stream.VTable = .{
+        .read = read,
+        .write = write,
+        .shutdown = shutdown,
+        .close = close,
+        .local = local,
+        .remote = remote,
+    };
+};
+
+fn blockedRead(io: std.Io, stream: Stream) anyerror!void {
+    var buffer: [16]u8 = undefined;
+    var buffers = [_][]u8{&buffer};
+    _ = try stream.read(io, &buffers);
+}
+
+test "close waits for a blocked read before freeing the adapter" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var inner: BlockingInner = .{};
+    const adapter = try WsStream.createBase(io, std.testing.allocator, inner.stream());
+    adapter.connection = .{
+        .io = io,
+        .input = &adapter.socket_reader.interface,
+        .output = &adapter.socket_writer.interface,
+        .role = .server,
+    };
+    const stream = adapter.stream();
+    var future = io.async(blockedRead, .{ io, stream });
+    try inner.started.wait(io);
+    stream.close(io);
+    try std.testing.expectError(error.Canceled, future.await(io));
+}

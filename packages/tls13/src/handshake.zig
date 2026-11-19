@@ -423,7 +423,9 @@ pub fn writeAlpnExtension(
         }
         list_len += 1 + protocol.len;
     }
-    if (list_len > std.math.maxInt(u16)) return error.HandshakeFailed;
+    if (list_len > std.math.maxInt(u16) - 2) {
+        return error.HandshakeFailed;
+    }
 
     try encoder.writeU16(extension_alpn);
     try encoder.writeU16(@intCast(2 + list_len));
@@ -555,4 +557,19 @@ pub fn finishedVerifyData(
 pub fn transcriptHash(transcript: *const Hash) [32]u8 {
     var copy = transcript.*;
     return copy.finalResult();
+}
+
+test "ALPN extension length is bounded before the u16 cast" {
+    var names: [256][255]u8 = undefined;
+    var protocols: [256][]const u8 = undefined;
+    for (&names, 0..) |*name, index| {
+        @memset(name, @intCast('a' + (index % 26)));
+        protocols[index] = name;
+    }
+    var buffer: [1024]u8 = undefined;
+    var encoder = Encoder.init(&buffer);
+    try std.testing.expectError(
+        error.HandshakeFailed,
+        writeAlpnExtension(&encoder, &protocols),
+    );
 }

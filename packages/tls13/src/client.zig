@@ -9,6 +9,7 @@ const std = @import("std");
 const Ca = @import("ca.zig").Ca;
 const handshake = @import("handshake.zig");
 const record = @import("record.zig");
+const cert_path = @import("cert_path.zig");
 const Certificate = std.crypto.Certificate;
 const Ecdsa = std.crypto.sign.ecdsa;
 
@@ -37,6 +38,7 @@ pub const InitError = error{
     Canceled,
     Closed,
     HandshakeFailed,
+    Truncated,
 };
 
 const max_pubkey = 1024;
@@ -65,6 +67,7 @@ pub const Client = struct {
     handshake_buffer: [handshake.max_handshake]u8 = undefined,
     handshake_len: usize = 0,
     handshake_offset: usize = 0,
+    allow_truncation_attacks: bool = false,
     closed: bool = false,
     eof_received: bool = false,
     read_error: ?InitError = null,
@@ -105,6 +108,7 @@ pub const Client = struct {
                 .vtable = &.{ .drain = writerDrain },
                 .buffer = options.write_buffer,
             },
+            .allow_truncation_attacks = options.allow_truncation_attacks,
         };
         try self.runHandshake(options);
         return self;
@@ -322,68 +326,45 @@ pub const Client = struct {
         var list = cursor.sub(list_len) catch return error.HandshakeFailed;
         if (!cursor.eof()) return error.HandshakeFailed;
 
-        const now_sec = std.Io.Timestamp.now(self.io, .real).toSeconds();
-        var previous: ?Certificate.Parsed = null;
-        var trusted = false;
-        var cert_index: usize = 0;
+        var chain: [cert_path.max_chain][]const u8 = undefined;
+        var chain_len: usize = 0;
         while (!list.eof()) {
+            if (chain_len == chain.len) return error.HandshakeFailed;
             const cert_len = list.readU24() catch return error.HandshakeFailed;
             const der = list.readBytes(cert_len) catch return error.HandshakeFailed;
             const extensions_len = list.readU16() catch
                 return error.HandshakeFailed;
             _ = list.readBytes(extensions_len) catch return error.HandshakeFailed;
-
-            const subject = parseCertificateDer(der) catch return error.HandshakeFailed;
-            if (cert_index == 0) {
-                try self.useLeafCertificate(options, subject);
-            } else if (previous) |issuer| {
-                issuer.verify(subject, now_sec) catch return error.HandshakeFailed;
-            } else {
-                return error.HandshakeFailed;
-            }
-            if (try self.bundleTrusts(options, subject, now_sec)) {
-                trusted = true;
-                break;
-            }
-            previous = subject;
-            cert_index += 1;
+            chain[chain_len] = der;
+            chain_len += 1;
         }
-        if (options.verify and !trusted) return error.HandshakeFailed;
-    }
 
-    fn useLeafCertificate(
-        self: *Client,
-        options: Options,
-        subject: Certificate.Parsed,
-    ) InitError!void {
+        const now_sec = std.Io.Timestamp.now(self.io, .real).toSeconds();
+        var leaf: cert_path.Leaf = .{};
         if (options.verify) {
-            const host = options.server_name orelse return error.HandshakeFailed;
-            subject.verifyHostName(host) catch return error.HandshakeFailed;
+            const ca = options.ca orelse return error.HandshakeFailed;
+            ca.lock.lockShared(self.io) catch return error.Canceled;
+            defer ca.lock.unlockShared(self.io);
+            cert_path.verifyServerChain(chain[0..chain_len], .{
+                .host = options.server_name,
+                .verify_chain = true,
+                .now_sec = now_sec,
+                .bundle = &ca.bundle,
+            }, &leaf) catch return error.HandshakeFailed;
+        } else {
+            cert_path.verifyServerChain(chain[0..chain_len], .{
+                .host = options.server_name,
+                .verify_chain = false,
+                .now_sec = now_sec,
+                .bundle = null,
+            }, &leaf) catch return error.HandshakeFailed;
         }
-        const key = subject.pubKey();
-        if (key.len == 0 or key.len > self.pubkey.len) {
+        if (leaf.len == 0 or leaf.len > self.pubkey.len) {
             return error.HandshakeFailed;
         }
-        @memcpy(self.pubkey[0..key.len], key);
-        self.pubkey_len = key.len;
-        self.pubkey_algo = subject.pub_key_algo;
-    }
-
-    fn bundleTrusts(
-        self: *Client,
-        options: Options,
-        subject: Certificate.Parsed,
-        now_sec: i64,
-    ) InitError!bool {
-        if (!options.verify) return false;
-        const ca = options.ca orelse return error.HandshakeFailed;
-        ca.lock.lockShared(self.io) catch return error.Canceled;
-        defer ca.lock.unlockShared(self.io);
-        ca.bundle.verify(subject, now_sec) catch |err| switch (err) {
-            error.CertificateIssuerNotFound => return false,
-            else => return error.HandshakeFailed,
-        };
-        return true;
+        @memcpy(self.pubkey[0..leaf.len], leaf.pubkey[0..leaf.len]);
+        self.pubkey_len = leaf.len;
+        self.pubkey_algo = leaf.algo;
     }
 
     fn verifyCertificateVerify(
@@ -592,13 +573,22 @@ pub const Client = struct {
             const rec = record.readRecord(
                 self.input,
                 &self.record_read,
-            ) catch |err| return mapAppRecordError(err);
+            ) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                error.EndOfStream => {
+                    if (self.allow_truncation_attacks) {
+                        self.eof_received = true;
+                        return error.Closed;
+                    }
+                    return error.Truncated;
+                },
+                else => return error.HandshakeFailed,
+            };
             if (rec[0] == record.content_type_change_cipher_spec) {
                 return error.HandshakeFailed;
             }
-            if (rec[0] == record.content_type_alert) {
-                return self.handleAlert(rec[record.record_header_len..]);
-            }
+            // RFC 8446 §5.1: after the handshake every alert must be
+            // protected by the current write keys.
             if (rec[0] != record.content_type_application_data) {
                 return error.HandshakeFailed;
             }
@@ -743,9 +733,6 @@ fn writeSignatureAlgorithms(extensions: *handshake.Encoder) InitError!void {
         handshake.signature_rsa_pss_sha256,
         handshake.signature_rsa_pss_sha384,
         handshake.signature_rsa_pss_sha512,
-        handshake.signature_rsa_pkcs1_sha256,
-        handshake.signature_rsa_pkcs1_sha384,
-        handshake.signature_rsa_pkcs1_sha512,
     };
     try extensions.writeU16(handshake.extension_signature_algorithms);
     try extensions.writeU16(2 + schemes.len * 2);
@@ -769,11 +756,6 @@ fn containsProtocol(protocols: []const []const u8, protocol: []const u8) bool {
         if (std.mem.eql(u8, candidate, protocol)) return true;
     }
     return false;
-}
-
-fn parseCertificateDer(der: []const u8) !Certificate.Parsed {
-    const certificate: Certificate = .{ .buffer = der, .index = 0 };
-    return certificate.parse();
 }
 
 fn verifyServerSignature(
@@ -814,9 +796,6 @@ fn verifyServerSignature(
             );
             try sig.verify(message, key);
         },
-        handshake.signature_rsa_pkcs1_sha256,
-        handshake.signature_rsa_pkcs1_sha384,
-        handshake.signature_rsa_pkcs1_sha512,
         handshake.signature_rsa_pss_sha256,
         handshake.signature_rsa_pss_sha384,
         handshake.signature_rsa_pss_sha512,
@@ -841,7 +820,7 @@ fn verifyRsa(
         components.modulus,
     );
     switch (signature.len) {
-        inline 128, 256, 384, 512 => |modulus_len| {
+        inline 256, 384, 512 => |modulus_len| {
             const sig: *const [modulus_len]u8 = signature[0..modulus_len];
             switch (scheme) {
                 handshake.signature_rsa_pkcs1_sha256 => try Certificate.rsa
@@ -953,14 +932,6 @@ fn mapRecordError() InitError {
     return error.HandshakeFailed;
 }
 
-fn mapAppRecordError(err: record.ReadError) InitError {
-    return switch (err) {
-        error.Canceled => error.Canceled,
-        error.EndOfStream => error.Closed,
-        else => error.HandshakeFailed,
-    };
-}
-
 test "a peer close during the handshake fails the handshake" {
     var input_buffer: [min_buffer_len]u8 = undefined;
     var input: std.Io.Reader = .{
@@ -1059,4 +1030,52 @@ fn discardDrain(
         total += slice.len * repeat;
     }
     return total;
+}
+
+test "plaintext close_notify is rejected after the handshake" {
+    const alert = [_]u8{ record.content_type_alert, 0x03, 0x03, 0, 2, 1, 0 };
+    var input_buffer: [16]u8 = undefined;
+    var calls = [_]std.testing.Reader.Call{.{ .buffer = &alert }};
+    var reader = std.testing.Reader.init(&input_buffer, &calls);
+
+    var client: Client = undefined;
+    client.input = &reader.interface;
+    client.eof_received = false;
+    client.allow_truncation_attacks = false;
+    client.pending_len = 0;
+    client.pending_offset = 0;
+    client.read_keys = .{};
+
+    var dest: [16]u8 = undefined;
+    try std.testing.expectError(
+        error.HandshakeFailed,
+        client.readPlaintext(&dest),
+    );
+    try std.testing.expect(!client.eof_received);
+}
+
+test "missing close_notify is a truncation unless explicitly allowed" {
+    var input_buffer: [16]u8 = undefined;
+    var calls = [_]std.testing.Reader.Call{};
+    var reader = std.testing.Reader.init(&input_buffer, &calls);
+    var client: Client = undefined;
+    client.input = &reader.interface;
+    client.eof_received = false;
+    client.allow_truncation_attacks = false;
+    client.pending_len = 0;
+    client.pending_offset = 0;
+    client.read_keys = .{};
+    var dest: [16]u8 = undefined;
+    try std.testing.expectError(
+        error.Truncated,
+        client.readPlaintext(&dest),
+    );
+
+    client.eof_received = false;
+    client.allow_truncation_attacks = true;
+    try std.testing.expectError(
+        error.Closed,
+        client.readPlaintext(&dest),
+    );
+    try std.testing.expect(client.eof_received);
 }

@@ -394,6 +394,7 @@ fn runTlsServerHandshake(ctx: Context, input: []const u8) anyerror!void {
         error.HandshakeFailed,
         error.ProtocolViolation,
         error.Closed,
+        error.Truncated,
         error.OutOfMemory,
         => return,
     }

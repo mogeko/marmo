@@ -6,7 +6,7 @@ const huffman_table = @import("huffman_table.zig");
 pub const max_header_list = 64 * 1024;
 pub const max_headers = 128;
 pub const max_dynamic_size = 4096;
-pub const max_dynamic_entries = 16;
+pub const max_dynamic_entries = 128;
 pub const max_name = 256;
 pub const max_value = 4096;
 
@@ -85,15 +85,15 @@ const static_table = [61]Header{
 };
 
 const DynamicEntry = struct {
-    name: [max_name]u8 = undefined,
+    name_off: u16 = 0,
     name_len: u16 = 0,
-    value: [max_value]u8 = undefined,
+    value_off: u16 = 0,
     value_len: u16 = 0,
 
-    fn header(self: *const DynamicEntry) Header {
+    fn header(self: *const DynamicEntry, storage: *const [max_dynamic_size]u8) Header {
         return .{
-            .name = self.name[0..self.name_len],
-            .value = self.value[0..self.value_len],
+            .name = storage[self.name_off..][0..self.name_len],
+            .value = storage[self.value_off..][0..self.value_len],
         };
     }
 
@@ -104,6 +104,8 @@ const DynamicEntry = struct {
 
 pub const Decoder = struct {
     entries: [max_dynamic_entries]DynamicEntry = undefined,
+    storage: [max_dynamic_size]u8 = undefined,
+    storage_len: usize = 0,
     count: usize = 0,
     size: usize = 0,
     max_size: usize = max_dynamic_size,
@@ -193,7 +195,7 @@ pub const Decoder = struct {
         if (index <= static_table.len) return static_table[index - 1];
         const dynamic_index = index - static_table.len - 1;
         if (dynamic_index >= self.count) return error.Malformed;
-        return self.entries[dynamic_index].header();
+        return self.entries[dynamic_index].header(&self.storage);
     }
 
     fn add(self: *Decoder, name: []const u8, value: []const u8) Error!void {
@@ -206,32 +208,81 @@ pub const Decoder = struct {
             // not added.
             self.count = 0;
             self.size = 0;
+            self.storage_len = 0;
             return;
         }
         while (self.count > 0 and
             (self.size + entry_size > self.max_size or
                 self.count == max_dynamic_entries))
         {
-            self.count -= 1;
-            self.size -= self.entries[self.count].size();
+            self.evictOldest();
         }
+        self.compact();
+        if (self.storage.len - self.storage_len < name.len + value.len) {
+            return error.Malformed;
+        }
+
+        const name_off: u16 = @intCast(self.storage_len);
+        @memcpy(self.storage[self.storage_len..][0..name.len], name);
+        self.storage_len += name.len;
+        const value_off: u16 = @intCast(self.storage_len);
+        @memcpy(self.storage[self.storage_len..][0..value.len], value);
+        self.storage_len += value.len;
+
         var index = self.count;
         while (index > 0) : (index -= 1) {
             self.entries[index] = self.entries[index - 1];
         }
-        self.entries[0].name_len = @intCast(name.len);
-        @memcpy(self.entries[0].name[0..name.len], name);
-        self.entries[0].value_len = @intCast(value.len);
-        @memcpy(self.entries[0].value[0..value.len], value);
+        self.entries[0] = .{
+            .name_off = name_off,
+            .name_len = @intCast(name.len),
+            .value_off = value_off,
+            .value_len = @intCast(value.len),
+        };
         self.count += 1;
         self.size += entry_size;
     }
 
+    fn compact(self: *Decoder) void {
+        var cursor: usize = 0;
+        var index = self.count;
+        while (index > 0) {
+            index -= 1;
+            const entry = &self.entries[index];
+            const name = self.storage[entry.name_off..][0..entry.name_len];
+            const value = self.storage[entry.value_off..][0..entry.value_len];
+            if (cursor != entry.name_off) {
+                std.mem.copyForwards(
+                    u8,
+                    self.storage[cursor..][0..name.len],
+                    name,
+                );
+            }
+            entry.name_off = @intCast(cursor);
+            cursor += name.len;
+            if (cursor != entry.value_off) {
+                std.mem.copyForwards(
+                    u8,
+                    self.storage[cursor..][0..value.len],
+                    value,
+                );
+            }
+            entry.value_off = @intCast(cursor);
+            cursor += value.len;
+        }
+        self.storage_len = cursor;
+    }
+
     fn evict(self: *Decoder) void {
         while (self.count > 0 and self.size > self.max_size) {
-            self.count -= 1;
-            self.size -= self.entries[self.count].size();
+            self.evictOldest();
         }
+    }
+
+    fn evictOldest(self: *Decoder) void {
+        if (self.count == 0) return;
+        self.count -= 1;
+        self.size -= self.entries[self.count].size();
     }
 };
 
@@ -511,4 +562,32 @@ test "30-bit Huffman codes do not overflow the pending-bit counter" {
     try std.testing.expectEqualStrings(":authority", list[0].name);
     try std.testing.expectEqual(@as(usize, 1), list[0].value.len);
     try std.testing.expectEqual(@as(u8, 10), list[0].value[0]);
+}
+
+test "dynamic table keeps more than sixteen entries" {
+    var block: [1024]u8 = undefined;
+    var pos: usize = 0;
+    var index: usize = 0;
+    while (index < 20) : (index += 1) {
+        block[pos] = 0x40;
+        pos += 1;
+        var name_buffer: [8]u8 = undefined;
+        var value_buffer: [8]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buffer, "x-{d:0>2}", .{index});
+        const value = try std.fmt.bufPrint(&value_buffer, "v-{d:0>2}", .{index});
+        try encodeString(&block, &pos, name);
+        try encodeString(&block, &pos, value);
+    }
+
+    var decoder = Decoder.init();
+    var storage: [4096]u8 = undefined;
+    var headers: [32]Header = undefined;
+    const first = try decoder.decode(block[0..pos], &storage, &headers);
+    try std.testing.expectEqual(@as(usize, 20), first.len);
+    try std.testing.expectEqual(@as(usize, 20), decoder.count);
+
+    const oldest = [_]u8{0x80 | (static_table.len + 1 + 19)};
+    const second = try decoder.decode(&oldest, &storage, &headers);
+    try std.testing.expectEqualStrings("x-00", second[0].name);
+    try std.testing.expectEqualStrings("v-00", second[0].value);
 }

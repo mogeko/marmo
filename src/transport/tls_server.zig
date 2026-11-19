@@ -5,6 +5,7 @@ const tls13 = @import("tls13");
 const Endpoint = @import("../net/endpoint.zig").Endpoint;
 const Stream = @import("stream.zig").Stream;
 const writeSlices = @import("write.zig").writeSlices;
+const Guard = @import("lifetime.zig").Guard;
 
 pub const socket_buffer_len = tls13.min_buffer_len;
 const plain_buffer_len = 4096;
@@ -15,6 +16,8 @@ pub const Options = struct {
     private_key: std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair,
     /// ALPN protocols in server preference order.
     alpn_protocols: []const []const u8 = &.{},
+    /// Treat a missing client close_notify as EOF instead of truncation.
+    allow_truncation_attacks: bool = false,
     /// Bounded handshake duration. Zero disables the timeout.
     handshake_timeout_ns: u64 = 10 * std.time.ns_per_s,
 };
@@ -36,6 +39,7 @@ pub const TlsServerStream = struct {
     io: std.Io,
     inner: Stream,
     closed: std.atomic.Value(bool) = .init(false),
+    guard: Guard = .{},
     write_lock: std.Io.Mutex = .init,
     socket_reader: SocketReader,
     socket_writer: SocketWriter,
@@ -58,6 +62,7 @@ pub const TlsServerStream = struct {
         self.io = io;
         self.inner = inner;
         self.closed = .init(false);
+        self.guard = .{};
         self.write_lock = .init;
         self.socket_reader = SocketReader.init(inner, io, &self.socket_read_buffer);
         self.socket_writer = SocketWriter.init(inner, io, &self.socket_write_buffer);
@@ -124,6 +129,7 @@ pub const TlsServerStream = struct {
                 .certificate_chain = options.certificate_chain,
                 .private_key = options.private_key,
                 .alpn_protocols = options.alpn_protocols,
+                .allow_truncation_attacks = options.allow_truncation_attacks,
                 .read_buffer = &self.plain_read_buffer,
                 .write_buffer = &self.plain_write_buffer,
             },
@@ -152,8 +158,15 @@ pub const TlsServerStream = struct {
     fn read(ctx: *anyopaque, io: std.Io, buffers: [][]u8) Stream.ReadError!usize {
         _ = io;
         const self: *TlsServerStream = @ptrCast(@alignCast(ctx));
-        return tls13.readSome(self.server.reader(), buffers) catch
+        self.guard.enter();
+        defer self.guard.leave(self.io);
+        if (self.closed.load(.acquire)) return error.Canceled;
+        const read_len = tls13.readSome(self.server.reader(), buffers) catch
             return self.readFailure();
+        if (read_len == 0 and !self.server.eof) {
+            return error.ConnectionReset;
+        }
+        return read_len;
     }
 
     fn write(
@@ -162,6 +175,9 @@ pub const TlsServerStream = struct {
         buffers: []const []const u8,
     ) Stream.WriteError!usize {
         const self: *TlsServerStream = @ptrCast(@alignCast(ctx));
+        self.guard.enter();
+        defer self.guard.leave(io);
+        if (self.closed.load(.acquire)) return error.Canceled;
         var total: usize = 0;
         for (buffers) |buffer| total += buffer.len;
 
@@ -179,6 +195,9 @@ pub const TlsServerStream = struct {
         how: Stream.ShutdownHow,
     ) Stream.ShutdownError!void {
         const self: *TlsServerStream = @ptrCast(@alignCast(ctx));
+        self.guard.enter();
+        defer self.guard.leave(io);
+        if (self.closed.load(.acquire)) return error.Canceled;
         switch (how) {
             .recv => return self.inner.shutdown(io, .recv),
             .send => {
@@ -197,6 +216,7 @@ pub const TlsServerStream = struct {
         const self: *TlsServerStream = @ptrCast(@alignCast(ctx));
         if (self.closed.swap(true, .acq_rel)) return;
         self.inner.close(io);
+        self.guard.waitIdle(io);
         self.server.deinit();
         std.crypto.secureZero(u8, &self.plain_read_buffer);
         std.crypto.secureZero(u8, &self.plain_write_buffer);
@@ -220,6 +240,7 @@ pub const TlsServerStream = struct {
             error.Canceled => error.Canceled,
             error.ProtocolViolation, error.HandshakeFailed => error.ProtocolViolation,
             error.Closed => error.Unexpected,
+            error.Truncated => error.ConnectionReset,
             error.OutOfMemory => error.Unexpected,
         };
     }

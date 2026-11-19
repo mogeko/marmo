@@ -8,6 +8,7 @@ const std = @import("std");
 const handshake = @import("handshake.zig");
 const record = @import("record.zig");
 const client = @import("client.zig");
+const cert_path = @import("cert_path.zig");
 const Ecdsa = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const test_cert = @import("test_cert.zig");
 
@@ -16,6 +17,7 @@ pub const Error = error{
     HandshakeFailed,
     ProtocolViolation,
     Closed,
+    Truncated,
     OutOfMemory,
 };
 
@@ -25,6 +27,9 @@ pub const ServerOptions = struct {
     private_key: Ecdsa.KeyPair,
     /// ALPN protocols in server preference order. Empty disables selection.
     alpn_protocols: []const []const u8 = &.{},
+    /// Treat a missing client close_notify as EOF. The root adapters default
+    /// to strict truncation handling.
+    allow_truncation_attacks: bool = false,
     /// Plaintext reader buffer; the caller keeps ownership.
     read_buffer: []u8,
     /// Plaintext writer buffer; the caller keeps ownership.
@@ -53,6 +58,7 @@ pub const Server = struct {
     record_write: [record.max_record]u8 = undefined,
     handshake_buffer: [handshake.max_handshake]u8 = undefined,
     message_buffer: [handshake.max_handshake]u8 = undefined,
+    allow_truncation_attacks: bool = false,
     closed: bool = false,
     eof: bool = false,
     read_error: ?Error = null,
@@ -89,6 +95,7 @@ pub const Server = struct {
                 .vtable = &.{ .drain = writerDrain },
                 .buffer = options.write_buffer,
             },
+            .allow_truncation_attacks = options.allow_truncation_attacks,
         };
         try self.runHandshake(io, options);
         return self;
@@ -468,16 +475,24 @@ pub const Server = struct {
             const rec = record.readRecord(
                 self.input,
                 &self.record_read,
-            ) catch |err| return mapAppReadError(err);
+            ) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                error.EndOfStream => {
+                    if (self.allow_truncation_attacks) {
+                        self.eof = true;
+                        return error.Closed;
+                    }
+                    return error.Truncated;
+                },
+                else => return error.ProtocolViolation,
+            };
 
             // RFC 8446 §5: a change_cipher_spec record after the handshake is
             // a protocol error, not a record to ignore.
             if (rec[0] == record.content_type_change_cipher_spec) {
                 return error.ProtocolViolation;
             }
-            if (rec[0] == record.content_type_alert) {
-                return self.handleAppAlert(rec[record.record_header_len..]);
-            }
+            // RFC 8446 §5.1: every post-handshake alert is encrypted.
             if (rec[0] != record.content_type_application_data) {
                 return error.ProtocolViolation;
             }
@@ -677,16 +692,6 @@ fn mapHandshakeReadError(err: record.ReadError) Error {
     };
 }
 
-fn mapAppReadError(err: record.ReadError) Error {
-    return switch (err) {
-        error.Canceled => error.Canceled,
-        error.EndOfStream => error.Closed,
-        error.ProtocolViolation,
-        error.Unexpected,
-        => error.ProtocolViolation,
-    };
-}
-
 const TestContext = struct {
     listener: *std.Io.net.Server,
     cert: *test_cert.Certificate,
@@ -774,7 +779,7 @@ test "post-handshake change_cipher_spec is a protocol error" {
     );
 }
 
-test "plaintext close_notify is reported as clean EOF" {
+test "plaintext close_notify is a protocol error" {
     const alert = [_]u8{ record.content_type_alert, 0x03, 0x03, 0, 2, 1, 0 };
     var input_buffer: [16]u8 = undefined;
     var calls = [_]std.testing.Reader.Call{.{ .buffer = &alert }};
@@ -788,7 +793,11 @@ test "plaintext close_notify is reported as clean EOF" {
     server.read_keys = .{};
 
     var dest: [16]u8 = undefined;
-    try std.testing.expectError(error.Closed, server.readPlaintext(&dest));
+    try std.testing.expectError(
+        error.ProtocolViolation,
+        server.readPlaintext(&dest),
+    );
+    try std.testing.expect(!server.eof);
 }
 
 test "TLS 1.3 server and client exchange application data" {
@@ -897,4 +906,105 @@ test "ALPN with no server preference leaves the protocol unset" {
     var selected_len: u8 = 99;
     try selectAlpn(&.{ 2, 'h', '2' }, &.{}, &selected, &selected_len);
     try std.testing.expectEqual(@as(u8, 99), selected_len);
+}
+
+test "certificate path rejects a non-CA intermediate" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var root = try test_cert.generateCa(allocator, io, "marmo test root");
+    defer root.deinit(allocator);
+    var legit = try test_cert.generateParams(allocator, io, .{
+        .common_name = "attacker-owned.example",
+        .issuer_name = "marmo test root",
+        .issuer_key = root.key_pair,
+        .san = "attacker-owned.example",
+        .include_basic_constraints = true,
+        .include_key_usage = true,
+        .eku_server_auth = true,
+    });
+    defer legit.deinit(allocator);
+    var fake = try test_cert.generateParams(allocator, io, .{
+        .common_name = "victim.test",
+        .issuer_name = "attacker-owned.example",
+        .issuer_key = legit.key_pair,
+        .san = "victim.test",
+        .include_basic_constraints = true,
+        .include_key_usage = true,
+        .eku_server_auth = true,
+    });
+    defer fake.deinit(allocator);
+
+    var bundle: std.crypto.Certificate.Bundle = .empty;
+    defer bundle.deinit(allocator);
+    const now = std.Io.Timestamp.now(io, .real).toSeconds();
+    try test_cert.addTrustedDer(&bundle, allocator, root.der, now);
+
+    var leaf: cert_path.Leaf = .{};
+    const bad_chain = [_][]const u8{ fake.der, legit.der };
+    try std.testing.expectError(
+        error.CertificateRejected,
+        cert_path.verifyServerChain(&bad_chain, .{
+            .host = "victim.test",
+            .verify_chain = true,
+            .now_sec = now,
+            .bundle = &bundle,
+        }, &leaf),
+    );
+}
+
+test "certificate path accepts a CA:TRUE intermediate" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var root = try test_cert.generateCa(allocator, io, "marmo test root");
+    defer root.deinit(allocator);
+    var intermediate = try test_cert.generateParams(allocator, io, .{
+        .common_name = "marmo test intermediate",
+        .issuer_name = "marmo test root",
+        .issuer_key = root.key_pair,
+        .san = null,
+        .ca = true,
+        .include_basic_constraints = true,
+        .include_key_usage = true,
+    });
+    defer intermediate.deinit(allocator);
+    var leaf_cert = try test_cert.generateParams(allocator, io, .{
+        .common_name = "proxy.test",
+        .issuer_name = "marmo test intermediate",
+        .issuer_key = intermediate.key_pair,
+        .san = "proxy.test",
+        .include_basic_constraints = true,
+        .include_key_usage = true,
+        .eku_server_auth = true,
+    });
+    defer leaf_cert.deinit(allocator);
+
+    var bundle: std.crypto.Certificate.Bundle = .empty;
+    defer bundle.deinit(allocator);
+    const now = std.Io.Timestamp.now(io, .real).toSeconds();
+    try test_cert.addTrustedDer(&bundle, allocator, root.der, now);
+
+    var leaf: cert_path.Leaf = .{};
+    const chain = [_][]const u8{ leaf_cert.der, intermediate.der };
+    try cert_path.verifyServerChain(&chain, .{
+        .host = "proxy.test",
+        .verify_chain = true,
+        .now_sec = now,
+        .bundle = &bundle,
+    }, &leaf);
+
+    try std.testing.expectError(
+        error.CertificateRejected,
+        cert_path.verifyServerChain(&chain, .{
+            .host = "wrong.test",
+            .verify_chain = false,
+            .now_sec = now,
+            .bundle = null,
+        }, &leaf),
+    );
 }

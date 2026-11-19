@@ -68,12 +68,17 @@ exhaustion; Low = local/robustness/spec issue with limited impact.
 | F-12 | Low | Fixed | HTTP CONNECT outbound | A valid response head exactly 8192 bytes long was rejected. |
 | F-13 | Medium | Open | Inbounds | No connect/handshake idle timeout for SOCKS5/HTTP and no maximum connection count. Requires a config/architecture decision (ADR). |
 | F-14 | Medium | Open | Relay | No idle-timeout enforcement after relay start; a silent peer can hold a relay pair open indefinitely. Requires a config/architecture decision (ADR). |
-| F-15 | Low | Open | TLS | KeyUpdate/client auth/PSK/tickets are not implemented (ALPN is implemented). Post-handshake handling is unit-tested but not end-to-end fuzzed. |
+| F-15 | Low | Open | TLS | KeyUpdate/client auth/PSK/tickets are not implemented (ALPN is implemented). Post-handshake KeyUpdate/alert/truncation paths have regression tests but no end-to-end authenticated-stream fuzz target. |
 | F-16 | Low | Open | General | No external audit, no side-channel review, and no long-running soak/fuzz campaign. |
 | F-17 | Low | Open | Trojan | The authentication-prefix read and UDP association have no protocol-level idle timeout; a TLS peer that stalls can hold a connection. Same class as F-13. |
 | F-18 | Low | Fixed | TLS client | A partial TLS record could be reported as EOF, losing the final application data when a peer split a record or closed immediately after sending it. Found during trojan-gfw UDP interop; added a regression test. |
 | F-19 | Low | Open | WS/H2 | The WebSocket and HTTP/2 parsers are new: no external audit, and HTTP/2 supports one active stream per connection. Bounded parser fuzz targets exist. |
-| F-20 | Low | Open | WS/H2 | WS accept/close comparisons and frame masking are unit-tested; H2 flow-control stalls are not soak-tested under a peer that stops reading. |
+| F-20 | Low | Open | WS/H2 | WS close-code/UTF-8 policy is not enforced; H2 flow-control stalls are not soak-tested under a peer that stops reading. |
+| F-21 | Critical | Fixed | TLS client | Certificate paths did not check issuer `basicConstraints CA:TRUE` / `keyUsage keyCertSign`, so a CA:FALSE leaf could act as an intermediate and MITM the connection. |
+| F-22 | Medium | Fixed | TLS client | Post-handshake plaintext alerts were accepted, `close_notify` truncation was indistinguishable from clean EOF, `allow_truncation_attacks` was dead, and `insecure` also skipped host-name verification. |
+| F-23 | High | Fixed | HTTP/2 | Server rejected client `ENABLE_PUSH`, treated peer `END_STREAM` as a full close, used a 16-entry HPACK table cap, accepted cross-stream HEADERS, mapped RST/GOAWAY to clean EOF, and allowed empty CONTINUATION floods. |
+| F-24 | Medium | Fixed | WebSocket | `readHead` discarded bytes after the HTTP terminator (losing a coalesced first frame), and close state was checked outside the write lock. |
+| F-25 | High | Fixed | Adapters | `close()` freed adapter state while reads/writes might still be in flight. In-flight guards now make close wait for operations to drain. |
 
 ### F-01 HTTP request-line injection (High, fixed)
 
@@ -247,6 +252,15 @@ under the testing allocator, which reports leaks.
   status code; no payload or credential is reflected.
 
 ### H. WebSocket and HTTP/2 transports
+
+Remediation (2026-11-20): TLS now enforces issuer CA/keyUsage constraints and
+rejects plaintext post-handshake alerts and unannounced truncation; H2 accepts
+client `ENABLE_PUSH`, keeps the peer half-close separate from local writes,
+uses a byte-budgeted HPACK table, scopes HEADERS to the active stream, reports
+RST/truncating GOAWAY as resets, and caps CONTINUATION frames; WS preserves
+coalesced first frames and serializes close state; all stream adapters wait for
+in-flight operations before freeing on `close`.
+
 
 - WebSocket handshake parsing is capped at 8 KiB; the request line, required
   upgrade headers, version, path, and `Sec-WebSocket-Key` are validated, and

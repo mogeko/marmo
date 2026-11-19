@@ -32,13 +32,17 @@ pub fn readHead(input: *std.Io.Reader, head: *Head) Error!void {
         }
         const available = input.buffered();
         if (available.len == 0) return error.HandshakeFailed;
-        const space = head.buffer.len - head.len;
-        if (space == 0) return error.HandshakeFailed;
-        const count = @min(space, available.len);
-        @memcpy(head.buffer[head.len..][0..count], available[0..count]);
-        input.toss(count);
-        head.len += count;
-        if (std.mem.indexOf(u8, head.bytes(), "\r\n\r\n") != null) return;
+        for (available) |byte| {
+            if (head.len == head.buffer.len) return error.HandshakeFailed;
+            head.buffer[head.len] = byte;
+            head.len += 1;
+            input.toss(1);
+            if (head.len >= 4 and
+                std.mem.endsWith(u8, head.bytes(), "\r\n\r\n"))
+            {
+                return;
+            }
+        }
     }
 }
 
@@ -124,4 +128,18 @@ test "header lookup is case-insensitive" {
     try std.testing.expectEqualStrings("websocket", headerValue(head, "upgrade").?);
     try std.testing.expect(headerContainsToken(head, "connection", "upgrade"));
     try std.testing.expect(!headerContainsToken(head, "connection", "close"));
+}
+
+test "readHead preserves bytes after the terminator" {
+    const input_bytes =
+        "GET /ws HTTP/1.1\r\nHost: x\r\n\r\n" ++
+        "\x82\x05hello";
+    var input = std.Io.Reader.fixed(input_bytes);
+    var head: Head = .{};
+    try readHead(&input, &head);
+    try std.testing.expectEqualStrings(
+        "GET /ws HTTP/1.1\r\nHost: x\r\n\r\n",
+        head.bytes(),
+    );
+    try std.testing.expectEqualStrings("\x82\x05hello", input.buffered());
 }

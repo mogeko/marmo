@@ -1147,7 +1147,7 @@ test "TLS 1.3 adapters exchange application data" {
     }
     try std.testing.expectEqualStrings("hello", &response);
 
-    stream.shutdown(io, .both) catch |err| switch (err) {
+    stream.shutdown(io, .send) catch |err| switch (err) {
         error.NotConnected => {},
         else => return err,
     };

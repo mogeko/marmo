@@ -86,6 +86,7 @@ pub const Connection = struct {
     pub fn write(self: *Connection, buffers: []const []const u8) Error!usize {
         self.write_lock.lock(self.io) catch return error.Canceled;
         defer self.write_lock.unlock(self.io);
+        if (self.close_sent or self.eof) return error.Closed;
 
         var total: usize = 0;
         for (buffers) |buffer| {
@@ -97,10 +98,10 @@ pub const Connection = struct {
     }
 
     pub fn end(self: *Connection) Error!void {
-        if (self.close_sent) return;
         const payload = [_]u8{ 0x03, 0xe8 };
         self.write_lock.lock(self.io) catch return error.Canceled;
         defer self.write_lock.unlock(self.io);
+        if (self.close_sent) return;
         try self.writeFrameLocked(frame.opcode_close, true, &payload);
         self.close_sent = true;
         self.output.flush() catch return error.Unexpected;
@@ -146,6 +147,7 @@ pub const Connection = struct {
     fn writeControl(self: *Connection, opcode: u8, payload: []const u8) Error!void {
         self.write_lock.lock(self.io) catch return error.Canceled;
         defer self.write_lock.unlock(self.io);
+        if (self.close_sent or self.eof) return;
         try self.writeFrameLocked(opcode, true, payload);
         self.output.flush() catch return error.Unexpected;
     }
@@ -173,9 +175,9 @@ pub const Connection = struct {
 
     fn receiveClose(self: *Connection, payload: []const u8) Error!void {
         if (payload.len == 1) return error.ProtocolViolation;
+        self.write_lock.lock(self.io) catch return error.Canceled;
+        defer self.write_lock.unlock(self.io);
         if (!self.close_sent) {
-            self.write_lock.lock(self.io) catch return error.Canceled;
-            defer self.write_lock.unlock(self.io);
             try self.writeFrameLocked(
                 frame.opcode_close,
                 true,
@@ -465,4 +467,48 @@ test "loopback client/server echo" {
     try connection.end();
     _ = server_future.await(io);
     if (context.error_code) |err| return err;
+}
+
+test "end sends one close frame and blocks further data" {
+    const allocator = std.testing.allocator;
+    var storage: std.Io.Writer.Allocating = .init(allocator);
+    defer storage.deinit();
+    var input = std.Io.Reader.fixed(&.{});
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &storage.writer,
+        .role = .client,
+    };
+    try connection.end();
+    const close_len = storage.written().len;
+    try connection.end();
+    try std.testing.expectEqual(close_len, storage.written().len);
+    try std.testing.expectError(
+        error.Closed,
+        connection.write(&.{"after-close"}),
+    );
+    try std.testing.expectEqual(close_len, storage.written().len);
+}
+
+test "a received close is echoed once and blocks further writes" {
+    const allocator = std.testing.allocator;
+    var storage: std.Io.Writer.Allocating = .init(allocator);
+    defer storage.deinit();
+    var input = std.Io.Reader.fixed(&.{});
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &storage.writer,
+        .role = .server,
+    };
+    const close_payload = [_]u8{ 0x03, 0xe8 };
+    try connection.receiveClose(&close_payload);
+    const close_len = storage.written().len;
+    try connection.end();
+    try std.testing.expectEqual(close_len, storage.written().len);
+    try std.testing.expectError(
+        error.Closed,
+        connection.write(&.{"after-close"}),
+    );
 }

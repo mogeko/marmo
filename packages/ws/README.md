@@ -43,13 +43,16 @@ adapters.
 ## Scope
 
 - Client and server opening handshake, bounded to 8 KiB, with
-  `Sec-WebSocket-Accept` verification.
+  `Sec-WebSocket-Accept` verification. Bytes after the HTTP terminator stay in
+  the reader, so a frame coalesced with the handshake is not lost.
 - Binary and text messages, continuation, ping/pong, and close.
 - Client masking is mandatory and server frames must be unmasked.
 - No extensions (including `permessage-deflate`), redirects, subprotocol
   negotiation, or HTTP authentication.
 - One reader and one writer may run concurrently; writes are serialized
-  internally, and a pong from the reader shares that lock.
+  internally, and a pong from the reader shares that lock. Close state is
+  checked under that lock, so no data or pong is sent after a close, and the
+  adapter waits for in-flight operations before releasing memory.
 
 The root package wraps this API in `src/transport/ws_{client,server,dialer}.zig`
 and composes it with TCP/TLS dialers.

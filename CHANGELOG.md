@@ -5,6 +5,21 @@ and behavior may change between minor releases.
 
 ## Unreleased
 
+### Security
+
+- TLS client certificate paths now require issuer `basicConstraints CA:TRUE`
+  and `keyUsage keyCertSign`; a CA:FALSE intermediate is rejected. Host-name
+  verification is independent of chain verification. Post-handshake plaintext
+  alerts are rejected, and missing `close_notify` is a truncation error by
+  default. ALPN extension length arithmetic is bounded.
+- HTTP/2 accepts client `ENABLE_PUSH`, treats `END_STREAM` as a half-close,
+  rejects HEADERS for other streams, reports RST/truncating GOAWAY as resets,
+  limits CONTINUATION frames, and sizes the HPACK dynamic table by bytes.
+- WebSocket preserves frames coalesced with the opening handshake and checks
+  close state under the write lock.
+- Stream adapters track in-flight operations so `close` unblocks I/O and waits
+  before freeing connection state.
+
 ### Added
 
 - TLS ALPN negotiation on both sides (ADR-0012). The TLS client is now the

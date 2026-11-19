@@ -7,6 +7,7 @@ const hpack = @import("hpack.zig");
 pub const Error = error{
     Canceled,
     Closed,
+    ConnectionReset,
     HandshakeFailed,
     OutOfMemory,
     ProtocolViolation,
@@ -17,6 +18,7 @@ pub const Header = hpack.Header;
 
 pub const our_initial_window = 1024 * 1024;
 pub const max_header_block = 64 * 1024;
+pub const max_continuations = 16;
 
 const preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
@@ -80,7 +82,9 @@ pub const Connection = struct {
     pending: [frame.max_frame_size]u8 = undefined,
     pending_len: usize = 0,
     pending_offset: usize = 0,
-    remote_closed: std.atomic.Value(bool) = .init(false),
+    remote_end_stream: std.atomic.Value(bool) = .init(false),
+    stream_aborted: std.atomic.Value(bool) = .init(false),
+    canceled: std.atomic.Value(bool) = .init(false),
     local_closed: bool = false,
 
     pub fn stream(self: *Connection) ?Stream {
@@ -96,6 +100,11 @@ pub const Connection = struct {
         _ = self;
     }
 
+    pub fn cancel(self: *Connection) void {
+        self.canceled.store(true, .release);
+        self.window_event.set(self.io);
+    }
+
     fn readStream(
         self: *Connection,
         stream_id: u32,
@@ -108,12 +117,15 @@ pub const Connection = struct {
             return self.copyPending(buffers);
         }
 
-        while (!self.remote_closed.load(.acquire)) {
+        while (!self.remote_end_stream.load(.acquire)) {
+            if (self.canceled.load(.acquire)) return error.Canceled;
+            if (self.stream_aborted.load(.acquire)) return error.ConnectionReset;
             try self.processFrame();
             if (self.pending_offset < self.pending_len) {
                 return self.copyPending(buffers);
             }
         }
+        if (self.stream_aborted.load(.acquire)) return error.ConnectionReset;
         return 0;
     }
 
@@ -123,6 +135,8 @@ pub const Connection = struct {
         buffers: []const []const u8,
     ) Error!usize {
         if (stream_id != self.stream_id) return error.ProtocolViolation;
+        if (self.canceled.load(.acquire)) return error.Canceled;
+        if (self.local_closed) return error.Closed;
         var total: usize = 0;
         for (buffers) |buffer| {
             try self.writeData(buffer);
@@ -132,9 +146,9 @@ pub const Connection = struct {
     }
 
     fn closeStream(self: *Connection, stream_id: u32) Error!void {
-        if (stream_id != self.stream_id or self.local_closed) return;
         self.write_mutex.lock(self.io) catch return error.Canceled;
         defer self.write_mutex.unlock(self.io);
+        if (stream_id != self.stream_id or self.local_closed) return;
         try self.sendFrameLocked(frame.type_data, frame.flag_end_stream, stream_id, &.{});
         self.local_closed = true;
         self.output.flush() catch return error.Unexpected;
@@ -172,22 +186,34 @@ pub const Connection = struct {
         switch (parsed.frame_type) {
             frame.type_data => try self.processData(parsed),
             frame.type_headers => {
+                if (parsed.stream_id != self.stream_id) {
+                    return error.ProtocolViolation;
+                }
                 const decoded = try self.readHeaderBlock(parsed);
                 _ = decoded;
                 if (parsed.flags & frame.flag_end_stream != 0) {
-                    self.remote_closed.store(true, .release);
+                    self.remote_end_stream.store(true, .release);
                 }
             },
             frame.type_settings => try self.processSettings(parsed),
             frame.type_ping => try self.processPing(parsed),
             frame.type_window_update => try self.processWindowUpdate(parsed),
             frame.type_goaway => {
-                self.remote_closed.store(true, .release);
+                if (parsed.payload.len < 8) return error.ProtocolViolation;
+                const last_stream_id = std.mem.readInt(
+                    u32,
+                    parsed.payload[0..4],
+                    .big,
+                ) & 0x7fffffff;
+                if (self.stream_id != 0 and last_stream_id < self.stream_id) {
+                    self.stream_aborted.store(true, .release);
+                }
                 self.window_event.set(self.io);
             },
             frame.type_rst_stream => {
+                if (parsed.payload.len != 4) return error.ProtocolViolation;
                 if (parsed.stream_id == self.stream_id) {
-                    self.remote_closed.store(true, .release);
+                    self.stream_aborted.store(true, .release);
                     self.window_event.set(self.io);
                 }
             },
@@ -202,7 +228,7 @@ pub const Connection = struct {
         if (parsed.stream_id == 0 or parsed.stream_id != self.stream_id) {
             return error.ProtocolViolation;
         }
-        if (self.remote_closed.load(.acquire)) return error.ProtocolViolation;
+        if (self.remote_end_stream.load(.acquire)) return error.ProtocolViolation;
         if (self.pending_len != 0) return error.ProtocolViolation;
         if (parsed.payload.len > self.pending.len) {
             return error.ProtocolViolation;
@@ -211,7 +237,7 @@ pub const Connection = struct {
         self.pending_len = parsed.payload.len;
         self.pending_offset = 0;
         if (parsed.flags & frame.flag_end_stream != 0) {
-            self.remote_closed.store(true, .release);
+            self.remote_end_stream.store(true, .release);
         }
         if (parsed.payload.len != 0) {
             try self.sendWindowUpdate(0, parsed.payload.len);
@@ -252,12 +278,14 @@ pub const Connection = struct {
                 }
                 self.peer_max_frame_size = value;
             },
-            setting_max_concurrent_streams => {
-                if (self.role == .client and value == 0) {
-                    return error.HandshakeFailed;
+            setting_max_concurrent_streams => {},
+            setting_enable_push => {
+                // A client may send 0 or 1. A server MUST NOT send this
+                // setting, and values above 1 are invalid.
+                if (self.role == .client or value > 1) {
+                    return error.ProtocolViolation;
                 }
             },
-            setting_enable_push => return error.ProtocolViolation,
             setting_header_table_size,
             setting_max_header_list_size,
             => {},
@@ -310,7 +338,12 @@ pub const Connection = struct {
         try self.appendHeaderFragment(payload[offset .. payload.len - pad_len]);
 
         var end_headers = first.flags & frame.flag_end_headers != 0;
+        var continuations: usize = 0;
         while (!end_headers) {
+            continuations += 1;
+            if (continuations > max_continuations) {
+                return error.ProtocolViolation;
+            }
             const next = frame.read(self.input, &self.frame_buffer) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 error.EndOfStream => return error.ProtocolViolation,
@@ -368,7 +401,8 @@ pub const Connection = struct {
 
     fn waitForWindow(self: *Connection) Error!i64 {
         while (true) {
-            if (self.remote_closed.load(.acquire)) return error.Closed;
+            if (self.canceled.load(.acquire)) return error.Canceled;
+            if (self.stream_aborted.load(.acquire)) return error.Closed;
             const stream_window = self.send_window.load(.acquire);
             const connection_window = self.conn_send_window.load(.acquire);
             const available = @min(stream_window, connection_window);
@@ -571,6 +605,9 @@ pub const Server = struct {
                 frame.type_window_update,
                 => try self.connection.handleFrame(parsed),
                 frame.type_headers => {
+                    if (parsed.stream_id == 0 or parsed.stream_id % 2 == 0) {
+                        return error.ProtocolViolation;
+                    }
                     const decoded = try self.connection.readHeaderBlock(parsed);
                     _ = decoded;
                     self.connection.stream_id = parsed.stream_id;
@@ -579,7 +616,7 @@ pub const Server = struct {
                         .release,
                     );
                     if (parsed.flags & frame.flag_end_stream != 0) {
-                        self.connection.remote_closed.store(true, .release);
+                        self.connection.remote_end_stream.store(true, .release);
                     }
                     return .{
                         .connection = &self.connection,
@@ -589,7 +626,7 @@ pub const Server = struct {
                 frame.type_goaway => return error.Closed,
                 frame.type_rst_stream => return error.Closed,
                 frame.type_priority => {},
-                else => return error.ProtocolViolation,
+                else => {},
             }
         }
     }
@@ -682,4 +719,172 @@ test "client settings include one concurrent stream" {
         .role = .client,
     };
     try std.testing.expectEqual(@as(i64, frame.default_window), connection.send_window.load(.acquire));
+}
+
+test "client ENABLE_PUSH settings are accepted by a server" {
+    const allocator = std.testing.allocator;
+    var storage: std.Io.Writer.Allocating = .init(allocator);
+    defer storage.deinit();
+    var input = std.Io.Reader.fixed(&.{});
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &storage.writer,
+        .role = .server,
+    };
+    try connection.applySetting(setting_enable_push, 0);
+    try connection.applySetting(setting_enable_push, 1);
+    try std.testing.expectError(
+        error.ProtocolViolation,
+        connection.applySetting(setting_enable_push, 2),
+    );
+
+    connection.role = .client;
+    try std.testing.expectError(
+        error.ProtocolViolation,
+        connection.applySetting(setting_enable_push, 0),
+    );
+}
+
+test "curl/nghttp2 settings are accepted by a server" {
+    const allocator = std.testing.allocator;
+    var storage: std.Io.Writer.Allocating = .init(allocator);
+    defer storage.deinit();
+    var input = std.Io.Reader.fixed(&.{});
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &storage.writer,
+        .role = .server,
+    };
+    // curl --http2-prior-knowledge sends these three settings.
+    try connection.applySetting(setting_max_concurrent_streams, 100);
+    try connection.applySetting(setting_initial_window_size, 0x000a0000);
+    try connection.applySetting(setting_enable_push, 0);
+}
+
+test "END_STREAM from the peer does not block the local write side" {
+    const allocator = std.testing.allocator;
+    var storage: std.Io.Writer.Allocating = .init(allocator);
+    defer storage.deinit();
+    var input = std.Io.Reader.fixed(&.{});
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &storage.writer,
+        .role = .server,
+        .stream_id = 1,
+    };
+    connection.remote_end_stream.store(true, .release);
+    _ = try connection.writeStream(1, &.{"x"});
+    try std.testing.expect(storage.written().len > 0);
+    try connection.closeStream(1);
+    try std.testing.expectError(
+        error.Closed,
+        connection.writeStream(1, &.{"y"}),
+    );
+}
+
+test "HEADERS for another stream is rejected" {
+    const allocator = std.testing.allocator;
+    var storage: std.Io.Writer.Allocating = .init(allocator);
+    defer storage.deinit();
+    var input = std.Io.Reader.fixed(&.{});
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &storage.writer,
+        .role = .server,
+        .stream_id = 1,
+    };
+    var payload: [0]u8 = .{};
+    try std.testing.expectError(
+        error.ProtocolViolation,
+        connection.handleFrame(.{
+            .frame_type = frame.type_headers,
+            .flags = frame.flag_end_stream,
+            .stream_id = 3,
+            .payload = &payload,
+        }),
+    );
+}
+
+test "RST_STREAM and truncating GOAWAY abort the stream" {
+    const allocator = std.testing.allocator;
+    var storage: std.Io.Writer.Allocating = .init(allocator);
+    defer storage.deinit();
+    var input = std.Io.Reader.fixed(&.{});
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &storage.writer,
+        .role = .server,
+        .stream_id = 1,
+    };
+
+    var rst = [_]u8{ 0, 0, 0, 0 };
+    var bad_rst = [_]u8{0};
+    try std.testing.expectError(
+        error.ProtocolViolation,
+        connection.handleFrame(.{
+            .frame_type = frame.type_rst_stream,
+            .flags = 0,
+            .stream_id = 1,
+            .payload = &bad_rst,
+        }),
+    );
+    try connection.handleFrame(.{
+        .frame_type = frame.type_rst_stream,
+        .flags = 0,
+        .stream_id = 1,
+        .payload = &rst,
+    });
+    try std.testing.expect(connection.stream_aborted.load(.acquire));
+
+    connection.stream_aborted.store(false, .release);
+    var goaway = [_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 };
+    try connection.handleFrame(.{
+        .frame_type = frame.type_goaway,
+        .flags = 0,
+        .stream_id = 0,
+        .payload = &goaway,
+    });
+    try std.testing.expect(connection.stream_aborted.load(.acquire));
+}
+
+test "server accepts curl settings and responds to a no-body request" {
+    const allocator = std.testing.allocator;
+    var input_buffer: [1024]u8 = undefined;
+    var input_writer = std.Io.Writer.fixed(&input_buffer);
+    input_writer.writeAll(preface) catch return error.TestUnexpectedResult;
+
+    var settings = [_]u8{
+        0x00, 0x02, 0x00, 0x00, 0x00, 0x00, // ENABLE_PUSH=0, as sent by curl
+        0x00, 0x03, 0x00, 0x00, 0x00, 0x64, // MAX_CONCURRENT_STREAMS=100
+    };
+    try frame.write(&input_writer, frame.type_settings, 0, 0, &settings);
+    try frame.write(&input_writer, frame.type_settings, frame.flag_ack, 0, &.{});
+
+    var header_block = [_]u8{0x82}; // indexed :method GET
+    try frame.write(
+        &input_writer,
+        frame.type_headers,
+        frame.flag_end_headers | frame.flag_end_stream,
+        1,
+        &header_block,
+    );
+
+    var input = std.Io.Reader.fixed(input_writer.buffered());
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+
+    var server = try Server.init(std.testing.io, &input, &output.writer);
+    defer server.deinit();
+    const stream = try server.acceptStream();
+    const response = [_]Header{
+        .{ .name = ":status", .value = "200" },
+    };
+    try stream.sendHeaders(&response, false);
+    _ = try stream.write(&.{"ok"});
+    try std.testing.expect(output.written().len > 0);
 }

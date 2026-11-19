@@ -3,6 +3,7 @@
 const std = @import("std");
 const Endpoint = @import("../net/endpoint.zig").Endpoint;
 const Stream = @import("stream.zig").Stream;
+const Guard = @import("lifetime.zig").Guard;
 
 /// Used by protocol tunnels (for example HTTP CONNECT): reads and writes
 /// delegate to `inner`, while `remote` reports the tunnel target.
@@ -12,6 +13,7 @@ pub const WrappedStream = struct {
     local_endpoint: Endpoint,
     remote_endpoint: Endpoint,
     closed: std.atomic.Value(bool) = .init(false),
+    guard: Guard = .{},
 
     pub fn create(
         gpa: std.mem.Allocator,
@@ -35,6 +37,9 @@ pub const WrappedStream = struct {
 
     fn read(ctx: *anyopaque, io: std.Io, buffers: [][]u8) Stream.ReadError!usize {
         const self: *WrappedStream = @ptrCast(@alignCast(ctx));
+        self.guard.enter();
+        defer self.guard.leave(io);
+        if (self.closed.load(.acquire)) return error.Canceled;
         return self.inner.read(io, buffers);
     }
 
@@ -44,6 +49,9 @@ pub const WrappedStream = struct {
         buffers: []const []const u8,
     ) Stream.WriteError!usize {
         const self: *WrappedStream = @ptrCast(@alignCast(ctx));
+        self.guard.enter();
+        defer self.guard.leave(io);
+        if (self.closed.load(.acquire)) return error.Canceled;
         return self.inner.write(io, buffers);
     }
 
@@ -53,6 +61,9 @@ pub const WrappedStream = struct {
         how: Stream.ShutdownHow,
     ) Stream.ShutdownError!void {
         const self: *WrappedStream = @ptrCast(@alignCast(ctx));
+        self.guard.enter();
+        defer self.guard.leave(io);
+        if (self.closed.load(.acquire)) return error.Canceled;
         return self.inner.shutdown(io, how);
     }
 
@@ -60,6 +71,7 @@ pub const WrappedStream = struct {
         const self: *WrappedStream = @ptrCast(@alignCast(ctx));
         if (self.closed.swap(true, .acq_rel)) return;
         self.inner.close(io);
+        self.guard.waitIdle(io);
         self.gpa.destroy(self);
     }
 
