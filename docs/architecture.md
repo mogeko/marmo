@@ -1,9 +1,11 @@
 # Architecture
 
-Status: Phase 1 MVP implemented. SS2022 TCP/UDP interop was verified locally
-against shadowsocks-rust 1.25.0 in both directions; the interop harness is not
-part of the repository. Phase 2 is next; protocol-specific gaps are tracked in
-`docs/protocols/`.
+Status: Phase 1 MVP implemented; Phase 2 started with outbound selectors and
+active TCP health probes, followed by VLESS outbound/inbound over TLS (TCP and
+UDP) and a TLS 1.3 server package. SS2022 TCP/UDP interop was verified locally against
+shadowsocks-rust 1.25.0 in both directions; the interop harness is not part of
+the repository. Protocol and Phase 2 gaps are tracked in `docs/protocols/` and
+§11.
 
 ## 1. Purpose
 
@@ -54,8 +56,8 @@ handling, and configuration storage.
 - **No own event loop**: the library takes `io: std.Io` and never creates
   threads, an event loop, or a global allocator. The embedder owns the runtime.
 - **std gaps that must be filled in-tree** (ADR-0007):
-  - TLS: client only (`std.crypto.tls.Client`); the TLS 1.3 server is in-tree
-    work in Phase 2.
+  - TLS: client from `std.crypto.tls.Client`; the TLS 1.3 server is in-tree in
+    `packages/tls13` (X25519, AES-128-GCM/SHA-256, ECDSA P-256).
   - QUIC, HTTP/2, and a WebSocket client: none; implemented in-tree.
   - DNS: system resolver via `IpAddress.resolve`, no DoH/DoT client.
 - **No external transport backends**: no C toolchain and no optional backend
@@ -379,6 +381,11 @@ Health checks are explicit per group: `tcp_connect` to a host:port or
 (`alpha = 0.2`) and a failure counter with exponential backoff. Checks are off
 by default; no traffic is generated unless configured.
 
+Implementation status: `manual`, `round_robin`, `random`, `fallback`, and
+`least_latency` are implemented. Latency comes from passive connect samples and,
+when configured, active `tcp_connect` probes with a timeout. Probes use a fixed
+interval; `http_head`, jitter, and exponential backoff are pending.
+
 Per-connection selection is independent. UDP sessions keep the selected node
 for the session lifetime. Selection state is shared across tasks; use atomics
 for counters and a mutex only around node-set replacement (config reload).
@@ -392,7 +399,7 @@ for counters and a mutex only around node-set replacement (config reload).
 | HTTP proxy | TCP | yes | no | yes | yes | 1 | CONNECT + forward implemented |
 | Shadowsocks | TCP/UDP | yes | yes | yes | yes | 1 | 2022 TCP + UDP implemented |
 | Trojan | TLS | yes | yes | yes | yes | 2 | inbound needs in-tree TLS server |
-| VLESS | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | XTLS Vision later; gRPC in phase 3 |
+| VLESS | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | TCP/UDP inbound/outbound over TLS done; WS/H2/XUDP pending |
 | VMess | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | legacy CFB not planned; gRPC in phase 3 |
 | TUIC | QUIC | yes | yes | yes | yes | 3 | in-tree QUIC |
 | Hysteria2 | QUIC + TLS | yes | yes | yes | yes | 3 | Salamander, Brutal CC |
@@ -405,9 +412,11 @@ Phasing:
   ASSOCIATE), HTTP/1.1 proxy (CONNECT + forward), HTTP CONNECT outbound, direct
   outbound, Shadowsocks 2022, domain/IP-CIDR/port rules, manual group, JSON
   config, counters.
-- **Phase 2**: VLESS/Trojan/VMess, in-tree TLS 1.3 server, WS/H2 transports,
+- **Phase 2**: VLESS/Trojan/VMess, in-tree TLS 1.3 server and WS/H2 transports,
   sniffing, compiled rule sets, process rules, groups and health checks, DNS
-  cache/DoH.
+  cache/DoH. Implemented: selectors, TCP health probes, VLESS outbound and
+  inbound over TLS (TCP and UDP), and the TLS 1.3 server package. `http_head`,
+  jitter, backoff, and the remaining items are next.
 - **Phase 3**: in-tree QUIC, TUIC, Hysteria2, gRPC transport.
 - **Phase 4**: optional TUN/transparent proxying, Windows, transport hardening
   and external audit.
@@ -417,9 +426,18 @@ WireGuard is explicitly out of scope (ADR-0002).
 
 Implementation status: Phase 1 MVP is implemented. See
 [`docs/protocols/shadowsocks.md`](protocols/shadowsocks.md) for the remaining
-SIP022 hardening and interoperability gaps.
+SIP022 hardening and interoperability gaps, and
+[`docs/protocols/vless.md`](protocols/vless.md) for the VLESS outbound and TLS
+client scope.
 
 ## 13. Dependencies and in-tree transports
+
+First-party packages live under `packages/` and are consumed by path
+dependencies (ADR-0010). `packages/tls13` owns TLS handshake, record, and CA
+policy; the root package only adapts `Stream` to its `Reader`/`Writer` API.
+Root `zig build test` aggregates package tests, `zig build check` adds the
+formatting check, and `zig build examples` builds the standalone examples.
+Package rules are in `packages/README.md`.
 
 There is exactly one build configuration: std-only, no C toolchain, no optional
 backend selected by a flag (ADR-0007). A transport that `std` lacks is
@@ -427,9 +445,15 @@ implemented in this repository, but in-tree code is always second choice:
 re-check every transport on each Zig upgrade and migrate to `std` as soon as it
 provides the same primitive, deleting the in-tree version.
 
-- **TLS client**: `std.crypto.tls.Client` (Phase 1/2).
-- **TLS 1.3 server**: in-tree on `std.crypto`, Phase 2; TLS 1.3 only, ALPN/SNI,
-  caller-provided certificate and key, no renegotiation or weak ciphers.
+- **TLS client**: `std.crypto.tls.Client` inside `packages/tls13`, adapted to
+  the public `Stream` interface in `src/transport/tls_client.zig` and composed
+  as a transport dialer in `src/transport/tls_dialer.zig`.
+- **TLS 1.3 server**: in-tree in `packages/tls13` on `std.crypto`; X25519,
+  AES-128-GCM/SHA-256, ECDSA P-256 certificates, caller-provided chain and key.
+  No client auth, PSK, tickets, ALPN selection, KeyUpdate, or 0-RTT.
+  `src/transport/tls_server.zig` is the thin `Stream` adapter. `Instance`
+  wraps accepted TCP streams for the VLESS inbound; credentials are PEM/DER
+  files loaded by `src/transport/tls_credentials.zig`.
 - **WebSocket / HTTP/2 / gRPC**: in-tree, Phase 2/3; HTTP/2 is limited to
   transport needs (framing, HPACK, SETTINGS, GOAWAY).
 - **QUIC**: in-tree, Phase 3; QUIC v1, stream multiplexing, datagrams, and
@@ -481,9 +505,7 @@ their own signal handlers. `Instance` is the only composition root.
 ## 15. Repository layout (current and planned)
 
 ```
-.opencode/opencode.json  OpenCode config; loads the Zig style guide
-.opencode/instructions/zig-style.md  enforceable Zig style
-.opencode/skills/        OpenCode skills, including the ADR workflow
+.agents/skills/          OpenCode skills, including the ADR workflow
 build.zig
 build.zig.zon
 src/root.zig              public API re-exports
@@ -559,3 +581,4 @@ Module boundaries are enforced by review, not by the compiler; do not import
 | [0007](decisions/0007-tls-quic-dependencies.md) | TLS, QUIC, crypto dependencies (std-first) | Accepted |
 | [0008](decisions/0008-api-and-config.md) | Public API, config, errors | Accepted |
 | [0009](decisions/0009-licensing-and-interop.md) | Licensing and interop hygiene | Accepted |
+| [0010](decisions/0010-tls-module-package.md) | TLS module as a replaceable package | Accepted |

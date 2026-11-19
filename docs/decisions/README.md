@@ -7,7 +7,7 @@ date.
 
 ## Process
 
-1. Copy `0000-template.md` (or run `.opencode/skills/adr/scripts/new-adr.sh <slug>`).
+1. Copy `0000-template.md` (or run `.agents/skills/adr/scripts/new-adr.sh <slug>`).
 2. Set `Status: Proposed`, name the options, and state a recommendation.
 3. Add a row to the index below and link the ADR from
    [`docs/architecture.md`](../architecture.md) when it affects the design.
@@ -30,10 +30,11 @@ Statuses: `Proposed` → `Accepted` | `Rejected` | `Superseded by ADR-NNNN`.
 | [0007](0007-tls-quic-dependencies.md) | TLS, QUIC, crypto dependencies | Accepted | std-first; in-tree transports; no optional backends |
 | [0008](0008-api-and-config.md) | Public API, config, errors | Accepted | lifecycle facade; strict JSON; typed errors |
 | [0009](0009-licensing-and-interop.md) | Licensing and interop hygiene | Accepted | LGPL-2.1; clean-room protocol work |
+| [0010](0010-tls-module-package.md) | TLS module as a replaceable package | Accepted | `packages/tls13`; std-only API; path dependency |
 
 ## Accepted decisions
 
-All ADRs were accepted on 2026-11-18.
+All ADRs were accepted on 2026-11-18 (ADR-0010 on 2026-11-19).
 
 - **ADR-0002**: Snell deferred, WireGuard abandoned; all other protocols and
   phases accepted.

@@ -39,7 +39,7 @@ Do not use an ADR for ordinary refactors, bug fixes, or formatting.
 2. Create the file (from the repo root):
 
    ```sh
-   .opencode/skills/adr/scripts/new-adr.sh <kebab-slug> "Short title"
+   .agents/skills/adr/scripts/new-adr.sh <kebab-slug> "Short title"
    ```
 
    It picks the next `NNNN` and fills the date. Or copy the template manually.

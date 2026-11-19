@@ -10,8 +10,13 @@ const Endpoint = @import("net/endpoint.zig").Endpoint;
 const Direct = @import("outbound/direct.zig").Direct;
 const HttpConnect = @import("outbound/http_connect.zig").HttpConnect;
 const Shadowsocks = @import("outbound/shadowsocks.zig").Shadowsocks;
+const Vless = @import("outbound/vless.zig").Vless;
+const selector_module = @import("outbound/selector.zig");
+const Selector = selector_module.Selector;
+const SelectorHealth = selector_module.Health;
 const Outbound = @import("outbound/outbound.zig").Outbound;
 const s2022 = @import("protocol/shadowsocks2022.zig");
+const vless_protocol = @import("protocol/vless.zig");
 const ss_inbound = @import("inbound/shadowsocks.zig");
 const ss_udp = @import("inbound/shadowsocks_udp.zig");
 const Metadata = @import("routing/metadata.zig").Metadata;
@@ -19,11 +24,16 @@ const RuleSet = @import("routing/rules.zig").RuleSet;
 const Action = @import("routing/router.zig").Action;
 const Router = @import("routing/router.zig").Router;
 const Dialer = @import("transport/dialer.zig").Dialer;
+const TlsDialer = @import("transport/tls_dialer.zig").TlsDialer;
+const tls_server = @import("transport/tls_server.zig");
+const TlsServerStream = tls_server.TlsServerStream;
+const tls_credentials = @import("transport/tls_credentials.zig");
 const PacketConn = @import("transport/packet.zig").PacketConn;
 const Stream = @import("transport/stream.zig").Stream;
 const TcpStream = @import("transport/tcp.zig").TcpStream;
 const socks5 = @import("inbound/socks5.zig");
 const http_inbound = @import("inbound/http.zig");
+const vless_inbound = @import("inbound/vless.zig");
 
 pub const InitError = error{ InvalidConfig, OutOfMemory };
 pub const StartError = error{
@@ -50,6 +60,8 @@ const BoundInbound = struct {
     server: ?std.Io.net.Server = null,
     shadowsocks: ?*ss_inbound.Context = null,
     udp_server: ?*ss_udp.Server = null,
+    tls: ?tls_server.Options = null,
+    vless_uuid: ?vless_protocol.Uuid = null,
 };
 
 const ConnContext = struct {
@@ -63,6 +75,7 @@ pub const Instance = struct {
     io: std.Io,
     arena: std.heap.ArenaAllocator,
     outbounds: []Outbound,
+    selectors: []*Selector,
     inbounds: []BoundInbound,
     rules: RuleSet,
     metrics: Metrics,
@@ -100,20 +113,26 @@ pub const Instance = struct {
         const direct = try allocator.create(Direct);
         direct.* = Direct.init(gpa);
 
-        const outbounds = try compileOutbounds(
+        const compiled = try compileOutbounds(
             allocator,
             gpa,
             direct,
             config.outbounds,
             diagnostic,
         );
-        const inbounds = try compileInbounds(allocator, config.inbounds, diagnostic);
+        const inbounds = try compileInbounds(
+            allocator,
+            io,
+            config.inbounds,
+            diagnostic,
+        );
 
         return .{
             .gpa = gpa,
             .io = io,
             .arena = arena,
-            .outbounds = outbounds,
+            .outbounds = compiled.outbounds,
+            .selectors = compiled.selectors,
             .inbounds = inbounds,
             .rules = rules,
             .metrics = .{},
@@ -174,6 +193,17 @@ pub const Instance = struct {
                 };
             }
         }
+        for (self.selectors) |selector| {
+            if (!selector.hasHealth()) continue;
+            self.spawnTask(healthLoopWrapper, .{ self.io, selector }) catch |err| {
+                self.stopping = true;
+                self.group.cancel(self.io);
+                self.closeServers();
+                self.shutdownUdpServers();
+                self.running = false;
+                return err;
+            };
+        }
     }
 
     pub fn wait(self: *Instance) WaitError!void {
@@ -205,6 +235,12 @@ pub const Instance = struct {
 
         for (self.inbounds) |*inbound| {
             if (inbound.shadowsocks) |context| context.deinit();
+            if (inbound.tls) |*tls| {
+                std.crypto.secureZero(u8, std.mem.asBytes(&tls.private_key));
+            }
+            if (inbound.vless_uuid) |*uuid| {
+                std.crypto.secureZero(u8, std.mem.asBytes(uuid));
+            }
         }
         for (self.outbounds) |*outbound| {
             if (outbound.cleanup) |cleanup| cleanup(outbound.cleanup_ctx.?);
@@ -342,6 +378,10 @@ fn acceptLoopWrapper(self: *Instance, inbound: *BoundInbound) std.Io.Cancelable!
     self.acceptLoop(inbound);
 }
 
+fn healthLoopWrapper(io: std.Io, selector: *Selector) std.Io.Cancelable!void {
+    try selector.runHealth(io);
+}
+
 fn connectionWrapper(context: *ConnContext) std.Io.Cancelable!void {
     handleConnection(context) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
@@ -352,8 +392,24 @@ fn connectionWrapper(context: *ConnContext) std.Io.Cancelable!void {
 fn handleConnection(context: *ConnContext) !void {
     const self = context.instance;
     defer self.gpa.destroy(context);
-    defer context.stream.close(self.io);
     defer self.metrics.connectionClosed();
+
+    var stream = context.stream;
+    if (context.inbound.tls) |tls_options| {
+        var options = tls_options;
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&options.private_key));
+        const tls = TlsServerStream.create(
+            self.io,
+            self.gpa,
+            stream,
+            options,
+        ) catch |err| {
+            stream.close(self.io);
+            return err;
+        };
+        stream = tls.stream();
+    }
+    defer stream.close(self.io);
 
     var arena = std.heap.ArenaAllocator.init(self.gpa);
     defer arena.deinit();
@@ -362,14 +418,14 @@ fn handleConnection(context: *ConnContext) !void {
     switch (context.inbound.protocol) {
         .socks5 => try socks5.handle(
             self.io,
-            context.stream,
+            stream,
             context.inbound.tag,
             dispatch,
             arena.allocator(),
         ),
         .http => try http_inbound.handle(
             self.io,
-            context.stream,
+            stream,
             context.inbound.tag,
             dispatch,
             arena.allocator(),
@@ -377,13 +433,38 @@ fn handleConnection(context: *ConnContext) !void {
         .shadowsocks => try ss_inbound.handle(
             self.io,
             self.gpa,
-            context.stream,
+            stream,
             context.inbound.tag,
             dispatch,
             context.inbound.shadowsocks orelse return error.InvalidConfig,
         ),
+        .vless => {
+            var vless_context: vless_inbound.Context = .{
+                .uuid = context.inbound.vless_uuid orelse
+                    return error.InvalidConfig,
+            };
+            defer std.crypto.secureZero(u8, std.mem.asBytes(&vless_context));
+            try vless_inbound.handle(
+                self.io,
+                stream,
+                context.inbound.tag,
+                dispatch,
+                arena.allocator(),
+                &vless_context,
+            );
+        },
     }
 }
+
+const CompiledOutbounds = struct {
+    outbounds: []Outbound,
+    selectors: []*Selector,
+};
+
+const CompiledSelector = struct {
+    outbound: Outbound,
+    selector: *Selector,
+};
 
 fn compileOutbounds(
     allocator: std.mem.Allocator,
@@ -391,88 +472,227 @@ fn compileOutbounds(
     direct: *Direct,
     configs: []const Config.Outbound,
     diagnostic: *Diagnostic,
-) InitError![]Outbound {
+) InitError!CompiledOutbounds {
     var has_direct = false;
+    var selector_count: usize = 0;
     for (configs) |outbound| {
         if (std.mem.eql(u8, outbound.tag, "direct")) has_direct = true;
+        if (outbound.protocol == .selector) selector_count += 1;
     }
 
     const count = configs.len + @intFromBool(!has_direct);
     const outbounds = try allocator.alloc(Outbound, count);
-    var index: usize = 0;
-
-    for (configs) |config| {
-        outbounds[index] = switch (config.protocol) {
-            .direct => .{
-                .tag = config.tag,
-                .dialer = direct.dialer(),
-                .supports_udp = true,
-            },
-            .http => blk: {
-                const server_text = config.server orelse return error.InvalidConfig;
-                const server = Endpoint.parse(server_text) catch return error.InvalidConfig;
-                const http = try allocator.create(HttpConnect);
-                http.* = .{ .gpa = gpa, .server = server, .dialer = direct.dialer() };
-                break :blk .{
-                    .tag = config.tag,
-                    .dialer = http.asDialer(),
-                    .supports_udp = false,
-                };
-            },
-            .shadowsocks => blk: {
-                const server_text = config.server orelse return error.InvalidConfig;
-                const server = Endpoint.parse(server_text) catch return error.InvalidConfig;
-                const method_text = config.method orelse return error.InvalidConfig;
-                const method = s2022.Method.parse(method_text) orelse {
-                    diagnostic.set(
-                        "outbounds: unsupported shadowsocks method '{s}'",
-                        .{method_text},
-                    );
-                    return error.InvalidConfig;
-                };
-                const password = config.password orelse return error.InvalidConfig;
-                var key = s2022.Key.parse(method, password) catch {
-                    diagnostic.set("outbounds: invalid shadowsocks key", .{});
-                    return error.InvalidConfig;
-                };
-
-                const shadowsocks = allocator.create(Shadowsocks) catch {
-                    key.deinit();
-                    return error.OutOfMemory;
-                };
-                shadowsocks.* = .{
-                    .gpa = gpa,
-                    .server = server,
-                    .method = method,
-                    .key = key,
-                    .direct_dialer = direct.dialer(),
-                };
-                key.deinit();
-
-                break :blk .{
-                    .tag = config.tag,
-                    .dialer = shadowsocks.asDialer(),
-                    .supports_udp = true,
-                    .cleanup = cleanupShadowsocks,
-                    .cleanup_ctx = shadowsocks,
-                };
-            },
-        };
-        index += 1;
-    }
+    const selectors = try allocator.alloc(*Selector, selector_count);
+    var filled: usize = 0;
+    var selector_filled: usize = 0;
 
     if (!has_direct) {
-        outbounds[index] = .{
+        outbounds[filled] = .{
             .tag = "direct",
             .dialer = direct.dialer(),
             .supports_udp = true,
         };
+        filled += 1;
     }
-    return outbounds;
+
+    for (configs) |config| {
+        if (config.protocol == .selector) continue;
+        outbounds[filled] = try compileNonSelector(
+            allocator,
+            gpa,
+            direct,
+            config,
+            diagnostic,
+        );
+        filled += 1;
+    }
+
+    for (configs) |config| {
+        if (config.protocol != .selector) continue;
+        const compiled = try compileSelector(
+            allocator,
+            config,
+            outbounds[0..filled],
+            diagnostic,
+        );
+        outbounds[filled] = compiled.outbound;
+        selectors[selector_filled] = compiled.selector;
+        filled += 1;
+        selector_filled += 1;
+    }
+
+    std.debug.assert(filled == count);
+    std.debug.assert(selector_filled == selector_count);
+    return .{ .outbounds = outbounds, .selectors = selectors };
+}
+
+fn compileNonSelector(
+    allocator: std.mem.Allocator,
+    gpa: std.mem.Allocator,
+    direct: *Direct,
+    config: Config.Outbound,
+    diagnostic: *Diagnostic,
+) InitError!Outbound {
+    return switch (config.protocol) {
+        .direct => .{
+            .tag = config.tag,
+            .dialer = direct.dialer(),
+            .supports_udp = true,
+        },
+        .http => blk: {
+            const server_text = config.server orelse return error.InvalidConfig;
+            const server = Endpoint.parse(server_text) catch return error.InvalidConfig;
+            const http = try allocator.create(HttpConnect);
+            http.* = .{ .gpa = gpa, .server = server, .dialer = direct.dialer() };
+            break :blk .{
+                .tag = config.tag,
+                .dialer = http.asDialer(),
+                .supports_udp = false,
+            };
+        },
+        .shadowsocks => blk: {
+            const server_text = config.server orelse return error.InvalidConfig;
+            const server = Endpoint.parse(server_text) catch return error.InvalidConfig;
+            const method_text = config.method orelse return error.InvalidConfig;
+            const method = s2022.Method.parse(method_text) orelse {
+                diagnostic.set(
+                    "outbounds: unsupported shadowsocks method '{s}'",
+                    .{method_text},
+                );
+                return error.InvalidConfig;
+            };
+            const password = config.password orelse return error.InvalidConfig;
+            var key = s2022.Key.parse(method, password) catch {
+                diagnostic.set("outbounds: invalid shadowsocks key", .{});
+                return error.InvalidConfig;
+            };
+
+            const shadowsocks = allocator.create(Shadowsocks) catch {
+                key.deinit();
+                return error.OutOfMemory;
+            };
+            shadowsocks.* = .{
+                .gpa = gpa,
+                .server = server,
+                .method = method,
+                .key = key,
+                .direct_dialer = direct.dialer(),
+            };
+            key.deinit();
+
+            break :blk .{
+                .tag = config.tag,
+                .dialer = shadowsocks.asDialer(),
+                .supports_udp = true,
+                .cleanup = cleanupShadowsocks,
+                .cleanup_ctx = shadowsocks,
+            };
+        },
+        .vless => try compileVless(allocator, gpa, direct, config),
+        .selector => unreachable,
+    };
+}
+
+fn compileVless(
+    allocator: std.mem.Allocator,
+    gpa: std.mem.Allocator,
+    direct: *Direct,
+    config: Config.Outbound,
+) InitError!Outbound {
+    const server_text = config.server orelse return error.InvalidConfig;
+    const server = Endpoint.parse(server_text) catch return error.InvalidConfig;
+    const uuid_text = config.uuid orelse return error.InvalidConfig;
+    const uuid = vless_protocol.parseUuid(uuid_text) catch
+        return error.InvalidConfig;
+
+    var transport = direct.dialer();
+    var transport_cleanup: ?*const fn (ctx: *anyopaque) void = null;
+    var transport_cleanup_ctx: ?*anyopaque = null;
+    if (config.tls) |tls| {
+        const server_name = tls.sni orelse switch (server) {
+            .domain => |domain| domain.name,
+            .ip => null,
+        };
+        const tls_dialer = try allocator.create(TlsDialer);
+        tls_dialer.* = TlsDialer.init(
+            gpa,
+            direct.dialer(),
+            server_name,
+            tls.insecure,
+        );
+        transport = tls_dialer.asDialer();
+        transport_cleanup = cleanupTlsDialer;
+        transport_cleanup_ctx = tls_dialer;
+    }
+
+    const vless = try allocator.create(Vless);
+    vless.* = .{
+        .gpa = gpa,
+        .server = server,
+        .uuid = uuid,
+        .transport = transport,
+        .transport_cleanup = transport_cleanup,
+        .transport_cleanup_ctx = transport_cleanup_ctx,
+    };
+    return .{
+        .tag = config.tag,
+        .dialer = vless.asDialer(),
+        .supports_udp = true,
+        .cleanup = cleanupVless,
+        .cleanup_ctx = vless,
+    };
+}
+
+fn compileSelector(
+    allocator: std.mem.Allocator,
+    config: Config.Outbound,
+    pool: []Outbound,
+    diagnostic: *Diagnostic,
+) InitError!CompiledSelector {
+    const node_tags = config.nodes orelse return error.InvalidConfig;
+    const strategy = config.strategy orelse return error.InvalidConfig;
+
+    var health: ?SelectorHealth = null;
+    if (config.health_check) |health_config| {
+        const target = Endpoint.parse(health_config.target) catch
+            return error.InvalidConfig;
+        health = .{
+            .target = target,
+            .interval_ns = @as(u64, health_config.interval_s) * std.time.ns_per_s,
+            .timeout_ns = @as(u64, health_config.timeout_s) * std.time.ns_per_s,
+        };
+    }
+
+    const nodes = try allocator.alloc(*const Outbound, node_tags.len);
+    for (node_tags, 0..) |tag, index| {
+        var found: ?*const Outbound = null;
+        for (pool) |*candidate| {
+            if (!std.mem.eql(u8, candidate.tag, tag)) continue;
+            found = candidate;
+            break;
+        }
+        if (found == null) {
+            diagnostic.set("outbounds: selector node '{s}' not found", .{tag});
+            return error.InvalidConfig;
+        }
+        nodes[index] = found.?;
+    }
+
+    const selector = Selector.init(allocator, nodes, strategy, health) catch
+        return error.OutOfMemory;
+    return .{
+        .outbound = .{
+            .tag = config.tag,
+            .dialer = selector.asDialer(),
+            .supports_udp = selector.supportsUdp(),
+        },
+        .selector = selector,
+    };
 }
 
 fn compileInbounds(
     allocator: std.mem.Allocator,
+    io: std.Io,
     configs: []const Config.Inbound,
     diagnostic: *Diagnostic,
 ) InitError![]BoundInbound {
@@ -509,6 +729,27 @@ fn compileInbounds(
                 key.deinit();
                 inbounds[index].shadowsocks = context;
             },
+            .vless => {
+                const uuid_text = config.uuid orelse return error.InvalidConfig;
+                inbounds[index].vless_uuid = vless_protocol.parseUuid(uuid_text) catch
+                    return error.InvalidConfig;
+                const tls = config.tls orelse return error.InvalidConfig;
+                inbounds[index].tls = tls_credentials.loadOptions(
+                    allocator,
+                    io,
+                    tls.certificate,
+                    tls.private_key,
+                ) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.InvalidCredentials => {
+                        diagnostic.set(
+                            "inbounds[{d}].tls: invalid certificate or private key",
+                            .{index},
+                        );
+                        return error.InvalidConfig;
+                    },
+                };
+            },
             .http, .socks5 => {},
         }
     }
@@ -517,6 +758,16 @@ fn compileInbounds(
 
 fn cleanupShadowsocks(ctx: *anyopaque) void {
     const self: *Shadowsocks = @ptrCast(@alignCast(ctx));
+    self.deinit();
+}
+
+fn cleanupVless(ctx: *anyopaque) void {
+    const self: *Vless = @ptrCast(@alignCast(ctx));
+    self.deinit();
+}
+
+fn cleanupTlsDialer(ctx: *anyopaque) void {
+    const self: *TlsDialer = @ptrCast(@alignCast(ctx));
     self.deinit();
 }
 

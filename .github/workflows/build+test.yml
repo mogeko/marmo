@@ -12,9 +12,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
-      - run: zig fmt --check build.zig src tests
-      - run: zig build --summary all
-      - run: zig build test --summary all
+      - run: zig build check --summary all
+      - run: zig build test -Doptimize=ReleaseSafe --summary all
 
   examples:
     runs-on: ubuntu-latest
@@ -22,17 +21,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
-      - name: Format examples
-        shell: bash
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          for build in examples/*/build.zig; do
-            dir="${build%/build.zig}"
-            echo "::group::Formatting ${dir}"
-            zig fmt --check "${dir}"
-            echo "::endgroup::"
-          done
       - name: Build examples
         shell: bash
         run: |

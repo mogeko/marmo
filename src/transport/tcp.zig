@@ -3,6 +3,7 @@
 const std = @import("std");
 const Endpoint = @import("../net/endpoint.zig").Endpoint;
 const Stream = @import("stream.zig").Stream;
+const writeSlices = @import("write.zig").writeSlices;
 
 pub const TcpStream = struct {
     gpa: std.mem.Allocator,
@@ -47,7 +48,7 @@ pub const TcpStream = struct {
     ) Stream.WriteError!usize {
         const self: *TcpStream = @ptrCast(@alignCast(ctx));
         var writer = std.Io.net.Stream.Writer.init(self.inner, io, &.{});
-        writer.interface.writeVecAll(@constCast(buffers)) catch {
+        writeSlices(&writer.interface, buffers) catch {
             return writeError(writer.err);
         };
         writer.interface.flush() catch {
