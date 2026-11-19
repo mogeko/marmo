@@ -49,19 +49,17 @@ and behavior may change between minor releases.
 - The in-tree TLS 1.3 server supports X25519, AES-128-GCM/SHA-256, and ECDSA
   P-256 certificates. It has no client authentication, PSK, session tickets,
   ALPN selection, 0-RTT, or KeyUpdate. TLS handshakes are bounded by the root
-  adapters' `handshake_timeout_s`; the package API itself is synchronous. It is
-  not audited for production use.
+  adapters' `handshake_timeout_s`; the package API itself is synchronous. It
+  has not been externally audited; see `docs/security/audit.md`.
 - The std-backed TLS client can negotiate TLS 1.2. A server-initiated TLS 1.3
   KeyUpdate is not synchronized with a concurrent write; this is documented and
   will be removed with the in-tree record layer.
-- TLS and VLESS decoders do not yet have committed fuzz targets or reference
-  transcript fixtures.
 - The library remains not production-ready; API and configuration may change.
 
 ### Tests
 
-- 56 root tests (34 unit, 4 public API, 18 integration) and 4 TLS package
-  tests, passing in Debug and ReleaseSafe.
+- 77 tests (38 root unit, 4 public API, 18 integration, 10 fuzz, 7 TLS
+  package), passing in Debug and ReleaseSafe.
 - Examples build with `zig build examples`.
 - Reference interop was checked locally against Xray-core 26.11.9 for VLESS TCP
   in both directions and XUDP UDP in both directions. The harness is not

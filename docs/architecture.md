@@ -538,9 +538,11 @@ Module boundaries are enforced by review, not by the compiler; do not import
 - Integration tests bind loopback listeners on port 0 and exercise real
   sockets through `Io.Threaded`; run the same suite with `Io.Evented` where the
   architecture supports fibers.
-- Protocol tests use captured byte fixtures: handshake transcripts and packet
-  captures in `tests/fixtures/<protocol>/`. No live third-party servers in CI.
-- Every decoder and handshake state machine has a bounded fuzz target:
+- Protocol tests use synthetic byte fixtures built from the public protocol
+  specifications in `tests/fixtures/<protocol>/`. No live third-party servers
+  in CI.
+- Each inbound decoder and the TLS handshake/record parsers has a bounded fuzz
+  target; stateful handlers rely on unit and integration tests:
   `zig build fuzz` runs fixed seeds and iteration counts by default
   (`-Dfuzz-seed`, `-Dfuzz-iterations`). Malformed input must return a typed
   error, never panic. The deterministic corpus smoke runs in `zig build test`;
