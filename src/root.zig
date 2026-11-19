@@ -50,6 +50,20 @@ pub const AcceptError = Inbound.AcceptError;
 
 pub const limits = @import("core/limits.zig");
 
+/// Internal modules used by the in-tree fuzz harness. Not part of the stable
+/// public API; names and signatures may change with any release.
+pub const internal = struct {
+    pub const config = @import("config/config.zig");
+    pub const diagnostic = @import("core/diagnostic.zig");
+    pub const dispatch = @import("core/dispatch.zig");
+    pub const http = @import("inbound/http.zig");
+    pub const shadowsocks2022 = @import("protocol/shadowsocks2022.zig");
+    pub const socks5 = @import("inbound/socks5.zig");
+    pub const tls_credentials = @import("transport/tls_credentials.zig");
+    pub const vless = @import("protocol/vless.zig");
+    pub const xudp = @import("protocol/xudp.zig");
+};
+
 test {
     _ = @import("protocol/xudp.zig");
     _ = @import("transport/write.zig");

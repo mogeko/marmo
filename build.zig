@@ -67,6 +67,40 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&fmt.step);
     check_step.dependOn(test_step);
 
+    const fuzz_seed = b.option(
+        u64,
+        "fuzz-seed",
+        "Seed for the bounded fuzz harness (default: 0x6d61726d6f)",
+    ) orelse 0x6d61726d6f;
+    const fuzz_iterations = b.option(
+        u32,
+        "fuzz-iterations",
+        "Inputs generated per target by zig build fuzz (default: 1024)",
+    ) orelse 1024;
+
+    const fuzz_module = b.createModule(.{
+        .root_source_file = b.path("tests/fuzz.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "marmo", .module = marmo },
+            .{ .name = "tls13", .module = tls13.module("tls13") },
+        },
+    });
+    const fuzz_tests = b.addTest(.{ .root_module = fuzz_module });
+    const run_fuzz_tests = b.addRunArtifact(fuzz_tests);
+    test_step.dependOn(&run_fuzz_tests.step);
+
+    const fuzz_exe = b.addExecutable(.{
+        .name = "marmo-fuzz",
+        .root_module = fuzz_module,
+    });
+    const run_fuzz = b.addRunArtifact(fuzz_exe);
+    run_fuzz.addArg(b.fmt("{d}", .{fuzz_seed}));
+    run_fuzz.addArg(b.fmt("{d}", .{fuzz_iterations}));
+    const fuzz_step = b.step("fuzz", "Run bounded deterministic fuzz targets");
+    fuzz_step.dependOn(&run_fuzz.step);
+
     const examples_step = b.step("examples", "Build all examples");
     for ([_][]const u8{ "shadowsocks2022", "vless" }) |name| {
         const run = b.addSystemCommand(&.{ b.graph.zig_exe, "build" });
