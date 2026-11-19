@@ -24,6 +24,7 @@ pub const Router = @import("routing/router.zig").Router;
 pub const RuleSet = @import("routing/rules.zig").RuleSet;
 pub const Shadowsocks2022 = @import("protocol/shadowsocks2022.zig");
 pub const VlessProtocol = @import("protocol/vless.zig");
+pub const TrojanProtocol = @import("protocol/trojan.zig");
 
 pub const Dialer = @import("transport/dialer.zig").Dialer;
 pub const ConnectError = Dialer.ConnectError;
@@ -40,6 +41,7 @@ pub const UdpPacketConn = @import("transport/udp.zig").UdpPacketConn;
 pub const Outbound = @import("outbound/outbound.zig").Outbound;
 pub const Direct = @import("outbound/direct.zig").Direct;
 pub const HttpConnect = @import("outbound/http_connect.zig").HttpConnect;
+pub const Trojan = @import("outbound/trojan.zig").Trojan;
 pub const Vless = @import("outbound/vless.zig").Vless;
 
 pub const Instance = @import("instance.zig").Instance;
@@ -60,12 +62,17 @@ pub const internal = struct {
     pub const shadowsocks2022 = @import("protocol/shadowsocks2022.zig");
     pub const socks5 = @import("inbound/socks5.zig");
     pub const tls_credentials = @import("transport/tls_credentials.zig");
+    pub const trojan = @import("protocol/trojan.zig");
     pub const vless = @import("protocol/vless.zig");
     pub const xudp = @import("protocol/xudp.zig");
 };
 
 test {
     _ = @import("protocol/xudp.zig");
+    _ = @import("protocol/trojan.zig");
+    _ = @import("inbound/trojan.zig");
+    _ = @import("outbound/trojan.zig");
+    _ = @import("outbound/trojan_udp.zig");
     _ = @import("transport/write.zig");
     std.testing.refAllDecls(@This());
 }

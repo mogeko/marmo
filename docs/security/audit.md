@@ -26,8 +26,9 @@ and `zig build examples` pass. The test count is recorded in `AGENTS.md`.
 
 ## 2. Threat model
 
-Assets: client credentials (VLESS UUID, Shadowsocks PSK), TLS private keys and
-session secrets, routing policy, and process availability.
+Assets: client credentials (VLESS UUID, Shadowsocks PSK, Trojan password
+hash), TLS private keys and session secrets, routing policy, and process
+availability.
 
 Adversaries considered:
 
@@ -42,8 +43,8 @@ Adversaries considered:
 
 Out of scope: a compromised embedder process, OS/kernel bugs, physical access,
 side-channel and micro-architectural attacks, traffic analysis, and protocols
-not implemented in this revision (QUIC, HTTP/2, WebSocket, VMess, Trojan,
-TUIC, Hysteria2).
+not implemented in this revision (QUIC, HTTP/2, WebSocket, VMess, TUIC,
+Hysteria2).
 
 ## 3. Findings
 
@@ -70,6 +71,7 @@ exhaustion; Low = local/robustness/spec issue with limited impact.
 | F-14 | Medium | Open | Relay | No idle-timeout enforcement after relay start; a silent peer can hold a relay pair open indefinitely. Requires a config/architecture decision (ADR). |
 | F-15 | Low | Open | TLS | KeyUpdate/client auth/PSK/tickets/ALPN are not implemented; post-handshake handling is unit-tested but not end-to-end fuzzed. |
 | F-16 | Low | Open | General | No external audit, no side-channel review, and no long-running soak/fuzz campaign. |
+| F-17 | Low | Open | Trojan | The authentication-prefix read and UDP association have no protocol-level idle timeout; a TLS peer that stalls can hold a connection. Same class as F-13. |
 
 ### F-01 HTTP request-line injection (High, fixed)
 
@@ -222,10 +224,17 @@ under the testing allocator, which reports leaks.
   decoders do not allocate. The fuzz harness uses fixed buffers and bounded
   per-iteration caches.
 - **Caps**: handshake message 16 KiB, TLS record 16 KiB + 256, HTTP head 8 KiB,
-  XUDP meta 512, VLESS domain 255, SS2022 payload 65535, SS UDP sessions 128,
+  XUDP meta 512, VLESS domain 255, Trojan request 320 and authentication prefix
+  58, Trojan UDP frame 65535, SS2022 payload 65535, SS UDP sessions 128,
   config 4 MiB.
 - **Slow peers**: TLS handshakes have a configurable timeout (default 10 s).
-  SOCKS5/HTTP handshakes and relay idle time are not bounded yet (F-13/F-14).
+  SOCKS5/HTTP handshakes, Trojan authentication-prefix reads, Trojan UDP
+  associations, and relay idle time are not bounded yet (F-13/F-14/F-17).
+- **Trojan fallback**: unauthenticated traffic is replayed to a configured,
+  routed TCP endpoint (ADR-0011). Only the consumed prefix is buffered; the
+  operator is responsible for the fallback service and for keeping the route
+  acyclic. Invalid authentication does not produce a distinguishable error
+  response when fallback is configured.
 - **Cancellation/close**: TLS adapters serialize writes and use the abort path
   without `close_notify` to avoid racing a writer. SS UDP sessions take the
   session mutex for mutable fields. Teardown of UDP associations is reviewed
@@ -259,10 +268,11 @@ unbounded built-in fuzzer; it is opt-in and not part of CI.
 
 ## 6. Residual risks and next steps
 
-1. **F-13/F-14 (ADR needed)**: add a configurable connect/handshake timeout,
-   relay idle timeout, and a maximum concurrent connection count. The
-   architecture already describes these limits, but the config schema and
-   enforcement are a design change, so they are not implemented in this audit.
+1. **F-13/F-14/F-17 (ADR needed)**: add a configurable connect/handshake
+   timeout, relay idle timeout, Trojan prefix timeout, and a maximum concurrent
+   connection count. The architecture already describes these limits, but the
+   config schema and enforcement are a design change, so they are not
+   implemented in this audit.
 2. **TLS post-handshake fuzzing**: add an authenticated-state harness for
    empty records, alerts, and KeyUpdate (currently KeyUpdate is rejected by
    design).

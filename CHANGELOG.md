@@ -3,6 +3,17 @@
 All notable changes to marmo are recorded here. The project is pre-1.0; APIs
 and behavior may change between minor releases.
 
+## Unreleased
+
+### Added
+
+- Trojan inbound and outbound over TLS: TCP `CONNECT`, UDP `ASSOCIATE` with
+  per-packet destinations, SHA-224 password authentication, and an optional
+  explicit `fallback` endpoint routed through the router (ADR-0011).
+- Trojan config validation, protocol unit tests, loopback TCP/UDP integration
+  tests, a fallback integration test, and `trojan_auth`, `trojan_request`, and
+  `trojan_udp_frame` fuzz targets.
+
 ## 0.0.2 - 2026-11-19
 
 ### Added

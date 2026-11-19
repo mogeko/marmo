@@ -15,6 +15,7 @@ const tls13 = @import("tls13");
 const Cidr = marmo.Cidr;
 const Endpoint = marmo.Endpoint;
 const config = marmo.internal.config;
+const trojan = marmo.internal.trojan;
 const vless = marmo.internal.vless;
 const xudp = marmo.internal.xudp;
 const s2022 = marmo.internal.shadowsocks2022;
@@ -407,6 +408,49 @@ fn fuzzTlsKeySchedule(_: Context, smith: *std.testing.Smith) anyerror!void {
     _ = schedule.serverAppSecret(hello_hash);
 }
 
+fn fuzzTrojanAuth(ctx: Context, smith: *std.testing.Smith) anyerror!void {
+    var input: [trojan.auth_prefix_len]u8 = undefined;
+    const len = smith.slice(&input);
+    var output: [1]u8 = undefined;
+    var memory: MemoryStream = .{ .input = input[0..len], .output = &output };
+    const hash = trojan.hashPassword("password");
+    var prefix: [trojan.auth_prefix_len]u8 = undefined;
+    _ = trojan.readAuthPrefix(
+        ctx.io,
+        memory.stream(),
+        &hash,
+        &prefix,
+    ) catch return;
+}
+
+fn fuzzTrojanRequest(ctx: Context, smith: *std.testing.Smith) anyerror!void {
+    var input: [1024]u8 = undefined;
+    const len = smith.slice(&input);
+    var output: [1]u8 = undefined;
+    var memory: MemoryStream = .{ .input = input[0..len], .output = &output };
+    var domain: [trojan.max_domain_len]u8 = undefined;
+    _ = trojan.readRequestHeader(
+        ctx.io,
+        memory.stream(),
+        &domain,
+    ) catch return;
+}
+
+fn fuzzTrojanUdpFrame(ctx: Context, smith: *std.testing.Smith) anyerror!void {
+    var input: [trojan.max_udp_payload]u8 = undefined;
+    const len = smith.slice(&input);
+    var output: [1]u8 = undefined;
+    var memory: MemoryStream = .{ .input = input[0..len], .output = &output };
+    var buffer: [trojan.max_udp_payload]u8 = undefined;
+    var domain: [trojan.max_domain_len]u8 = undefined;
+    _ = trojan.readUdpPacket(
+        ctx.io,
+        memory.stream(),
+        &buffer,
+        &domain,
+    ) catch return;
+}
+
 fn fuzzVlessRequest(ctx: Context, smith: *std.testing.Smith) anyerror!void {
     var input: [1024]u8 = undefined;
     const len = smith.slice(&input);
@@ -791,6 +835,9 @@ pub const targets = [_]Target{
     .{ .name = "tls_credentials", .max_input = 4096, .run = fuzzTlsCredentials },
     .{ .name = "tls_key_schedule", .max_input = 64, .run = fuzzTlsKeySchedule },
     .{ .name = "vless_request", .max_input = 1024, .run = fuzzVlessRequest },
+    .{ .name = "trojan_auth", .max_input = trojan.auth_prefix_len, .run = fuzzTrojanAuth },
+    .{ .name = "trojan_request", .max_input = 1024, .run = fuzzTrojanRequest },
+    .{ .name = "trojan_udp_frame", .max_input = 66 * 1024, .run = fuzzTrojanUdpFrame },
     .{ .name = "xudp_frame", .max_input = 66 * 1024, .run = fuzzXudpFrame },
     .{ .name = "ss2022_request", .max_input = s2022.max_payload, .run = fuzzSs2022Request },
     .{ .name = "ss2022_request_layout", .max_input = s2022.max_payload, .run = fuzzSs2022RequestLayout },
@@ -876,6 +923,15 @@ const tls_client_hello_record: []const u8 = @embedFile(
 );
 const vless_request_fixture: []const u8 = @embedFile(
     "fixtures/vless/request_ipv4.bin",
+);
+const trojan_auth_fixture: []const u8 = @embedFile(
+    "fixtures/trojan/auth_line.bin",
+);
+const trojan_request_fixture: []const u8 = @embedFile(
+    "fixtures/trojan/request_ipv4.bin",
+);
+const trojan_udp_fixture: []const u8 = @embedFile(
+    "fixtures/trojan/udp_packet.bin",
 );
 const xudp_frame_fixture: []const u8 = @embedFile(
     "fixtures/vless/xudp_new.bin",
@@ -972,6 +1028,18 @@ test "fuzz corpus: VLESS and XUDP" {
     });
     try std.testing.fuzz(testContext(), fuzzXudpFrame, .{
         .corpus = &.{xudp_frame_fixture},
+    });
+}
+
+test "fuzz corpus: Trojan" {
+    try std.testing.fuzz(testContext(), fuzzTrojanAuth, .{
+        .corpus = &.{trojan_auth_fixture},
+    });
+    try std.testing.fuzz(testContext(), fuzzTrojanRequest, .{
+        .corpus = &.{trojan_request_fixture},
+    });
+    try std.testing.fuzz(testContext(), fuzzTrojanUdpFrame, .{
+        .corpus = &.{trojan_udp_fixture},
     });
 }
 

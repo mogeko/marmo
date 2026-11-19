@@ -31,14 +31,18 @@ Statuses: `Proposed` → `Accepted` | `Rejected` | `Superseded by ADR-NNNN`.
 | [0008](0008-api-and-config.md) | Public API, config, errors | Accepted | lifecycle facade; strict JSON; typed errors |
 | [0009](0009-licensing-and-interop.md) | Licensing and interop hygiene | Accepted | LGPL-2.1; clean-room protocol work |
 | [0010](0010-tls-module-package.md) | TLS module as a replaceable package | Accepted | `packages/tls13`; std-only API; path dependency |
+| [0011](0011-trojan-inbound-fallback.md) | Trojan inbound fallback | Accepted | optional explicit fallback; routed through `Dispatch`; no default |
 
 ## Accepted decisions
 
-All ADRs were accepted on 2026-11-18 (ADR-0010 on 2026-11-19).
+ADR-0001–0010 were accepted on 2026-11-18 (ADR-0010 on 2026-11-19); ADR-0011
+was accepted on 2026-11-19.
 
 - **ADR-0002**: Snell deferred, WireGuard abandoned; all other protocols and
   phases accepted.
 - **ADR-0007**: no optional backends or C dependencies; TLS 1.3 server, QUIC,
   HTTP/2, WebSocket, and gRPC are implemented in-tree, with a std-first rule
   that replaces them as soon as Zig's `std` provides the same primitive.
+- **ADR-0011**: Trojan inbound `fallback` is optional and explicit; it is
+  routed through `Dispatch` and has no default endpoint.
 - **ADR-0001, 0003–0006, 0008, 0009**: accepted as recommended.

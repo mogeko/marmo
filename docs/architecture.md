@@ -2,10 +2,11 @@
 
 Status: Phase 1 MVP implemented; Phase 2 started with outbound selectors and
 active TCP health probes, followed by VLESS outbound/inbound over TLS (TCP,
-simple UoT, and XUDP) and a TLS 1.3 server package. SS2022 TCP/UDP interop was
-verified locally against shadowsocks-rust 1.25.0 in both directions; the
-interop harness is not part of the repository. Protocol and Phase 2 gaps are
-tracked in `docs/protocols/` and §11.
+simple UoT, and XUDP), a TLS 1.3 server package, and standard Trojan
+inbound/outbound over TLS (TCP and UDP, with optional routed fallback). SS2022
+TCP/UDP interop was verified locally against shadowsocks-rust 1.25.0 in both
+directions; the interop harness is not part of the repository. Protocol and
+Phase 2 gaps are tracked in `docs/protocols/` and §11.
 
 ## 1. Purpose
 
@@ -313,6 +314,13 @@ Handshake (protocol auth) and connect timeouts share a `connect_timeout`;
 UDP sessions are the unit of limits: `max_udp_sessions`, per-session queue
 depth, and idle timeout. No unbounded per-packet allocation is allowed.
 
+Trojan and SOCKS5 UDP associations are per-stream rather than table entries.
+Each datagram is routed independently; the first accepted datagram selects the
+outbound tag, and later datagrams that select a different tag are dropped. A
+Trojan association may send to multiple destinations through the same
+`PacketConn` when the selected outbound supports it (direct and Trojan; VLESS
+simple UoT binds one destination).
+
 ### 9.3 L7 HTTP
 
 - `CONNECT host:port` becomes a TCP relay; the response is sent only after the
@@ -398,7 +406,7 @@ for counters and a mutex only around node-set replacement (config reload).
 | SOCKS5 | TCP (+UDP ASSOCIATE) | yes | yes | yes | no | 1 | inbound only |
 | HTTP proxy | TCP | yes | no | yes | yes | 1 | CONNECT + forward implemented |
 | Shadowsocks | TCP/UDP | yes | yes | yes | yes | 1 | 2022 TCP + UDP implemented |
-| Trojan | TLS | yes | yes | yes | yes | 2 | inbound needs in-tree TLS server |
+| Trojan | TLS | yes | yes | yes | yes | 2 | standard TCP/UDP; optional routed fallback (ADR-0011) |
 | VLESS | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | TCP/UDP (simple + XUDP) inbound/outbound over TLS done; WS/H2 pending |
 | VMess | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | legacy CFB not planned; gRPC in phase 3 |
 | TUIC | QUIC | yes | yes | yes | yes | 3 | in-tree QUIC |
@@ -415,7 +423,8 @@ Phasing:
 - **Phase 2**: VLESS/Trojan/VMess, in-tree TLS 1.3 server and WS/H2 transports,
   sniffing, compiled rule sets, process rules, groups and health checks, DNS
   cache/DoH. Implemented: selectors, TCP health probes, VLESS outbound and
-  inbound over TLS (TCP, simple UoT, and XUDP), and the TLS 1.3 server
+  inbound over TLS (TCP, simple UoT, and XUDP), Trojan inbound and outbound
+  over TLS (TCP and UDP, optional routed fallback), and the TLS 1.3 server
   package. `http_head`, jitter, backoff, and the remaining items are next.
 - **Phase 3**: in-tree QUIC, TUIC, Hysteria2, gRPC transport.
 - **Phase 4**: optional TUN/transparent proxying, Windows, transport hardening
@@ -452,8 +461,8 @@ provides the same primitive, deleting the in-tree version.
   AES-128-GCM/SHA-256, ECDSA P-256 certificates, caller-provided chain and key.
   No client auth, PSK, tickets, ALPN selection, KeyUpdate, or 0-RTT.
   `src/transport/tls_server.zig` is the thin `Stream` adapter. `Instance`
-  wraps accepted TCP streams for the VLESS inbound; credentials are PEM/DER
-  files loaded by `src/transport/tls_credentials.zig`.
+  wraps accepted TCP streams for the VLESS and Trojan inbounds; credentials
+  are PEM/DER files loaded by `src/transport/tls_credentials.zig`.
 - **WebSocket / HTTP/2 / gRPC**: in-tree, Phase 2/3; HTTP/2 is limited to
   transport needs (framing, HPACK, SETTINGS, GOAWAY).
 - **QUIC**: in-tree, Phase 3; QUIC v1, stream multiplexing, datagrams, and
@@ -591,3 +600,4 @@ Module boundaries are enforced by review, not by the compiler; do not import
 | [0008](decisions/0008-api-and-config.md) | Public API, config, errors | Accepted |
 | [0009](decisions/0009-licensing-and-interop.md) | Licensing and interop hygiene | Accepted |
 | [0010](decisions/0010-tls-module-package.md) | TLS module as a replaceable package | Accepted |
+| [0011](decisions/0011-trojan-inbound-fallback.md) | Trojan inbound fallback | Accepted |
