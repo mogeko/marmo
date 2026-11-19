@@ -862,7 +862,7 @@ pub const ClientStream = struct {
             &length_plain,
         );
 
-        const payload_len = readU16(&length_plain);
+        const payload_len: usize = readU16(&length_plain);
         if (payload_len == 0) return error.ProtocolViolation;
         var payload_cipher: [max_payload + tag_length]u8 = undefined;
         try readExact(io, self.inner, payload_cipher[0 .. payload_len + tag_length]);
@@ -906,7 +906,7 @@ pub const ClientStream = struct {
             self.request_salt[0..salt_len],
         )) return error.ProtocolViolation;
 
-        const payload_len = readU16(header_plain[9 + salt_len ..][0..2]);
+        const payload_len: usize = readU16(header_plain[9 + salt_len ..][0..2]);
         if (payload_len == 0) return error.ProtocolViolation;
 
         var payload_cipher: [max_payload + tag_length]u8 = undefined;
@@ -1065,7 +1065,7 @@ pub fn readClientRequest(
         error.CacheFull => return error.ReplayCacheFull,
     };
 
-    const variable_len = readU16(fixed_plain[9..][0..2]);
+    const variable_len: usize = readU16(fixed_plain[9..][0..2]);
     if (variable_len == 0) return error.ProtocolViolation;
 
     var variable_cipher: [max_payload + tag_length]u8 = undefined;
@@ -1198,7 +1198,7 @@ pub const ServerStream = struct {
             &length_plain,
         );
 
-        const payload_len = readU16(&length_plain);
+        const payload_len: usize = readU16(&length_plain);
         if (payload_len == 0) return error.ProtocolViolation;
         var payload_cipher: [max_payload + tag_length]u8 = undefined;
         try readExact(io, self.inner, payload_cipher[0 .. payload_len + tag_length]);
