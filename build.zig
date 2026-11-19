@@ -102,7 +102,7 @@ pub fn build(b: *std.Build) void {
     fuzz_step.dependOn(&run_fuzz.step);
 
     const examples_step = b.step("examples", "Build all examples");
-    for ([_][]const u8{ "shadowsocks2022", "vless" }) |name| {
+    for ([_][]const u8{ "shadowsocks2022", "trojan", "vless" }) |name| {
         const run = b.addSystemCommand(&.{ b.graph.zig_exe, "build" });
         run.setCwd(b.path(b.fmt("examples/{s}", .{name})));
         examples_step.dependOn(&run.step);

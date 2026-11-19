@@ -13,6 +13,8 @@ and behavior may change between minor releases.
 - Trojan config validation, protocol unit tests, loopback TCP/UDP integration
   tests, a fallback integration test, and `trojan_auth`, `trojan_request`, and
   `trojan_udp_frame` fuzz targets.
+- Standalone `examples/trojan` server/client, including an optional routed
+  fallback and local certificate setup.
 
 ## 0.0.2 - 2026-11-19
 

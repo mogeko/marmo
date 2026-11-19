@@ -143,6 +143,8 @@ that points at the same listener.
 - Fixtures: `tests/fixtures/trojan/auth_line.bin`,
   `request_ipv4.bin`, and `udp_packet.bin` are synthetic, spec-derived inputs
   (no captured traffic).
+- Standalone example: `examples/trojan/` runs a server and a SOCKS5 client,
+  with an optional fallback HTTP service for local probes.
 - No reference-implementation interop has been recorded in the repository yet.
   A local self-hosted trojan-gfw or Xray-core check is the next step; the
   reference implementation is not committed.

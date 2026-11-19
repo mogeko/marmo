@@ -35,8 +35,9 @@ repository ships the library only: no CLI, daemon, or `app` layer.
   are under `tests/fixtures/`. The threat model, audit findings, and residual
   risks are in `docs/security/audit.md`. TLS wire details are in
   `docs/protocols/tls.md`.
-- `examples/shadowsocks2022/` and `examples/vless/` are standalone: each has
-  its own `build.zig` and `build.zig.zon` and is not part of the root build.
+- `examples/shadowsocks2022/`, `examples/trojan/`, and `examples/vless/` are
+  standalone: each has its own `build.zig` and `build.zig.zon` and is not part
+  of the root build.
 - ADR-0001–0011 are accepted; new architecture decisions need a new ADR.
 - Snell is deferred and WireGuard is out of scope (ADR-0002).
 
