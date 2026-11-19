@@ -31,6 +31,7 @@ pub fn loadOptions(
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.InvalidCredentials,
     };
+    defer allocator.free(certificate_text);
     const private_key_text = readFile(
         allocator,
         io,
@@ -39,18 +40,33 @@ pub fn loadOptions(
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.InvalidCredentials,
     };
-    defer std.crypto.secureZero(u8, private_key_text);
+    defer {
+        std.crypto.secureZero(u8, private_key_text);
+        allocator.free(private_key_text);
+    }
 
     const chain = try parseCertificateChain(allocator, certificate_text);
+    errdefer freeCertificateChain(allocator, chain);
     var key = try parsePrivateKey(allocator, private_key_text);
-    errdefer std.crypto.secureZero(u8, std.mem.asBytes(&key));
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&key));
 
     tls13.validateCredentials(chain, key) catch
         return error.InvalidCredentials;
-    return .{
+    const options: tls_server.Options = .{
         .certificate_chain = chain,
         .private_key = key,
     };
+    return options;
+}
+
+/// Frees a chain returned by `parseCertificateChain`. Every certificate slice
+/// is allocator-owned, including the DER passthrough case.
+pub fn freeCertificateChain(
+    allocator: std.mem.Allocator,
+    chain: []const []const u8,
+) void {
+    for (chain) |certificate| allocator.free(certificate);
+    allocator.free(chain);
 }
 
 fn readFile(
@@ -66,21 +82,27 @@ fn readFile(
     );
 }
 
-fn parseCertificateChain(
+/// Parses a DER chain or PEM `CERTIFICATE` blocks. Every returned certificate
+/// is allocator-owned; use `freeCertificateChain` when done.
+pub fn parseCertificateChain(
     allocator: std.mem.Allocator,
     text: []const u8,
 ) LoadError![]const []const u8 {
     if (std.mem.find(u8, text, "-----BEGIN") == null) {
         if (text.len == 0) return error.InvalidCredentials;
         const chain = try allocator.alloc([]const u8, 1);
-        chain[0] = text;
+        errdefer allocator.free(chain);
+        chain[0] = try allocator.dupe(u8, text);
         return chain;
     }
 
     const begin_marker = "-----BEGIN CERTIFICATE-----";
     const end_marker = "-----END CERTIFICATE-----";
     var chain: std.ArrayList([]const u8) = .empty;
-    errdefer chain.deinit(allocator);
+    errdefer {
+        for (chain.items) |certificate| allocator.free(certificate);
+        chain.deinit(allocator);
+    }
 
     var offset: usize = 0;
     while (true) {
@@ -94,7 +116,10 @@ fn parseCertificateChain(
             return error.InvalidCredentials;
         const body = text[begin..][0..end_relative];
         const der = try decodeBase64(allocator, body);
-        try chain.append(allocator, der);
+        chain.append(allocator, der) catch |err| {
+            allocator.free(der);
+            return err;
+        };
         if (chain.items.len > max_certs) return error.InvalidCredentials;
         offset = begin + end_relative + end_marker.len;
     }
@@ -103,7 +128,8 @@ fn parseCertificateChain(
     return chain.toOwnedSlice(allocator);
 }
 
-fn parsePrivateKey(
+/// Parses an ECDSA P-256 key from PKCS#8/SEC1 DER or PEM.
+pub fn parsePrivateKey(
     allocator: std.mem.Allocator,
     text: []const u8,
 ) LoadError!Ecdsa.KeyPair {
@@ -154,9 +180,11 @@ fn decodeBase64(
         u8,
         decoder.calcSizeUpperBound(text.len),
     );
-    const size = decoder.decode(decoded, text) catch
+    errdefer allocator.free(decoded);
+    const written = decoder.decode(decoded, text) catch
         return error.InvalidCredentials;
-    return decoded[0..size];
+    if (written == decoded.len) return decoded;
+    return allocator.realloc(decoded, written) catch error.OutOfMemory;
 }
 
 const Element = struct {

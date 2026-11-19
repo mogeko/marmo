@@ -524,7 +524,8 @@ docs/
   architecture.md
   decisions/
   protocols/              per-protocol notes and sources
-tests/                    protocol fixtures and loopback integration tests
+  security/               threat model, audit findings, residual risks
+tests/                    fuzz harness, fixtures, loopback integration tests
 ```
 
 Module boundaries are enforced by review, not by the compiler; do not import
@@ -539,11 +540,17 @@ Module boundaries are enforced by review, not by the compiler; do not import
   architecture supports fibers.
 - Protocol tests use captured byte fixtures: handshake transcripts and packet
   captures in `tests/fixtures/<protocol>/`. No live third-party servers in CI.
-- Every decoder has a fuzz target: `zig build fuzz -Dcodec=<name>` (once the
-  build scaffold exists); malformed input must return an error, never panic.
+- Every decoder and handshake state machine has a bounded fuzz target:
+  `zig build fuzz` runs fixed seeds and iteration counts by default
+  (`-Dfuzz-seed`, `-Dfuzz-iterations`). Malformed input must return a typed
+  error, never panic. The deterministic corpus smoke runs in `zig build test`;
+  `zig build test --fuzz` is opt-in and unbounded.
 - CI matrix: Linux x86_64 and macOS arm64 at minimum; a single-threaded build
   catches hidden thread assumptions.
 - Benchmarks are opt-in and never part of `zig build test`.
+- Security review, threat model, findings, and residual risks live in
+  [`docs/security/audit.md`](security/audit.md). Protocol sources and fixture
+  provenance are in [`docs/protocols/`](protocols/README.md).
 
 ## 17. Observability
 

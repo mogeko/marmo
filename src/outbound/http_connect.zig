@@ -64,9 +64,11 @@ pub const HttpConnect = struct {
         };
     }
 
+    // Exposed to the test below; keeps the parser independent of sockets.
     fn readResponse(io: std.Io, stream: Stream) ConnectError!void {
         var response: [8192]u8 = undefined;
         var len: usize = 0;
+        var terminated = false;
 
         while (len < response.len) {
             var buffers = [_][]u8{response[len .. len + 1]};
@@ -77,10 +79,11 @@ pub const HttpConnect = struct {
             if (read_len == 0) return error.Unexpected;
             len += 1;
             if (len >= 4 and std.mem.endsWith(u8, response[0..len], "\r\n\r\n")) {
+                terminated = true;
                 break;
             }
         }
-        if (len == response.len) return error.Unexpected;
+        if (!terminated) return error.Unexpected;
 
         const first_line_end = std.mem.findScalar(u8, response[0..len], '\r') orelse
             return error.Unexpected;
@@ -94,3 +97,85 @@ pub const HttpConnect = struct {
         if (status < 200 or status > 299) return error.ConnectionRefused;
     }
 };
+
+const TestMemoryStream = struct {
+    input: []const u8,
+    offset: usize = 0,
+    output: []u8,
+
+    fn stream(self: *TestMemoryStream) Stream {
+        return .{ .ctx = self, .vtable = &vtable };
+    }
+
+    fn read(
+        ctx: *anyopaque,
+        io: std.Io,
+        buffers: [][]u8,
+    ) Stream.ReadError!usize {
+        _ = io;
+        const self: *TestMemoryStream = @ptrCast(@alignCast(ctx));
+        var copied: usize = 0;
+        for (buffers) |buffer| {
+            const remaining = self.input.len - self.offset - copied;
+            const count = @min(buffer.len, remaining);
+            @memcpy(buffer[0..count], self.input[self.offset + copied ..][0..count]);
+            copied += count;
+            if (self.offset + copied == self.input.len) break;
+        }
+        self.offset += copied;
+        return copied;
+    }
+
+    fn write(
+        ctx: *anyopaque,
+        io: std.Io,
+        buffers: []const []const u8,
+    ) Stream.WriteError!usize {
+        _ = ctx;
+        _ = io;
+        var total: usize = 0;
+        for (buffers) |buffer| total += buffer.len;
+        return total;
+    }
+
+    fn shutdown(
+        ctx: *anyopaque,
+        io: std.Io,
+        how: Stream.ShutdownHow,
+    ) Stream.ShutdownError!void {
+        _ = ctx;
+        _ = io;
+        _ = how;
+    }
+
+    fn close(ctx: *anyopaque, io: std.Io) void {
+        _ = ctx;
+        _ = io;
+    }
+
+    fn endpoint(ctx: *anyopaque) Endpoint {
+        _ = ctx;
+        return .{ .ip = .{ .ip4 = .loopback(1) } };
+    }
+
+    const vtable: Stream.VTable = .{
+        .read = read,
+        .write = write,
+        .shutdown = shutdown,
+        .close = close,
+        .local = endpoint,
+        .remote = endpoint,
+    };
+};
+
+test "HTTP CONNECT accepts a head exactly at the buffer limit" {
+    var response: [8192]u8 = undefined;
+    @memset(&response, 'a');
+    const prefix = "HTTP/1.1 200 OK\r\nX: ";
+    @memcpy(response[0..prefix.len], prefix);
+    @memcpy(response[response.len - 4 ..], "\r\n\r\n");
+
+    var output: [1]u8 = undefined;
+    var memory: TestMemoryStream = .{ .input = &response, .output = &output };
+    try HttpConnect.readResponse(std.testing.io, memory.stream());
+}

@@ -26,7 +26,7 @@ const UdpContext = struct {
     reply_future: ?std.Io.Future(void) = null,
 };
 
-const UdpRequest = struct {
+pub const UdpRequest = struct {
     target: Endpoint,
     payload: []const u8,
 };
@@ -42,7 +42,7 @@ pub fn handle(
     try handleRequest(io, stream, inbound_tag, dispatch, arena);
 }
 
-fn negotiate(io: std.Io, stream: Stream) !void {
+pub fn negotiate(io: std.Io, stream: Stream) !void {
     var header: [2]u8 = undefined;
     try readExact(io, stream, &header);
     if (header[0] != version) return error.BadVersion;
@@ -122,7 +122,9 @@ fn handleRequest(
     try relay.relay(io, stream, remote, dispatch.metrics());
 }
 
-fn readAddress(
+/// Decodes a SOCKS5 address from a stream. Domain names are allocated from
+/// `arena` and stay valid until it is reset.
+pub fn readAddress(
     io: std.Io,
     stream: Stream,
     address_type: u8,
@@ -340,7 +342,9 @@ fn udpReply(context: *UdpContext) void {
     }
 }
 
-fn parseUdpRequest(packet: []const u8) !UdpRequest {
+/// Parses a SOCKS5 UDP request header. The target domain and payload borrow
+/// `packet`.
+pub fn parseUdpRequest(packet: []const u8) !UdpRequest {
     if (packet.len < 4) return error.Malformed;
     if (packet[0] != 0 or packet[1] != 0) return error.Malformed;
     if (packet[2] != 0) return error.Fragmented;

@@ -135,6 +135,8 @@ pub fn open(keys: *Keys, record: []const u8, out: []u8) OpenError!Opened {
     if (record.len < record_header_len) return error.BadRecord;
     if (record[0] != content_type_application_data) return error.BadRecord;
     if (record[1] != 0x03) return error.BadRecord;
+    // Encrypted TLS 1.3 records always carry legacy_record_version 0x0303.
+    if (record[2] != 0x03) return error.BadRecord;
 
     const ciphertext_len = std.mem.readInt(u16, record[3..5], .big);
     if (ciphertext_len < tag_len + 1) return error.BadRecord;
@@ -183,4 +185,11 @@ fn readExact(input: *std.Io.Reader, buffer: []u8) !void {
         if (read_len == 0) return error.EndOfStream;
         offset += read_len;
     }
+}
+
+test "encrypted records reject a non-0x0303 legacy version" {
+    var keys: Keys = .{};
+    var out: [32]u8 = undefined;
+    const record = [_]u8{ content_type_application_data, 0x03, 0x02, 0, tag_len + 1 };
+    try std.testing.expectError(error.BadRecord, open(&keys, &record, &out));
 }

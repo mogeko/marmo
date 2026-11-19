@@ -16,12 +16,20 @@ pub const Options = struct {
     /// `server_name` is present.
     insecure: bool,
     ca: ?*tls13.Ca = null,
+    /// Bounded handshake duration. Zero disables the timeout.
+    handshake_timeout_ns: u64 = 10 * std.time.ns_per_s,
 };
 
 pub const CreateError = error{
     Canceled,
     HandshakeFailed,
     OutOfMemory,
+    TimedOut,
+};
+
+const ClientHandshake = union(enum) {
+    client: tls13.InitError!tls13.Client,
+    timeout: std.Io.Cancelable!void,
 };
 
 pub const TlsClientStream = struct {
@@ -55,8 +63,59 @@ pub const TlsClientStream = struct {
         self.socket_reader = SocketReader.init(inner, io, &self.socket_read_buffer);
         self.socket_writer = SocketWriter.init(inner, io, &self.socket_write_buffer);
 
-        self.client = tls13.Client.init(
+        if (options.handshake_timeout_ns == 0) {
+            self.client = clientHandshake(self, options) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                error.HandshakeFailed => return error.HandshakeFailed,
+            };
+            return self;
+        }
+
+        var buffer: [2]ClientHandshake = undefined;
+        var select: std.Io.Select(ClientHandshake) = .init(io, &buffer);
+        select.concurrent(.client, clientHandshake, .{ self, options }) catch {
+            drainClientHandshake(&select);
+            return error.HandshakeFailed;
+        };
+        select.concurrent(.timeout, handshakeTimeout, .{
             io,
+            options.handshake_timeout_ns,
+        }) catch {
+            drainClientHandshake(&select);
+            return error.HandshakeFailed;
+        };
+
+        const result = select.await() catch |err| {
+            drainClientHandshake(&select);
+            switch (err) {
+                error.Canceled => return error.Canceled,
+            }
+        };
+        switch (result) {
+            .client => |client_result| {
+                drainClientHandshake(&select);
+                self.client = client_result catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    error.HandshakeFailed => return error.HandshakeFailed,
+                };
+                return self;
+            },
+            .timeout => |timed_out| {
+                drainClientHandshake(&select);
+                timed_out catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                };
+                return error.TimedOut;
+            },
+        }
+    }
+
+    fn clientHandshake(
+        self: *TlsClientStream,
+        options: Options,
+    ) tls13.InitError!tls13.Client {
+        return tls13.Client.init(
+            self.io,
             &self.socket_reader.interface,
             &self.socket_writer.interface,
             .{
@@ -66,11 +125,21 @@ pub const TlsClientStream = struct {
                 .read_buffer = &self.plain_read_buffer,
                 .write_buffer = &self.plain_write_buffer,
             },
-        ) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            error.HandshakeFailed => return error.HandshakeFailed,
-        };
-        return self;
+        );
+    }
+
+    fn drainClientHandshake(select: *std.Io.Select(ClientHandshake)) void {
+        while (select.cancel()) |result| {
+            switch (result) {
+                .client => |client_result| {
+                    if (client_result) |client_value| {
+                        var client = client_value;
+                        client.deinit();
+                    } else |_| {}
+                },
+                .timeout => |timed_out| timed_out catch {},
+            }
+        }
     }
 
     pub fn stream(self: *TlsClientStream) Stream {
@@ -174,6 +243,10 @@ pub const TlsClientStream = struct {
         .remote = remote,
     };
 };
+
+fn handshakeTimeout(io: std.Io, timeout_ns: u64) std.Io.Cancelable!void {
+    try std.Io.sleep(io, .{ .nanoseconds = @intCast(timeout_ns) }, .awake);
+}
 
 const SocketReader = struct {
     io: std.Io,

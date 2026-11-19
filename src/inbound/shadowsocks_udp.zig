@@ -148,7 +148,11 @@ pub const Server = struct {
                 }
                 return session;
             }
-            if (now - session.last_active_s >= session_timeout_s) {
+            // The reply task updates this under the same mutex.
+            session.mutex.lock(io) catch return error.Canceled;
+            const last_active_s = session.last_active_s;
+            session.mutex.unlock(io);
+            if (now - last_active_s >= session_timeout_s) {
                 self.stopSession(io, session);
                 if (free_session == null) free_session = session;
             }
