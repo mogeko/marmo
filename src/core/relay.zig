@@ -4,6 +4,7 @@ const std = @import("std");
 const limits = @import("limits.zig");
 const Metrics = @import("metrics.zig").Metrics;
 const Stream = @import("../transport/stream.zig").Stream;
+const Guard = @import("connection_guard.zig").Guard;
 
 pub const Error = Stream.ReadError || Stream.WriteError || Stream.ShutdownError;
 
@@ -14,11 +15,22 @@ const RelayContext = struct {
     client: Stream,
     remote: Stream,
     metrics: *Metrics,
+    guard: ?*Guard,
     client_buffer: []u8,
     remote_buffer: []u8,
 };
 
 pub fn relay(io: std.Io, client: Stream, remote: Stream, metrics: *Metrics) Error!void {
+    return relayWithGuard(io, client, remote, metrics, null);
+}
+
+pub fn relayWithGuard(
+    io: std.Io,
+    client: Stream,
+    remote: Stream,
+    metrics: *Metrics,
+    guard: ?*Guard,
+) Error!void {
     var client_buffer: [limits.relay_buffer_size_default]u8 = undefined;
     var remote_buffer: [limits.relay_buffer_size_default]u8 = undefined;
 
@@ -27,9 +39,11 @@ pub fn relay(io: std.Io, client: Stream, remote: Stream, metrics: *Metrics) Erro
         .client = client,
         .remote = remote,
         .metrics = metrics,
+        .guard = guard,
         .client_buffer = client_buffer[0..],
         .remote_buffer = remote_buffer[0..],
     };
+    if (guard) |value| value.markRelay();
 
     var upstream = io.concurrent(
         copyWrapper,
@@ -71,12 +85,21 @@ fn copy(context: *RelayContext, direction: Direction) Error!void {
             abortBoth(context);
             return err;
         };
-        if (read_len == 0) break;
+        if (read_len == 0) {
+            if (context.guard) |value| {
+                value.halfClose(switch (direction) {
+                    .client_to_remote => .uplink,
+                    .remote_to_client => .downlink,
+                });
+            }
+            break;
+        }
 
         _ = target.write(context.io, &.{buffer[0..read_len]}) catch |err| {
             abortBoth(context);
             return err;
         };
+        if (context.guard) |value| value.touch();
 
         switch (direction) {
             .client_to_remote => context.metrics.addToRemote(read_len),

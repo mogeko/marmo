@@ -66,11 +66,11 @@ exhaustion; Low = local/robustness/spec issue with limited impact.
 | F-10 | Low | Fixed | Config | JSON parsing had no document-size limit. |
 | F-11 | Low | Fixed | Endpoints | Domain hosts accepted raw control characters. |
 | F-12 | Low | Fixed | HTTP CONNECT outbound | A valid response head exactly 8192 bytes long was rejected. |
-| F-13 | Medium | Open | Inbounds | No connect/handshake idle timeout for SOCKS5/HTTP and no maximum connection count. ADR-0015 accepted; implementation pending. |
-| F-14 | Medium | Open | Relay | No idle-timeout enforcement after relay start; a silent peer can hold a relay pair open indefinitely. ADR-0015 accepted; implementation pending. |
+| F-13 | Medium | Fixed | Inbounds | No connect/handshake idle timeout for SOCKS5/HTTP and no maximum connection count. ADR-0015 adds `max_connections` and an absolute handshake deadline from accept. |
+| F-14 | Medium | Fixed | Relay | No idle-timeout enforcement after relay start. ADR-0015 adds idle and half-close timers enforced by a per-Instance reaper. |
 | F-15 | Low | Open | TLS | KeyUpdate/client auth/PSK/tickets are not implemented (ALPN is implemented). Post-handshake KeyUpdate/alert/truncation paths have regression tests but no end-to-end authenticated-stream fuzz target. |
 | F-16 | Low | Open | General | No external audit, no side-channel review, and no long-running soak/fuzz campaign. |
-| F-17 | Low | Open | Trojan | The authentication-prefix read and UDP association have no protocol-level idle timeout; a TLS peer that stalls can hold a connection. Same class as F-13. |
+| F-17 | Low | Fixed | Trojan | The authentication-prefix read is covered by the handshake deadline; UDP association traffic resets the idle deadline. |
 | F-18 | Low | Fixed | TLS client | A partial TLS record could be reported as EOF, losing the final application data when a peer split a record or closed immediately after sending it. Found during trojan-gfw UDP interop; added a regression test. |
 | F-19 | Low | Open | WS/H2 | The WebSocket and HTTP/2 parsers are new: no external audit, and HTTP/2 supports one active stream per connection. Bounded parser fuzz targets exist. |
 | F-20 | Low | Open | WS/H2 | H2 flow-control stalls are not soak-tested under a peer that stops reading; H2 still carries a large fixed per-connection header workspace. |

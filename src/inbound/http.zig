@@ -3,6 +3,7 @@
 const std = @import("std");
 const Dispatch = @import("../core/dispatch.zig").Dispatch;
 const relay = @import("../core/relay.zig");
+const Guard = @import("../core/connection_guard.zig").Guard;
 const Endpoint = @import("../net/endpoint.zig").Endpoint;
 const Metadata = @import("../routing/metadata.zig").Metadata;
 const Stream = @import("../transport/stream.zig").Stream;
@@ -23,6 +24,7 @@ pub fn handle(
     inbound_tag: []const u8,
     dispatch: Dispatch,
     arena: std.mem.Allocator,
+    guard: ?*Guard,
 ) !void {
     _ = arena;
     var buffer: [headers_max]u8 = undefined;
@@ -45,7 +47,7 @@ pub fn handle(
     if (parts.next() != null) return error.BadRequest;
 
     if (std.mem.eql(u8, method, "CONNECT")) {
-        try handleConnect(io, stream, inbound_tag, dispatch, target_text);
+        try handleConnect(io, stream, inbound_tag, dispatch, target_text, guard);
         return;
     }
 
@@ -59,6 +61,7 @@ pub fn handle(
         target_text,
         version,
         header_block,
+        guard,
     );
 }
 
@@ -68,6 +71,7 @@ fn handleConnect(
     inbound_tag: []const u8,
     dispatch: Dispatch,
     target_text: []const u8,
+    guard: ?*Guard,
 ) !void {
     const target = Endpoint.parse(target_text) catch {
         try respond(io, stream, "400 Bad Request");
@@ -87,7 +91,7 @@ fn handleConnect(
     defer remote.close(io);
 
     _ = try stream.write(io, &.{"HTTP/1.1 200 Connection Established\r\n\r\n"});
-    try relay.relay(io, stream, remote, dispatch.metrics());
+    try relay.relayWithGuard(io, stream, remote, dispatch.metrics(), guard);
 }
 
 fn handleForward(
@@ -99,6 +103,7 @@ fn handleForward(
     target_text: []const u8,
     version: []const u8,
     header_block: []const u8,
+    guard: ?*Guard,
 ) !void {
     if (!isToken(method)) {
         try respond(io, stream, "400 Bad Request");
@@ -152,7 +157,7 @@ fn handleForward(
     defer remote.close(io);
 
     _ = remote.write(io, &.{head[0..head_len]}) catch return error.Unexpected;
-    try relay.relay(io, stream, remote, dispatch.metrics());
+    try relay.relayWithGuard(io, stream, remote, dispatch.metrics(), guard);
 }
 
 fn metadataFor(

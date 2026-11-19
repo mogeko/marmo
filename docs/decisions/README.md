@@ -55,5 +55,6 @@ reference-implementation research.
   1.3 client/server; HTTP/2 and WebSocket are std-only first-party packages
   with one active stream (H2) and bounded RFC 6455 framing (WS).
 - **ADR-0015**: a global `limits` policy caps TCP connections and applies
-  handshake, idle, and half-close grace timeouts. Implementation is pending.
+  handshake, idle, and half-close grace timeouts, enforced by one reaper per
+  `Instance`.
 - **ADR-0001, 0003–0006, 0008, 0009**: accepted as recommended.

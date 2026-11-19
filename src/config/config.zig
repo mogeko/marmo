@@ -10,6 +10,7 @@ const vless = @import("../protocol/vless.zig");
 
 pub const Config = struct {
     version: u8 = 1,
+    limits: Limits = .{},
     inbounds: []const Inbound = &.{},
     outbounds: []const Outbound = &.{},
     route: Route = .{},
@@ -19,6 +20,19 @@ pub const Config = struct {
     pub fn parseJson(gpa: std.mem.Allocator, text: []const u8) ParseError!Parsed {
         return fromJson(gpa, text);
     }
+
+    pub const Limits = struct {
+        /// Maximum accepted TCP streams owned by this Instance; 0 rejects all.
+        max_connections: u32 = 1024,
+        /// Absolute deadline from accept through protocol handshake.
+        handshake_timeout_s: u16 = 10,
+        /// Activity-based relay/UDP idle timeout; 0 disables it.
+        idle_timeout_s: u32 = 300,
+        /// Absolute grace after the client uplink closes; 0 closes immediately.
+        uplink_only_s: u32 = 1,
+        /// Absolute grace after the remote downlink closes; 0 closes immediately.
+        downlink_only_s: u32 = 1,
+    };
 
     pub const Inbound = struct {
         tag: []const u8,
@@ -133,9 +147,36 @@ pub fn validate(config: Config, diagnostic: *Diagnostic) ValidationError!void {
         return error.InvalidConfig;
     }
 
+    try validateLimits(config.limits, diagnostic);
     try validateInbounds(config.inbounds, diagnostic);
     try validateOutbounds(config.outbounds, diagnostic);
     try validateRoute(config.route, config.outbounds, diagnostic);
+}
+
+fn validateLimits(
+    limits: Config.Limits,
+    diagnostic: *Diagnostic,
+) ValidationError!void {
+    if (limits.max_connections > 65535) {
+        diagnostic.set("limits.max_connections: must be at most 65535", .{});
+        return error.InvalidConfig;
+    }
+    if (limits.handshake_timeout_s == 0 or limits.handshake_timeout_s > 600) {
+        diagnostic.set("limits.handshake_timeout_s: must be 1..600", .{});
+        return error.InvalidConfig;
+    }
+    if (limits.idle_timeout_s > 86400) {
+        diagnostic.set("limits.idle_timeout_s: must be at most 86400", .{});
+        return error.InvalidConfig;
+    }
+    if (limits.uplink_only_s > 86400) {
+        diagnostic.set("limits.uplink_only_s: must be at most 86400", .{});
+        return error.InvalidConfig;
+    }
+    if (limits.downlink_only_s > 86400) {
+        diagnostic.set("limits.downlink_only_s: must be at most 86400", .{});
+        return error.InvalidConfig;
+    }
 }
 
 fn validateInbounds(
@@ -1209,5 +1250,57 @@ test "TLS ALPN config validates names and required selection" {
     try std.testing.expectEqualStrings(
         "inbounds[0].tls.alpn[1]: duplicate 'h2'",
         diagnostic.message(),
+    );
+}
+
+test "limits config validates bounds" {
+    var diagnostic: Diagnostic = .{};
+    var valid = try fromJson(std.testing.allocator,
+        \\{
+        \\  "limits": {
+        \\    "max_connections": 0,
+        \\    "handshake_timeout_s": 1,
+        \\    "idle_timeout_s": 86400,
+        \\    "uplink_only_s": 0,
+        \\    "downlink_only_s": 0
+        \\  }
+        \\}
+    );
+    defer valid.deinit();
+    try validate(valid.inner.value, &diagnostic);
+
+    var bad_handshake = try fromJson(std.testing.allocator,
+        \\{ "limits": { "handshake_timeout_s": 0 } }
+    );
+    defer bad_handshake.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(bad_handshake.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "limits.handshake_timeout_s: must be 1..600",
+        diagnostic.message(),
+    );
+
+    var bad_max = try fromJson(std.testing.allocator,
+        \\{ "limits": { "max_connections": 65536 } }
+    );
+    defer bad_max.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(bad_max.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "limits.max_connections: must be at most 65535",
+        diagnostic.message(),
+    );
+
+    var bad_idle = try fromJson(std.testing.allocator,
+        \\{ "limits": { "idle_timeout_s": 86401 } }
+    );
+    defer bad_idle.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(bad_idle.inner.value, &diagnostic),
     );
 }

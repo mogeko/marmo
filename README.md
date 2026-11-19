@@ -12,8 +12,8 @@ Trojan inbound and outbound over TLS (TCP/UDP, optional routed fallback), and a
 TLS 1.3 server. Includes strict JSON config, direct TCP/UDP and HTTP
 CONNECT outbounds, SOCKS5 inbound (CONNECT + UDP ASSOCIATE), HTTP CONNECT and
 forward proxying, Shadowsocks 2022 TCP/UDP (AES-128/256-GCM),
-domain/IP-CIDR/port routing, relay, metrics, TLS ALPN, and HTTP/2 and
-WebSocket transport packages.
+domain/IP-CIDR/port routing, relay, metrics, TLS ALPN, HTTP/2 and WebSocket
+transport packages, and global connection limits/timeouts (ADR-0015).
 
 **Transport status:** plaintext TCP, TCP/TLS, and the in-tree TLS 1.3
 client/server are wired in. TLS, HTTP/2, and WebSocket live in independent

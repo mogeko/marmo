@@ -19,6 +19,10 @@ and behavior may change between minor releases.
   close state under the write lock.
 - Stream adapters track in-flight operations so `close` unblocks I/O and waits
   before freeing connection state.
+- ADR-0015 global `limits`: TCP connection cap, handshake deadline, relay idle
+  timeout, and uplink/downlink half-close grace. A per-Instance reaper enforces
+  deadlines over a bounded guard registry; metrics expose rejected
+  connections, handshake timeouts, and idle timeouts.
 - TLS certificate paths also enforce `pathLenConstraint`, DNS name
   constraints, and strict supported-version/extension parsing; TLS ALPN is
   configurable through `tls.alpn`/`tls.required_alpn`; secret stack copies are

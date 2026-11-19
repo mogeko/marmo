@@ -3,6 +3,7 @@
 const std = @import("std");
 const Dispatch = @import("../core/dispatch.zig").Dispatch;
 const relay = @import("../core/relay.zig");
+const Guard = @import("../core/connection_guard.zig").Guard;
 const Endpoint = @import("../net/endpoint.zig").Endpoint;
 const Metadata = @import("../routing/metadata.zig").Metadata;
 const Dialer = @import("../transport/dialer.zig").Dialer;
@@ -23,6 +24,7 @@ const UdpContext = struct {
     client_address: ?std.Io.net.IpAddress = null,
     outbound: ?PacketConn = null,
     outbound_tag: []const u8 = "",
+    guard: ?*Guard = null,
     reply_future: ?std.Io.Future(void) = null,
 };
 
@@ -37,9 +39,10 @@ pub fn handle(
     inbound_tag: []const u8,
     dispatch: Dispatch,
     arena: std.mem.Allocator,
+    guard: ?*Guard,
 ) !void {
     try negotiate(io, stream);
-    try handleRequest(io, stream, inbound_tag, dispatch, arena);
+    try handleRequest(io, stream, inbound_tag, dispatch, arena, guard);
 }
 
 pub fn negotiate(io: std.Io, stream: Stream) !void {
@@ -72,6 +75,7 @@ fn handleRequest(
     inbound_tag: []const u8,
     dispatch: Dispatch,
     arena: std.mem.Allocator,
+    guard: ?*Guard,
 ) !void {
     var header: [4]u8 = undefined;
     try readExact(io, stream, &header);
@@ -79,7 +83,7 @@ fn handleRequest(
 
     const target = try readAddress(io, stream, header[3], arena);
     if (header[1] == command_udp_associate) {
-        try handleUdpAssociate(io, stream, inbound_tag, dispatch);
+        try handleUdpAssociate(io, stream, inbound_tag, dispatch, guard);
         return;
     }
     if (header[1] != command_connect) {
@@ -119,7 +123,7 @@ fn handleRequest(
     defer remote.close(io);
 
     try replySuccess(io, stream);
-    try relay.relay(io, stream, remote, dispatch.metrics());
+    try relay.relayWithGuard(io, stream, remote, dispatch.metrics(), guard);
 }
 
 /// Decodes a SOCKS5 address from a stream. Domain names are allocated from
@@ -202,7 +206,9 @@ fn handleUdpAssociate(
     stream: Stream,
     inbound_tag: []const u8,
     dispatch: Dispatch,
+    guard: ?*Guard,
 ) !void {
+    if (guard) |value| value.markRelay();
     const remote = stream.remote();
     const tcp_client_ip: ?std.Io.net.IpAddress = switch (remote) {
         .ip => |ip| ip,
@@ -233,6 +239,7 @@ fn handleUdpAssociate(
         .dispatch = dispatch,
         .tcp_client_ip = tcp_client_ip,
         .inbound_tag = inbound_tag,
+        .guard = guard,
     };
     var relay_future = io.concurrent(udpRelay, .{&context}) catch |err| switch (err) {
         error.ConcurrencyUnavailable => return error.ConcurrencyUnavailable,
@@ -314,6 +321,7 @@ fn handleClientDatagram(
     const outbound = context.outbound orelse return;
     try outbound.send_to(context.io, request.target, request.payload);
     context.dispatch.metrics().addToRemote(request.payload.len);
+    if (context.guard) |value| value.touch();
 }
 
 fn io_concurrent_reply(context: *UdpContext) !std.Io.Future(void) {
@@ -339,6 +347,7 @@ fn udpReply(context: *UdpContext) void {
             buffer[0..message.data_len],
         ) catch return;
         context.dispatch.metrics().addToClient(message.data_len);
+        if (context.guard) |value| value.touch();
     }
 }
 

@@ -841,6 +841,7 @@ fn fuzzHttpHandle(ctx: Context, smith: *std.testing.Smith) anyerror!void {
         "fuzz",
         fake.dispatch(),
         arena.allocator(),
+        null,
     ) catch return;
 }
 

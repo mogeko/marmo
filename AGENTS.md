@@ -42,9 +42,9 @@ repository ships the library only: no CLI, daemon, or `app` layer.
 - `examples/shadowsocks2022/`, `examples/trojan/`, and `examples/vless/` are
   standalone: each has its own `build.zig` and `build.zig.zon` and is not part
   of the root build.
-- ADR-0001–0015 are accepted; ADR-0015 (connection limits/timeouts) is
-  accepted but its implementation is pending. New architecture decisions need
-  a new ADR.
+- ADR-0001–0015 are accepted. ADR-0015 connection limits/timeouts are
+  implemented with a global `limits` policy and one reaper per `Instance`.
+  New architecture decisions need a new ADR.
 - Snell is deferred and WireGuard is out of scope (ADR-0002).
 
 ## Toolchain gotchas (verified Zig 0.17.1)
@@ -183,8 +183,8 @@ Adapted from TigerBeetle's
 ## Commands and tests
 
 - `zig build test` runs the root unit, public API, and integration tests, the
-  package tests, and the deterministic fuzz corpus smoke (152 today: 54 root
-  unit, 4 public API, 23 integration, 21 tls13, 20 http2, 18 ws, 12 fuzz).
+  package tests, and the deterministic fuzz corpus smoke (157 today: 55 root
+  unit, 4 public API, 27 integration, 21 tls13, 20 http2, 18 ws, 12 fuzz).
   `zig build check` adds the formatting check, and `zig build examples` builds
   all examples. CI runs `zig build check` and
   `zig build test -Doptimize=ReleaseSafe`.

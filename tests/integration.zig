@@ -2293,3 +2293,238 @@ test "HTTP/2 over TLS echoes and negotiates ALPN" {
     _ = server_future.await(io);
     if (context.error_code) |err| return err;
 }
+
+const HoldContext = struct {
+    listener: *std.Io.net.Server,
+    release: std.Io.Event = .unset,
+    error_code: ?anyerror = null,
+};
+
+fn holdServer(io: std.Io, context: *HoldContext) void {
+    const stream = context.listener.accept(io) catch |err| {
+        context.error_code = err;
+        return;
+    };
+    defer stream.close(io);
+    context.release.waitUncancelable(io);
+}
+
+fn socksConnectRequest(buffer: []u8, port: u16) []const u8 {
+    buffer[0] = 5;
+    buffer[1] = 1;
+    buffer[2] = 0;
+    buffer[3] = 1;
+    @memcpy(buffer[4..8], &[_]u8{ 127, 0, 0, 1 });
+    buffer[8] = @intCast(port >> 8);
+    buffer[9] = @intCast(port & 0xff);
+    return buffer[0..10];
+}
+
+test "limits reject connections over max_connections" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var diagnostic: marmo.Diagnostic = .{};
+    const config: marmo.Config = .{
+        .limits = .{ .max_connections = 1 },
+        .inbounds = &.{
+            .{ .tag = "socks", .protocol = .socks5, .listen = "127.0.0.1:0" },
+        },
+        .route = .{ .final = "direct" },
+    };
+    var instance = try marmo.Instance.init(allocator, io, config, &diagnostic);
+    defer instance.deinit();
+    try instance.start();
+
+    const endpoint = instance.inboundEndpoint("socks") orelse
+        return error.TestUnexpectedResult;
+    const address = switch (endpoint) {
+        .ip => |ip| ip,
+        .domain => return error.TestUnexpectedResult,
+    };
+
+    const first = try std.Io.net.IpAddress.connect(
+        &address,
+        io,
+        .{ .mode = .stream },
+    );
+    defer first.close(io);
+    try std.Io.sleep(io, .{ .nanoseconds = 100 * std.time.ns_per_ms }, .awake);
+
+    const second = try std.Io.net.IpAddress.connect(
+        &address,
+        io,
+        .{ .mode = .stream },
+    );
+    defer second.close(io);
+
+    var buffer: [1]u8 = undefined;
+    var buffers = [_][]u8{&buffer};
+    const read_len = second.read(io, &buffers) catch 0;
+    try std.testing.expectEqual(@as(usize, 0), read_len);
+    const snapshot = instance.metricsSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), snapshot.connections_rejected);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.connections_active);
+}
+
+test "handshake timeout closes a silent inbound" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var diagnostic: marmo.Diagnostic = .{};
+    const config: marmo.Config = .{
+        .limits = .{ .handshake_timeout_s = 1 },
+        .inbounds = &.{
+            .{ .tag = "socks", .protocol = .socks5, .listen = "127.0.0.1:0" },
+        },
+        .route = .{ .final = "direct" },
+    };
+    var instance = try marmo.Instance.init(allocator, io, config, &diagnostic);
+    defer instance.deinit();
+    try instance.start();
+
+    const endpoint = instance.inboundEndpoint("socks") orelse
+        return error.TestUnexpectedResult;
+    const address = switch (endpoint) {
+        .ip => |ip| ip,
+        .domain => return error.TestUnexpectedResult,
+    };
+    const client = try std.Io.net.IpAddress.connect(
+        &address,
+        io,
+        .{ .mode = .stream },
+    );
+    defer client.close(io);
+
+    try std.Io.sleep(io, .{ .nanoseconds = 1300 * std.time.ns_per_ms }, .awake);
+    var buffer: [1]u8 = undefined;
+    var buffers = [_][]u8{&buffer};
+    const read_len = client.read(io, &buffers) catch 0;
+    try std.testing.expectEqual(@as(usize, 0), read_len);
+    const snapshot = instance.metricsSnapshot();
+    try std.testing.expect(snapshot.timeouts_handshake >= 1);
+}
+
+test "idle timeout closes a relay with no traffic" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var hold_bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var hold_listener = try hold_bind.listen(io, .{ .reuse_address = true });
+    defer hold_listener.deinit(io);
+    var hold_context: HoldContext = .{ .listener = &hold_listener };
+    var hold_future = io.async(holdServer, .{ io, &hold_context });
+
+    var diagnostic: marmo.Diagnostic = .{};
+    const config: marmo.Config = .{
+        .limits = .{ .idle_timeout_s = 1 },
+        .inbounds = &.{
+            .{ .tag = "socks", .protocol = .socks5, .listen = "127.0.0.1:0" },
+        },
+        .route = .{ .final = "direct" },
+    };
+    var instance = try marmo.Instance.init(allocator, io, config, &diagnostic);
+    defer instance.deinit();
+    try instance.start();
+
+    const endpoint = instance.inboundEndpoint("socks") orelse
+        return error.TestUnexpectedResult;
+    const address = switch (endpoint) {
+        .ip => |ip| ip,
+        .domain => return error.TestUnexpectedResult,
+    };
+    const client = try std.Io.net.IpAddress.connect(
+        &address,
+        io,
+        .{ .mode = .stream },
+    );
+    defer client.close(io);
+    try socksNegotiate(io, client);
+
+    var request_buffer: [10]u8 = undefined;
+    try tcpWrite(io, client, socksConnectRequest(
+        &request_buffer,
+        hold_listener.socket.address.getPort(),
+    ));
+    var reply: [10]u8 = undefined;
+    try tcpReadExact(io, client, &reply);
+    try std.testing.expectEqual(@as(u8, 0), reply[1]);
+
+    try std.Io.sleep(io, .{ .nanoseconds = 1300 * std.time.ns_per_ms }, .awake);
+    var buffer: [1]u8 = undefined;
+    var buffers = [_][]u8{&buffer};
+    const read_len = client.read(io, &buffers) catch 0;
+    try std.testing.expectEqual(@as(usize, 0), read_len);
+    const snapshot = instance.metricsSnapshot();
+    try std.testing.expect(snapshot.timeouts_idle >= 1);
+
+    hold_context.release.set(io);
+    _ = hold_future.await(io);
+    if (hold_context.error_code) |err| return err;
+}
+
+test "half-close grace closes the remaining direction" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var hold_bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var hold_listener = try hold_bind.listen(io, .{ .reuse_address = true });
+    defer hold_listener.deinit(io);
+    var hold_context: HoldContext = .{ .listener = &hold_listener };
+    var hold_future = io.async(holdServer, .{ io, &hold_context });
+
+    var diagnostic: marmo.Diagnostic = .{};
+    const config: marmo.Config = .{
+        .limits = .{
+            .idle_timeout_s = 60,
+            .downlink_only_s = 1,
+        },
+        .inbounds = &.{
+            .{ .tag = "socks", .protocol = .socks5, .listen = "127.0.0.1:0" },
+        },
+        .route = .{ .final = "direct" },
+    };
+    var instance = try marmo.Instance.init(allocator, io, config, &diagnostic);
+    defer instance.deinit();
+    try instance.start();
+
+    const endpoint = instance.inboundEndpoint("socks") orelse
+        return error.TestUnexpectedResult;
+    const address = switch (endpoint) {
+        .ip => |ip| ip,
+        .domain => return error.TestUnexpectedResult,
+    };
+    const client = try std.Io.net.IpAddress.connect(
+        &address,
+        io,
+        .{ .mode = .stream },
+    );
+    defer client.close(io);
+    try socksNegotiate(io, client);
+
+    var request_buffer: [10]u8 = undefined;
+    try tcpWrite(io, client, socksConnectRequest(
+        &request_buffer,
+        hold_listener.socket.address.getPort(),
+    ));
+    var reply: [10]u8 = undefined;
+    try tcpReadExact(io, client, &reply);
+    try std.testing.expectEqual(@as(u8, 0), reply[1]);
+
+    try client.shutdown(io, .send);
+    try std.Io.sleep(io, .{ .nanoseconds = 1300 * std.time.ns_per_ms }, .awake);
+    var buffer: [1]u8 = undefined;
+    var buffers = [_][]u8{&buffer};
+    const read_len = client.read(io, &buffers) catch 0;
+    try std.testing.expectEqual(@as(usize, 0), read_len);
+    const snapshot = instance.metricsSnapshot();
+    try std.testing.expect(snapshot.timeouts_idle >= 1);
+
+    hold_context.release.set(io);
+    _ = hold_future.await(io);
+    if (hold_context.error_code) |err| return err;
+}

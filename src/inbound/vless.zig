@@ -4,6 +4,7 @@ const std = @import("std");
 const Dispatch = @import("../core/dispatch.zig").Dispatch;
 const Metrics = @import("../core/metrics.zig").Metrics;
 const relay = @import("../core/relay.zig");
+const Guard = @import("../core/connection_guard.zig").Guard;
 const Endpoint = @import("../net/endpoint.zig").Endpoint;
 const vless = @import("../protocol/vless.zig");
 const xudp = @import("../protocol/xudp.zig");
@@ -24,6 +25,7 @@ const UdpContext = struct {
     target: Endpoint,
     metrics: *Metrics,
     mode: UdpMode,
+    guard: ?*Guard,
 };
 
 pub fn handle(
@@ -33,6 +35,7 @@ pub fn handle(
     dispatch: Dispatch,
     arena: std.mem.Allocator,
     context: *const Context,
+    guard: ?*Guard,
 ) !void {
     var domain_buffer: [vless.max_domain_len]u8 = undefined;
     const request = try vless.readRequestHeader(
@@ -50,6 +53,7 @@ pub fn handle(
             inbound_tag,
             dispatch,
             target,
+            guard,
         ),
         vless.command_udp => try handleUdp(
             io,
@@ -57,12 +61,13 @@ pub fn handle(
             inbound_tag,
             dispatch,
             target,
+            guard,
         ),
         vless.command_mux => {
             if (!xudp.isMuxTarget(request.target)) {
                 return error.UnsupportedAddress;
             }
-            try handleXudp(io, stream, inbound_tag, dispatch, arena);
+            try handleXudp(io, stream, inbound_tag, dispatch, arena, guard);
         },
         else => return error.CommandUnsupported,
     }
@@ -74,6 +79,7 @@ fn handleTcp(
     inbound_tag: []const u8,
     dispatch: Dispatch,
     target: Endpoint,
+    guard: ?*Guard,
 ) !void {
     const metadata: Metadata = .{
         .network = .tcp,
@@ -97,7 +103,7 @@ fn handleTcp(
     defer remote.close(io);
 
     try vless.writeResponseHeader(io, stream);
-    try relay.relay(io, stream, remote, dispatch.metrics());
+    try relay.relayWithGuard(io, stream, remote, dispatch.metrics(), guard);
 }
 
 fn handleUdp(
@@ -106,7 +112,9 @@ fn handleUdp(
     inbound_tag: []const u8,
     dispatch: Dispatch,
     target: Endpoint,
+    guard: ?*Guard,
 ) !void {
+    if (guard) |value| value.markRelay();
     const outbound = try openUdp(io, stream, inbound_tag, dispatch, target) orelse
         return;
     defer outbound.close(io);
@@ -119,6 +127,7 @@ fn handleUdp(
         .target = target,
         .metrics = dispatch.metrics(),
         .mode = .simple,
+        .guard = guard,
     };
     var reply_future = io.concurrent(udpReply, .{&context}) catch |err| switch (err) {
         error.ConcurrencyUnavailable => return error.ConcurrencyUnavailable,
@@ -143,6 +152,7 @@ fn handleUdp(
             else => return error.ProtocolViolation,
         };
         context.metrics.addToRemote(payload_len);
+        if (guard) |value| value.touch();
     }
 }
 
@@ -152,7 +162,9 @@ fn handleXudp(
     inbound_tag: []const u8,
     dispatch: Dispatch,
     arena: std.mem.Allocator,
+    guard: ?*Guard,
 ) !void {
+    if (guard) |value| value.markRelay();
     var meta_buffer: [xudp.max_meta_len]u8 = undefined;
     var data_buffer: [xudp.max_data_len]u8 = undefined;
 
@@ -173,6 +185,7 @@ fn handleXudp(
         .target = target,
         .metrics = dispatch.metrics(),
         .mode = .xudp,
+        .guard = guard,
     };
     var reply_future = io.concurrent(udpReply, .{&context}) catch |err| switch (err) {
         error.ConcurrencyUnavailable => return error.ConcurrencyUnavailable,
@@ -183,6 +196,7 @@ fn handleXudp(
 
     if (first.data.len != 0) {
         try sendXudpData(io, outbound, target, first.data, context.metrics);
+        if (guard) |value| value.touch();
     }
 
     while (true) {
@@ -208,6 +222,7 @@ fn handleXudp(
                 }
                 if (frame.data.len == 0) continue;
                 try sendXudpData(io, outbound, target, frame.data, context.metrics);
+                if (guard) |value| value.touch();
             },
             else => return error.ProtocolViolation,
         }
@@ -278,6 +293,7 @@ fn udpReply(context: *UdpContext) void {
             ) catch return,
         }
         context.metrics.addToClient(message.data_len);
+        if (context.guard) |value| value.touch();
     }
 }
 

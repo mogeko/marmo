@@ -6,7 +6,6 @@ const s2022 = @import("../protocol/shadowsocks2022.zig");
 const Metadata = @import("../routing/metadata.zig").Metadata;
 
 const max_sessions = 128;
-const session_timeout_s = 60;
 
 const Session = struct {
     used: bool = false,
@@ -31,6 +30,8 @@ pub const Server = struct {
     listener: std.Io.net.Socket,
     dispatch: Dispatch,
     inbound_tag: []const u8,
+    /// Zero disables idle expiry; otherwise an idle session is evicted.
+    session_timeout_s: u32,
     sessions: [max_sessions]Session = @splat(Session{}),
     closed: std.atomic.Value(bool) = .init(false),
 
@@ -42,6 +43,7 @@ pub const Server = struct {
         listener: std.Io.net.Socket,
         dispatch: Dispatch,
         inbound_tag: []const u8,
+        session_timeout_s: u32,
     ) !*Server {
         const self = try allocator.create(Server);
         self.* = .{
@@ -52,6 +54,7 @@ pub const Server = struct {
             .listener = listener,
             .dispatch = dispatch,
             .inbound_tag = inbound_tag,
+            .session_timeout_s = session_timeout_s,
         };
         return self;
     }
@@ -152,7 +155,9 @@ pub const Server = struct {
             session.mutex.lock(io) catch return error.Canceled;
             const last_active_s = session.last_active_s;
             session.mutex.unlock(io);
-            if (now - last_active_s >= session_timeout_s) {
+            if (self.session_timeout_s != 0 and
+                now - last_active_s >= self.session_timeout_s)
+            {
                 self.stopSession(io, session);
                 if (free_session == null) free_session = session;
             }

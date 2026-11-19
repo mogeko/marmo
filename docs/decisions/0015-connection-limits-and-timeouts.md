@@ -241,3 +241,12 @@ Tests:
       `uplink_only_s = ____`, `downlink_only_s = ____`.
 - [ ] Choose per-inbound limits instead (requires a revised ADR).
 - [ ] Reject; keep resource limits outside the library.
+
+## Amendment (2026-11-20)
+
+Implementation uses one reaper task per `Instance`, not one watchdog task per
+connection. `std.Io.Threaded` dispatches async tasks as blocking pool workers;
+enough per-connection watchdogs sleeping in futex waits can starve the
+connection tasks they are meant to police. The reaper scans a bounded registry
+of active guards every 250 ms. The limit values, accounting, handshake
+transition, idle/half-close semantics, and metrics are unchanged.

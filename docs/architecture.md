@@ -300,10 +300,10 @@ and returns `error.Malformed` rather than panicking.
    streams are closed and metrics are recorded once.
 
 Handshake (protocol auth) and connect timeouts share a `connect_timeout`;
-`idle_timeout` applies only after the relay starts. ADR-0015 (accepted,
-implementation pending) adds a global `limits` policy: `max_connections`,
-`handshake_timeout_s`, `idle_timeout_s`, `uplink_only_s`, and
-`downlink_only_s`, enforced by one watchdog per connection.
+`idle_timeout` applies only after the relay starts. ADR-0015 adds a global
+`limits` policy: `max_connections`, `handshake_timeout_s`, `idle_timeout_s`,
+`uplink_only_s`, and `downlink_only_s`. A single per-`Instance` reaper scans a
+bounded guard registry every 250 ms.
 
 ### 9.2 UDP
 
@@ -322,7 +322,7 @@ implementation pending) adds a global `limits` policy: `max_connections`,
 UDP sessions are the unit of limits: `max_udp_sessions`, per-session queue
 depth, and idle timeout. No unbounded per-packet allocation is allowed.
 ADR-0015 keeps UDP session caps out of `max_connections` and applies the
-configured idle timeout per datagram (implementation pending).
+configured idle timeout per datagram.
 
 Trojan and SOCKS5 UDP associations are per-stream rather than table entries.
 Each datagram is routed independently; the first accepted datagram selects the
@@ -516,6 +516,9 @@ try instance.stop();
 - `stop` is idempotent, cancel-safe, and bounded by a configurable grace period.
 - Config is JSON parsed with `std.json` in strict mode (unknown fields are
   errors) and validated with path-aware diagnostics (`inbounds[0].port`).
+- Global `limits` (`max_connections`, handshake/idle/half-close timeouts) are
+  validated before startup; the runtime enforces them with one reaper per
+  `Instance` and an atomic connection counter.
   Parsing is a library API, not an application layer; `Config` can also be built
   directly and goes through the same validator.
 - Secrets are never logged; `Debug` output redacts passwords, UUIDs, and keys.
