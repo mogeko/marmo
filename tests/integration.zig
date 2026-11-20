@@ -2350,7 +2350,14 @@ test "limits reject connections over max_connections" {
         .{ .mode = .stream },
     );
     defer first.close(io);
-    try std.Io.sleep(io, .{ .nanoseconds = 100 * std.time.ns_per_ms }, .awake);
+    var waits: usize = 0;
+    while (instance.metricsSnapshot().connections_active == 0 and waits < 200) : (waits += 1) {
+        try std.Io.sleep(io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake);
+    }
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        instance.metricsSnapshot().connections_active,
+    );
 
     const second = try std.Io.net.IpAddress.connect(
         &address,
@@ -2363,6 +2370,10 @@ test "limits reject connections over max_connections" {
     var buffers = [_][]u8{&buffer};
     const read_len = second.read(io, &buffers) catch 0;
     try std.testing.expectEqual(@as(usize, 0), read_len);
+    waits = 0;
+    while (instance.metricsSnapshot().connections_rejected == 0 and waits < 200) : (waits += 1) {
+        try std.Io.sleep(io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake);
+    }
     const snapshot = instance.metricsSnapshot();
     try std.testing.expectEqual(@as(u64, 1), snapshot.connections_rejected);
     try std.testing.expectEqual(@as(u64, 1), snapshot.connections_active);
