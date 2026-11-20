@@ -20,14 +20,35 @@ pub const Leaf = struct {
     algo: Certificate.Parsed.PubKeyAlgo = .rsaEncryption,
 };
 
+pub const Purpose = enum { server, client };
+
 pub const Parameters = struct {
     host: ?[]const u8,
     verify_chain: bool,
     now_sec: i64,
     bundle: ?*const Certificate.Bundle,
+    purpose: Purpose = .server,
 };
 
 pub fn verifyServerChain(
+    chain: []const []const u8,
+    params: Parameters,
+    leaf: *Leaf,
+) Error!void {
+    return verifyChain(chain, params, leaf);
+}
+
+/// Client certificates carry no host name; the leaf and every CA still need
+/// the clientAuth EKU when the extension is present (RFC 5280 §4.2.1.12).
+pub fn verifyClientChain(
+    chain: []const []const u8,
+    params: Parameters,
+    leaf: *Leaf,
+) Error!void {
+    return verifyChain(chain, params, leaf);
+}
+
+fn verifyChain(
     chain: []const []const u8,
     params: Parameters,
     leaf: *Leaf,
@@ -36,7 +57,7 @@ pub fn verifyServerChain(
 
     const leaf_cert = parse(chain[0]) catch return error.CertificateRejected;
     try rejectWeakSignature(leaf_cert);
-    _ = try parseExtensions(chain[0], .leaf);
+    _ = try parseExtensions(chain[0], .leaf, params.purpose);
     try copyLeaf(leaf_cert, leaf);
     if (params.host) |host| {
         leaf_cert.verifyHostName(host) catch return error.CertificateRejected;
@@ -46,20 +67,37 @@ pub fn verifyServerChain(
     var previous = leaf_cert;
     var trusted = false;
     if (params.bundle) |bundle| {
-        trusted = try bundleTrusts(bundle, leaf_cert, params.now_sec, params.host);
+        trusted = try bundleTrusts(
+            bundle,
+            leaf_cert,
+            params.now_sec,
+            params.host,
+            params.purpose,
+        );
     }
     if (trusted) return;
 
     var index: usize = 1;
     while (index < chain.len) : (index += 1) {
-        try checkIssuer(chain[index], params.host, index - 1);
+        try checkIssuer(
+            chain[index],
+            params.host,
+            index - 1,
+            params.purpose,
+        );
         const subject = parse(chain[index]) catch
             return error.CertificateRejected;
         try rejectWeakSignature(subject);
         previous.verify(subject, params.now_sec) catch
             return error.CertificateRejected;
         if (params.bundle) |bundle| {
-            if (try bundleTrusts(bundle, subject, params.now_sec, params.host)) {
+            if (try bundleTrusts(
+                bundle,
+                subject,
+                params.now_sec,
+                params.host,
+                params.purpose,
+            )) {
                 trusted = true;
                 break;
             }
@@ -437,6 +475,7 @@ fn bundleTrusts(
     subject: Certificate.Parsed,
     now_sec: i64,
     host: ?[]const u8,
+    purpose: Purpose,
 ) Error!bool {
     bundle.verify(subject, now_sec) catch |err| switch (err) {
         error.CertificateIssuerNotFound => return false,
@@ -462,11 +501,12 @@ fn bundleTrusts(
         const extensions = parseExtensions(
             bundle.bytes.items[index..],
             .issuer,
+            purpose,
         ) catch return error.CertificateRejected;
         if (extensions.name_constraints) |constraints| {
             if (host) |name| try checkNameConstraints(constraints, name);
         }
-        if (extensions.eku_allows_server) |allowed| {
+        if (extensions.eku_allows_purpose) |allowed| {
             if (!allowed) return error.CertificateRejected;
         }
     }
@@ -489,8 +529,9 @@ fn checkIssuer(
     der_bytes: []const u8,
     host: ?[]const u8,
     ca_below: usize,
+    purpose: Purpose,
 ) Error!void {
-    const extensions = parseExtensions(der_bytes, .issuer) catch
+    const extensions = parseExtensions(der_bytes, .issuer, purpose) catch
         return error.CertificateRejected;
     if (!extensions.ca) return error.CertificateRejected;
     if (extensions.key_cert_sign) |allowed| {
@@ -499,7 +540,7 @@ fn checkIssuer(
     if (extensions.path_len) |limit| {
         if (limit < ca_below) return error.CertificateRejected;
     }
-    if (extensions.eku_allows_server) |allowed| {
+    if (extensions.eku_allows_purpose) |allowed| {
         if (!allowed) return error.CertificateRejected;
     }
     if (extensions.name_constraints) |constraints| {
@@ -601,12 +642,13 @@ const Extensions = struct {
     key_cert_sign: ?bool = null,
     path_len: ?u16 = null,
     name_constraints: ?[]const u8 = null,
-    eku_allows_server: ?bool = null,
+    eku_allows_purpose: ?bool = null,
 };
 
 fn parseExtensions(
     bytes: []const u8,
     kind: ExtensionKind,
+    purpose: Purpose,
 ) Error!Extensions {
     const certificate = elementAt(bytes, 0) orelse
         return error.CertificateRejected;
@@ -668,7 +710,7 @@ fn parseExtensions(
         if (found_extensions) return error.CertificateRejected;
         if (version_value != 2) return error.CertificateRejected;
         found_extensions = true;
-        try parseExtensionList(bytes, field, kind, &extensions);
+        try parseExtensionList(bytes, field, kind, purpose, &extensions);
     }
     return extensions;
 }
@@ -677,6 +719,7 @@ fn parseExtensionList(
     bytes: []const u8,
     outer: der.Element,
     kind: ExtensionKind,
+    purpose: Purpose,
     extensions: *Extensions,
 ) Error!void {
     const list = elementAt(bytes, outer.slice.start) orelse
@@ -718,8 +761,8 @@ fn parseExtensionList(
         } else if (std.mem.eql(u8, oid, &oid_key_usage)) {
             extensions.key_cert_sign = try parseKeyUsage(value);
         } else if (std.mem.eql(u8, oid, &oid_ext_key_usage)) {
-            const allowed = try hasServerAuth(value);
-            extensions.eku_allows_server = allowed;
+            const allowed = try hasEku(value, purpose);
+            extensions.eku_allows_purpose = allowed;
             if (kind == .leaf and !allowed) {
                 return error.CertificateRejected;
             }
@@ -802,7 +845,11 @@ fn parseKeyUsage(value: []const u8) Error!bool {
     return bytes[1] & 0x04 != 0;
 }
 
-fn hasServerAuth(value: []const u8) Error!bool {
+fn hasEku(value: []const u8, purpose: Purpose) Error!bool {
+    const required = switch (purpose) {
+        .server => &oid_server_auth,
+        .client => &oid_client_auth,
+    };
     const sequence = elementAt(value, 0) orelse
         return error.CertificateRejected;
     if (sequence.identifier.tag != .sequence) {
@@ -817,7 +864,7 @@ fn hasServerAuth(value: []const u8) Error!bool {
             return error.CertificateRejected;
         }
         const oid = value[oid_elem.slice.start..oid_elem.slice.end];
-        if (std.mem.eql(u8, oid, &oid_server_auth) or
+        if (std.mem.eql(u8, oid, required) or
             std.mem.eql(u8, oid, &oid_any_ext_key_usage))
         {
             return true;
@@ -860,6 +907,9 @@ const oid_rsassa_pss = [_]u8{
 };
 const oid_server_auth = [_]u8{
     0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01,
+};
+const oid_client_auth = [_]u8{
+    0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x02,
 };
 const oid_any_ext_key_usage = [_]u8{ 0x55, 0x1d, 0x25, 0x00 };
 

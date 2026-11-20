@@ -22,10 +22,13 @@ pub const InitError = @import("client.zig").InitError;
 pub const Options = @import("client.zig").Options;
 pub const Server = @import("server.zig").Server;
 pub const ServerOptions = @import("server.zig").ServerOptions;
+pub const ClientAuth = @import("server.zig").ClientAuth;
+pub const CipherSuite = @import("record.zig").CipherSuite;
 pub const validateCredentials = @import("server.zig").validateCredentials;
 pub const readSome = @import("reader.zig").readSome;
 pub const min_buffer_len = @import("client.zig").min_buffer_len;
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("interop_tests.zig");
 }

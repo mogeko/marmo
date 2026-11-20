@@ -30,6 +30,7 @@ pub const Params = struct {
     include_basic_constraints: bool = false,
     include_key_usage: bool = false,
     eku_server_auth: bool = false,
+    eku_client_auth: bool = false,
     /// Emits a zero-length SIGNATURE BIT STRING for parser hardening tests.
     empty_signature: bool = false,
     /// Wrapper tag for the [3] extensions field. Non-0xa3 values exercise
@@ -285,14 +286,28 @@ fn buildExtensions(gpa: std.mem.Allocator, params: Params) ![]u8 {
             bit_string,
         );
     }
-    if (params.eku_server_auth) {
+    if (params.eku_server_auth or params.eku_client_auth) {
         const server_auth = try tlv(
             gpa,
             0x06,
             &.{ 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01 },
         );
         defer gpa.free(server_auth);
-        const value = try tlv(gpa, 0x30, server_auth);
+        const client_auth = try tlv(
+            gpa,
+            0x06,
+            &.{ 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x02 },
+        );
+        defer gpa.free(client_auth);
+        var eku_content: std.ArrayList(u8) = .empty;
+        defer eku_content.deinit(gpa);
+        if (params.eku_server_auth) {
+            try eku_content.appendSlice(gpa, server_auth);
+        }
+        if (params.eku_client_auth) {
+            try eku_content.appendSlice(gpa, client_auth);
+        }
+        const value = try tlv(gpa, 0x30, eku_content.items);
         defer gpa.free(value);
         try appendExtension(
             gpa,

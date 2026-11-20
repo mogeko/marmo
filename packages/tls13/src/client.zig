@@ -1,17 +1,20 @@
 //! TLS 1.3 client session over a `std.Io.Reader`/`Writer` pair.
 //!
-//! Scope matches the in-tree server: X25519, AES-128-GCM/SHA-256, server
-//! certificates (ECDSA, Ed25519, RSA) with optional chain/host verification,
-//! and ALPN. There is no client authentication, PSK, ticket, KeyUpdate, or
-//! 0-RTT.
+//! Scope matches the in-tree server: X25519 and secp256r1 ECDHE, AES-128-GCM,
+//! AES-256-GCM, and ChaCha20-Poly1305, server certificates (ECDSA, Ed25519,
+//! RSA) with optional chain/host verification, optional client
+//! authentication, ALPN, and key updates. There is no PSK, ticket, or 0-RTT.
 
 const std = @import("std");
 const Ca = @import("ca.zig").Ca;
 const handshake = @import("handshake.zig");
 const record = @import("record.zig");
 const cert_path = @import("cert_path.zig");
+const credentials = @import("credentials.zig");
+const signature = @import("signature.zig");
 const Certificate = std.crypto.Certificate;
-const Ecdsa = std.crypto.sign.ecdsa;
+const Ecdsa = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+const P256 = std.crypto.ecc.P256;
 
 pub const min_buffer_len = std.crypto.tls.Client.min_buffer_len;
 
@@ -27,6 +30,12 @@ pub const Options = struct {
     alpn_protocols: []const []const u8 = &.{},
     /// If set, the handshake fails unless the server selects this protocol.
     required_alpn: ?[]const u8 = null,
+    /// Offered cipher suites in preference order. Must be non-empty.
+    cipher_suites: []const record.CipherSuite = &record.CipherSuite.list,
+    /// Client certificate chain, leaf first. Empty disables client auth.
+    client_certificate_chain: []const []const u8 = &.{},
+    /// Client ECDSA P-256 key matching the first certificate.
+    client_private_key: ?Ecdsa.KeyPair = null,
     /// Plaintext reader buffer. Must be non-empty.
     read_buffer: []u8,
     /// Plaintext writer buffer. Must be non-empty.
@@ -43,15 +52,17 @@ pub const InitError = error{
     Truncated,
 };
 
-const max_pubkey = 1024;
+const max_pubkey = signature.max_pubkey;
 const max_alpn_list = 1024;
 
 pub const Client = struct {
     io: std.Io,
     input: *std.Io.Reader,
     output: *std.Io.Writer,
-    transcript: handshake.Hash,
+    transcript: handshake.Transcript,
     key_schedule: handshake.KeySchedule,
+    client_app_secret: handshake.Secret = .{},
+    server_app_secret: handshake.Secret = .{},
     read_keys: record.Keys = .{},
     write_keys: record.Keys = .{},
     reader_interface: std.Io.Reader,
@@ -69,6 +80,14 @@ pub const Client = struct {
     handshake_buffer: [handshake.max_handshake]u8 = undefined,
     handshake_len: usize = 0,
     handshake_offset: usize = 0,
+    client_hello: [handshake.max_handshake]u8 = undefined,
+    client_hello_len: usize = 0,
+    post_handshake: [handshake.max_handshake]u8 = undefined,
+    post_handshake_len: usize = 0,
+    client_certificate_chain: []const []const u8 = &.{},
+    client_private_key: ?Ecdsa.KeyPair = null,
+    certificate_requested: bool = false,
+    pending_key_update_response: std.atomic.Value(bool) = .init(false),
     allow_truncation_attacks: bool = false,
     closed: bool = false,
     eof_received: bool = false,
@@ -98,7 +117,7 @@ pub const Client = struct {
             .io = io,
             .input = input,
             .output = output,
-            .transcript = handshake.Hash.init(.{}),
+            .transcript = undefined,
             .key_schedule = undefined,
             .reader_interface = .{
                 .vtable = &.{ .stream = readerStream },
@@ -110,6 +129,8 @@ pub const Client = struct {
                 .vtable = &.{ .drain = writerDrain },
                 .buffer = options.write_buffer,
             },
+            .client_certificate_chain = options.client_certificate_chain,
+            .client_private_key = options.client_private_key,
             .allow_truncation_attacks = options.allow_truncation_attacks,
         };
         try self.runHandshake(options);
@@ -129,12 +150,23 @@ pub const Client = struct {
         return self.alpn_buf[0..self.alpn_len];
     }
 
+    pub fn negotiatedCipherSuite(self: *const Client) record.CipherSuite {
+        return self.write_keys.suite;
+    }
+
     pub fn readError(self: *const Client) ?InitError {
         return self.read_error;
     }
 
     pub fn writeError(self: *const Client) ?InitError {
         return self.write_error;
+    }
+
+    /// Sends a KeyUpdate and switches the sending keys (RFC 8446 §4.6.3).
+    /// The caller must serialize writes with any other writer task.
+    pub fn keyUpdate(self: *Client, request_update: bool) InitError!void {
+        try self.sendKeyUpdate(request_update);
+        self.output.flush() catch return error.HandshakeFailed;
     }
 
     pub fn end(self: *Client) std.Io.Writer.Error!void {
@@ -164,21 +196,30 @@ pub const Client = struct {
 
     fn runHandshake(self: *Client, options: Options) InitError!void {
         errdefer std.crypto.secureZero(u8, std.mem.asBytes(self));
+        try self.beginHandshake(options);
+        try self.finishHandshake(options);
+    }
+
+    fn beginHandshake(self: *Client, options: Options) InitError!void {
         var session_id: [32]u8 = undefined;
         var random: [32]u8 = undefined;
         std.Io.randomSecure(self.io, &random) catch return self.randomError();
         std.Io.randomSecure(self.io, &session_id) catch return self.randomError();
 
-        var key_pair = std.crypto.dh.X25519.KeyPair.generate(self.io);
-        defer std.crypto.secureZero(u8, std.mem.asBytes(&key_pair.secret_key));
+        var x25519 = std.crypto.dh.X25519.KeyPair.generate(self.io);
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&x25519.secret_key));
+        var p256_scalar = P256.scalar.random(self.io, .big);
+        defer std.crypto.secureZero(u8, &p256_scalar);
+        var p256_public = P256.basePoint.mul(p256_scalar, .big) catch
+            return error.HandshakeFailed;
 
         const client_hello = try self.buildClientHello(
             options,
             random,
             session_id,
-            key_pair.public_key,
+            x25519.public_key,
+            p256_public.toUncompressedSec1(),
         );
-        self.transcript.update(client_hello);
         record.writePlain(
             self.output,
             record.content_type_handshake,
@@ -189,41 +230,71 @@ pub const Client = struct {
         const server_hello_message = try self.readHandshakeMessage(null);
         const server_hello = handshake.parseServerHello(server_hello_message) catch
             return error.HandshakeFailed;
-        if (server_hello.hello_retry_request) return error.HandshakeFailed;
-        if (server_hello.session_id_len != session_id.len) {
+        if (server_hello.hello_retry_request) {
+            // This client always sends an X25519 and a P-256 share, so a
+            // conforming server never needs HelloRetryRequest. A retry for a
+            // group we already offered is a protocol violation.
             return error.HandshakeFailed;
         }
-        if (!std.mem.eql(u8, &server_hello.session_id, &session_id)) {
+        if (server_hello.session_id_len != session_id.len or
+            !std.mem.eql(u8, &server_hello.session_id, &session_id))
+        {
             return error.HandshakeFailed;
         }
+        const suite = server_hello.suite orelse return error.HandshakeFailed;
+        if (!containsSuite(options.cipher_suites, suite)) {
+            return error.HandshakeFailed;
+        }
+
+        self.transcript = handshake.Transcript.init(suite);
+        self.transcript.update(self.client_hello[0..self.client_hello_len]);
         self.transcript.update(server_hello_message);
 
-        var shared_secret = std.crypto.dh.X25519.scalarmult(
-            key_pair.secret_key,
-            server_hello.x25519_public,
-        ) catch return error.HandshakeFailed;
+        var shared_secret: [32]u8 = switch (server_hello.group.?) {
+            handshake.group_x25519 => std.crypto.dh.X25519.scalarmult(
+                x25519.secret_key,
+                server_hello.key_share[0..32].*,
+            ) catch return error.HandshakeFailed,
+            handshake.group_secp256r1 => p256SharedSecret(
+                p256_scalar,
+                server_hello.key_share[0..server_hello.key_share_len],
+            ) catch return error.HandshakeFailed,
+            else => return error.HandshakeFailed,
+        };
         defer std.crypto.secureZero(u8, &shared_secret);
         const hello_hash = handshake.transcriptHash(&self.transcript);
         self.key_schedule = handshake.KeySchedule.derive(
-            shared_secret,
+            suite,
+            &shared_secret,
             hello_hash,
-        );
+        ) catch return error.HandshakeFailed;
+    }
 
+    fn finishHandshake(self: *Client, options: Options) InitError!void {
         try self.readServerFlight(options, &self.key_schedule.server_hs_keys);
 
         const handshake_hash = handshake.transcriptHash(&self.transcript);
-        var client_app_secret = self.key_schedule.clientAppSecret(handshake_hash);
-        var server_app_secret = self.key_schedule.serverAppSecret(handshake_hash);
-        defer std.crypto.secureZero(u8, &client_app_secret);
-        defer std.crypto.secureZero(u8, &server_app_secret);
+        self.client_app_secret = self.key_schedule.clientAppSecret(
+            handshake_hash,
+        ) catch return error.HandshakeFailed;
+        self.server_app_secret = self.key_schedule.serverAppSecret(
+            handshake_hash,
+        ) catch return error.HandshakeFailed;
 
+        try self.sendClientAuthentication(&self.key_schedule.client_hs_keys);
         try self.sendClientFinished(
             &self.key_schedule.client_hs_keys,
             self.key_schedule.client_finished_key,
-            handshake_hash,
         );
-        self.read_keys = handshake.keysFromSecret(server_app_secret);
-        self.write_keys = handshake.keysFromSecret(client_app_secret);
+        const suite = self.key_schedule.suite;
+        self.read_keys = handshake.keysFromSecret(
+            suite,
+            self.server_app_secret,
+        ) catch return error.HandshakeFailed;
+        self.write_keys = handshake.keysFromSecret(
+            suite,
+            self.client_app_secret,
+        ) catch return error.HandshakeFailed;
         std.crypto.secureZero(u8, std.mem.asBytes(&self.key_schedule));
         if (options.required_alpn) |required| {
             const selected = self.negotiatedProtocol() orelse
@@ -239,25 +310,35 @@ pub const Client = struct {
         options: Options,
         random: [32]u8,
         session_id: [32]u8,
-        public_key: [32]u8,
+        x25519_public: [32]u8,
+        p256_public: [65]u8,
     ) InitError![]const u8 {
         var extension_buffer: [max_alpn_list + 512]u8 = undefined;
         var extensions = handshake.Encoder.init(&extension_buffer);
-        try writeExtensions(&extensions, options, public_key);
+        try writeExtensions(
+            &extensions,
+            options,
+            x25519_public,
+            p256_public,
+        );
 
-        var body = handshake.Encoder.init(self.handshake_buffer[4..]);
+        var body = handshake.Encoder.init(self.client_hello[4..]);
         try body.writeU16(0x0303);
         try body.append(&random);
         try body.writeU8(32);
         try body.append(&session_id);
-        try body.writeU16(2);
-        try body.writeU16(handshake.cipher_aes_128_gcm_sha256);
+        try body.writeU16(@intCast(options.cipher_suites.len * 2));
+        for (options.cipher_suites) |suite| {
+            try body.writeU16(suite.wireId());
+        }
         try body.writeU8(1);
         try body.writeU8(0);
         try body.writeU16(@intCast(extensions.len));
         try body.append(extensions.bytes());
-        return self.finishMessage(handshake.handshake_client_hello, body.len) catch
-            return error.HandshakeFailed;
+        self.client_hello[0] = handshake.handshake_client_hello;
+        std.mem.writeInt(u24, self.client_hello[1..4], @intCast(body.len), .big);
+        self.client_hello_len = 4 + body.len;
+        return self.client_hello[0..self.client_hello_len];
     }
 
     fn readServerFlight(
@@ -269,10 +350,19 @@ pub const Client = struct {
         try self.parseEncryptedExtensions(options, encrypted_extensions);
         self.transcript.update(encrypted_extensions);
 
-        const certificate_message = try self.readHandshakeMessage(keys);
-        self.parseCertificate(options, certificate_message) catch
+        var message = try self.readHandshakeMessage(keys);
+        if (message.len >= 1 and
+            message[0] == handshake.handshake_certificate_request)
+        {
+            try self.parseCertificateRequest(message);
+            self.transcript.update(message);
+            self.certificate_requested = true;
+            message = try self.readHandshakeMessage(keys);
+        }
+
+        self.parseCertificate(options, message) catch
             return error.HandshakeFailed;
-        self.transcript.update(certificate_message);
+        self.transcript.update(message);
 
         const verify_message = try self.readHandshakeMessage(keys);
         self.verifyCertificateVerify(verify_message) catch
@@ -320,6 +410,53 @@ pub const Client = struct {
         }
     }
 
+    fn parseCertificateRequest(self: *Client, message: []const u8) InitError!void {
+        _ = self;
+        if (message.len < 4 or
+            message[0] != handshake.handshake_certificate_request)
+        {
+            return error.HandshakeFailed;
+        }
+        var cursor: handshake.Cursor = .{ .buf = message[4..] };
+        const context_len = cursor.readU8() catch return error.HandshakeFailed;
+        cursor.skip(context_len) catch return error.HandshakeFailed;
+        const extensions_len = cursor.readU16() catch
+            return error.HandshakeFailed;
+        var extensions = cursor.sub(extensions_len) catch
+            return error.HandshakeFailed;
+        if (!cursor.eof()) return error.HandshakeFailed;
+
+        var seen_signature = false;
+        var has_p256 = false;
+        while (!extensions.eof()) {
+            const extension_type = extensions.readU16() catch
+                return error.HandshakeFailed;
+            const extension_len = extensions.readU16() catch
+                return error.HandshakeFailed;
+            var extension = extensions.sub(extension_len) catch
+                return error.HandshakeFailed;
+            if (extension_type != handshake.extension_signature_algorithms) {
+                continue;
+            }
+            if (seen_signature) return error.HandshakeFailed;
+            seen_signature = true;
+            const list_len = extension.readU16() catch
+                return error.HandshakeFailed;
+            if (list_len % 2 != 0) return error.HandshakeFailed;
+            var list = extension.sub(list_len) catch
+                return error.HandshakeFailed;
+            if (!extension.eof()) return error.HandshakeFailed;
+            while (!list.eof()) {
+                const scheme = list.readU16() catch
+                    return error.HandshakeFailed;
+                if (scheme == handshake.signature_ecdsa_secp256r1_sha256) {
+                    has_p256 = true;
+                }
+            }
+        }
+        if (!has_p256) return error.HandshakeFailed;
+    }
+
     fn parseCertificate(
         self: *Client,
         options: Options,
@@ -336,17 +473,9 @@ pub const Client = struct {
         if (!cursor.eof()) return error.HandshakeFailed;
 
         var chain: [cert_path.max_chain][]const u8 = undefined;
-        var chain_len: usize = 0;
-        while (!list.eof()) {
-            if (chain_len == chain.len) return error.HandshakeFailed;
-            const cert_len = list.readU24() catch return error.HandshakeFailed;
-            const der = list.readBytes(cert_len) catch return error.HandshakeFailed;
-            const extensions_len = list.readU16() catch
-                return error.HandshakeFailed;
-            _ = list.readBytes(extensions_len) catch return error.HandshakeFailed;
-            chain[chain_len] = der;
-            chain_len += 1;
-        }
+        const chain_len = credentials.readCertificateList(&chain, &list) catch
+            return error.HandshakeFailed;
+        if (chain_len == 0) return error.HandshakeFailed;
 
         const now_sec = std.Io.Timestamp.now(self.io, .real).toSeconds();
         var leaf: cert_path.Leaf = .{};
@@ -386,22 +515,18 @@ pub const Client = struct {
         var cursor: handshake.Cursor = .{ .buf = message[4..] };
         const scheme = cursor.readU16() catch return error.HandshakeFailed;
         const signature_len = cursor.readU16() catch return error.HandshakeFailed;
-        const signature = cursor.readBytes(signature_len) catch
+        const signature_value = cursor.readBytes(signature_len) catch
             return error.HandshakeFailed;
         if (!cursor.eof()) return error.HandshakeFailed;
 
-        const transcript_hash = handshake.transcriptHash(&self.transcript);
-        const context = "TLS 1.3, server CertificateVerify";
-        var signed: [64 + context.len + 1 + 32]u8 = undefined;
-        @memset(signed[0..64], 0x20);
-        @memcpy(signed[64..][0..context.len], context);
-        signed[64 + context.len] = 0;
-        @memcpy(signed[64 + context.len + 1 ..][0..32], &transcript_hash);
-
-        verifyServerSignature(
+        var signed = certificateVerifyInput(
+            "TLS 1.3, server CertificateVerify",
+            handshake.transcriptHash(&self.transcript),
+        );
+        signature.verify(
             scheme,
-            signature,
-            &signed,
+            signature_value,
+            signed.slice(),
             self.pubkey_algo,
             self.pubkey[0..self.pubkey_len],
         ) catch return error.HandshakeFailed;
@@ -411,41 +536,101 @@ pub const Client = struct {
         self: *Client,
         message: []const u8,
     ) InitError!void {
-        if (message.len != 4 + 32 or
+        if (message.len != 4 + self.key_schedule.suite.hashLength() or
             message[0] != handshake.handshake_finished)
         {
             return error.HandshakeFailed;
         }
         const transcript_hash = handshake.transcriptHash(&self.transcript);
         const expected = handshake.finishedVerifyData(
+            self.key_schedule.suite,
             self.key_schedule.server_finished_key,
             transcript_hash,
-        );
-        const actual: [32]u8 = message[4..36].*;
-        if (!std.crypto.timing_safe.eql([32]u8, expected, actual)) {
+        ) catch return error.HandshakeFailed;
+        const actual = message[4..][0..expected.len];
+        if (!constantTimeEqual(expected, actual)) {
             return error.HandshakeFailed;
         }
+    }
+
+    fn sendClientAuthentication(
+        self: *Client,
+        keys: *record.Keys,
+    ) InitError!void {
+        if (!self.certificate_requested) return;
+        self.sendClientCertificate(keys) catch return error.HandshakeFailed;
+        if (self.client_certificate_chain.len == 0) return;
+        self.sendClientCertificateVerify(keys) catch return error.HandshakeFailed;
+    }
+
+    fn sendClientCertificate(
+        self: *Client,
+        keys: *record.Keys,
+    ) InitError!void {
+        var body = handshake.Encoder.init(self.handshake_buffer[4..]);
+        try body.writeU8(0); // certificate_request_context
+        var list_len: usize = 0;
+        for (self.client_certificate_chain) |cert| {
+            list_len += 3 + cert.len + 2;
+        }
+        try body.writeU24(@intCast(list_len));
+        for (self.client_certificate_chain) |cert| {
+            try body.writeU24(@intCast(cert.len));
+            try body.append(cert);
+            try body.writeU16(0);
+        }
+        const message = self.finishMessage(
+            handshake.handshake_certificate,
+            body.len,
+        ) catch return error.HandshakeFailed;
+        try self.sendEncryptedHandshake(keys, message);
+    }
+
+    fn sendClientCertificateVerify(
+        self: *Client,
+        keys: *record.Keys,
+    ) InitError!void {
+        const key_pair = self.client_private_key orelse
+            return error.HandshakeFailed;
+        var signed = certificateVerifyInput(
+            "TLS 1.3, client CertificateVerify",
+            handshake.transcriptHash(&self.transcript),
+        );
+        const signature_value = key_pair.sign(signed.bytes[0..signed.len], null) catch
+            return error.HandshakeFailed;
+        var der_buffer: [Ecdsa.Signature.der_encoded_length_max]u8 = undefined;
+        const der = signature_value.toDer(&der_buffer);
+
+        var body = handshake.Encoder.init(self.handshake_buffer[4..]);
+        try body.writeU16(handshake.signature_ecdsa_secp256r1_sha256);
+        try body.writeU16(@intCast(der.len));
+        try body.append(der);
+        const message = self.finishMessage(
+            handshake.handshake_certificate_verify,
+            body.len,
+        ) catch return error.HandshakeFailed;
+        try self.sendEncryptedHandshake(keys, message);
     }
 
     fn sendClientFinished(
         self: *Client,
         keys: *record.Keys,
-        finished_key: [32]u8,
-        transcript_hash: [32]u8,
+        finished_key: handshake.Secret,
     ) InitError!void {
+        const transcript_hash = handshake.transcriptHash(&self.transcript);
         const verify_data = handshake.finishedVerifyData(
+            self.key_schedule.suite,
             finished_key,
             transcript_hash,
-        );
+        ) catch return error.HandshakeFailed;
         var body = handshake.Encoder.init(self.handshake_buffer[4..]);
-        body.append(&verify_data) catch return error.HandshakeFailed;
+        body.append(verify_data.slice()) catch return error.HandshakeFailed;
         const message = self.finishMessage(
             handshake.handshake_finished,
             body.len,
         ) catch return error.HandshakeFailed;
 
         self.write_keys = keys.*;
-        self.write_keys.seq = 0;
         const sealed = record.seal(
             &self.write_keys,
             record.content_type_handshake,
@@ -454,6 +639,24 @@ pub const Client = struct {
         ) catch return error.HandshakeFailed;
         self.output.writeAll(sealed) catch return error.HandshakeFailed;
         self.output.flush() catch return error.HandshakeFailed;
+    }
+
+    fn sendEncryptedHandshake(
+        self: *Client,
+        keys: *record.Keys,
+        message: []const u8,
+    ) InitError!void {
+        self.transcript.update(message);
+        const sealed = record.seal(
+            keys,
+            record.content_type_handshake,
+            message,
+            &self.record_write,
+        ) catch |err| switch (err) {
+            error.CounterExhausted => return error.Closed,
+            error.NoSpace => return error.HandshakeFailed,
+        };
+        self.output.writeAll(sealed) catch return error.HandshakeFailed;
     }
 
     fn finishMessage(
@@ -616,12 +819,108 @@ pub const Client = struct {
                 },
                 record.content_type_alert => return self.handleAlert(opened.content),
                 record.content_type_handshake => {
-                    try rejectKeyUpdate(opened.content);
+                    try self.handlePostHandshake(opened.content);
                     continue;
                 },
                 else => return error.HandshakeFailed,
             }
         }
+    }
+
+    fn handlePostHandshake(self: *Client, content: []const u8) InitError!void {
+        if (self.post_handshake.len - self.post_handshake_len < content.len) {
+            return error.HandshakeFailed;
+        }
+        @memcpy(
+            self.post_handshake[self.post_handshake_len..][0..content.len],
+            content,
+        );
+        self.post_handshake_len += content.len;
+
+        var offset: usize = 0;
+        while (self.post_handshake_len - offset >= 4) {
+            const body_len: usize = std.mem.readInt(
+                u24,
+                self.post_handshake[offset + 1 ..][0..3],
+                .big,
+            );
+            if (body_len > handshake.max_handshake - 4) {
+                return error.HandshakeFailed;
+            }
+            const total = 4 + body_len;
+            if (self.post_handshake_len - offset < total) break;
+            try self.handlePostHandshakeMessage(
+                self.post_handshake[offset..][0..total],
+            );
+            offset += total;
+        }
+        if (offset == 0) return;
+        const remaining = self.post_handshake_len - offset;
+        if (remaining != 0) {
+            std.mem.copyForwards(
+                u8,
+                self.post_handshake[0..remaining],
+                self.post_handshake[offset..self.post_handshake_len],
+            );
+        }
+        self.post_handshake_len = remaining;
+    }
+
+    fn handlePostHandshakeMessage(
+        self: *Client,
+        message: []const u8,
+    ) InitError!void {
+        switch (message[0]) {
+            // NewSessionTicket is ignored: this client has no PSK or tickets.
+            4 => {},
+            handshake.handshake_key_update => {
+                const request_update = handshake.parseKeyUpdate(message) catch
+                    return error.HandshakeFailed;
+                self.server_app_secret = handshake.updateSecret(
+                    self.write_keys.suite,
+                    self.server_app_secret,
+                ) catch return error.HandshakeFailed;
+                self.read_keys = handshake.keysFromSecret(
+                    self.write_keys.suite,
+                    self.server_app_secret,
+                ) catch return error.HandshakeFailed;
+                if (request_update) {
+                    self.pending_key_update_response.store(true, .release);
+                }
+            },
+            else => return error.HandshakeFailed,
+        }
+    }
+
+    fn sendKeyUpdate(self: *Client, request_update: bool) InitError!void {
+        var body = handshake.Encoder.init(self.handshake_buffer[4..]);
+        body.writeU8(@intFromBool(request_update)) catch
+            return error.HandshakeFailed;
+        const message = self.finishMessage(
+            handshake.handshake_key_update,
+            body.len,
+        ) catch return error.HandshakeFailed;
+
+        // RFC 8446 §4.6.3: the KeyUpdate itself uses the old sending keys;
+        // the new keys apply to records after it.
+        const sealed = record.seal(
+            &self.write_keys,
+            record.content_type_handshake,
+            message,
+            &self.record_write,
+        ) catch |err| switch (err) {
+            error.CounterExhausted => return error.Closed,
+            error.NoSpace => return error.HandshakeFailed,
+        };
+        self.output.writeAll(sealed) catch return error.HandshakeFailed;
+        self.client_app_secret = handshake.updateSecret(
+            self.write_keys.suite,
+            self.client_app_secret,
+        ) catch return error.HandshakeFailed;
+        self.write_keys = handshake.keysFromSecret(
+            self.write_keys.suite,
+            self.client_app_secret,
+        ) catch return error.HandshakeFailed;
     }
 
     fn copyPending(self: *Client, dest: []u8) usize {
@@ -645,6 +944,9 @@ pub const Client = struct {
     }
 
     fn writeAppData(self: *Client, bytes: []const u8) InitError!void {
+        if (self.pending_key_update_response.swap(false, .acquire)) {
+            try self.sendKeyUpdate(false);
+        }
         var offset: usize = 0;
         while (offset < bytes.len) {
             const chunk_len = @min(bytes.len - offset, record.max_plaintext);
@@ -654,7 +956,10 @@ pub const Client = struct {
                 record.content_type_application_data,
                 chunk,
                 &self.record_write,
-            ) catch return error.HandshakeFailed;
+            ) catch |err| switch (err) {
+                error.CounterExhausted => return error.Closed,
+                error.NoSpace => return error.HandshakeFailed,
+            };
             self.output.writeAll(sealed) catch return error.HandshakeFailed;
             offset += chunk_len;
         }
@@ -666,6 +971,62 @@ pub const Client = struct {
     }
 };
 
+pub const CertificateVerifyInput = struct {
+    bytes: [64 + 33 + 1 + handshake.max_hash_len]u8 = undefined,
+    len: usize = 0,
+
+    pub fn slice(self: *const CertificateVerifyInput) []const u8 {
+        return self.bytes[0..self.len];
+    }
+};
+
+fn certificateVerifyInput(
+    context: []const u8,
+    transcript_hash: handshake.TranscriptHash,
+) CertificateVerifyInput {
+    var result: CertificateVerifyInput = .{};
+    @memset(result.bytes[0..64], 0x20);
+    @memcpy(result.bytes[64..][0..context.len], context);
+    result.bytes[64 + context.len] = 0;
+    @memcpy(
+        result.bytes[64 + context.len + 1 ..][0..transcript_hash.len],
+        transcript_hash.slice(),
+    );
+    result.len = 64 + context.len + 1 + transcript_hash.len;
+    return result;
+}
+
+/// Constant-time comparison of a Finished or KeyUpdate-sized value.
+fn constantTimeEqual(
+    expected: handshake.Secret,
+    actual: []const u8,
+) bool {
+    if (actual.len != expected.len) return false;
+    var padded: [handshake.max_hash_len]u8 = @splat(0);
+    @memcpy(padded[0..actual.len], actual);
+    return std.crypto.timing_safe.eql(
+        [handshake.max_hash_len]u8,
+        expected.bytes,
+        padded,
+    );
+}
+
+fn p256SharedSecret(scalar: [32]u8, peer: []const u8) ![32]u8 {
+    const point = try P256.fromSec1(peer);
+    const shared = try point.mul(scalar, .big);
+    return shared.affineCoordinates().x.toBytes(.big);
+}
+
+fn containsSuite(
+    suites: []const record.CipherSuite,
+    suite: record.CipherSuite,
+) bool {
+    for (suites) |candidate| {
+        if (candidate == suite) return true;
+    }
+    return false;
+}
+
 fn validateOptions(options: Options) InitError!void {
     if (options.read_buffer.len == 0 or options.write_buffer.len == 0) {
         return error.HandshakeFailed;
@@ -674,6 +1035,23 @@ fn validateOptions(options: Options) InitError!void {
         (options.server_name == null or options.ca == null))
     {
         return error.HandshakeFailed;
+    }
+    if (options.cipher_suites.len == 0) return error.HandshakeFailed;
+    for (options.cipher_suites, 0..) |suite, index| {
+        for (options.cipher_suites[0..index]) |previous| {
+            if (previous == suite) return error.HandshakeFailed;
+        }
+    }
+    if ((options.client_certificate_chain.len == 0) !=
+        (options.client_private_key == null))
+    {
+        return error.HandshakeFailed;
+    }
+    if (options.client_certificate_chain.len != 0) {
+        credentials.validateCredentials(
+            options.client_certificate_chain,
+            options.client_private_key.?,
+        ) catch return error.HandshakeFailed;
     }
     var alpn_len: usize = 0;
     for (options.alpn_protocols) |protocol| {
@@ -690,7 +1068,8 @@ fn validateOptions(options: Options) InitError!void {
 fn writeExtensions(
     extensions: *handshake.Encoder,
     options: Options,
-    public_key: [32]u8,
+    x25519_public: [32]u8,
+    p256_public: [65]u8,
 ) InitError!void {
     try writeServerName(extensions, options.server_name);
     try extensions.writeU16(handshake.extension_supported_versions);
@@ -699,15 +1078,19 @@ fn writeExtensions(
     try extensions.writeU16(handshake.tls_1_3);
     try writeSignatureAlgorithms(extensions);
     try extensions.writeU16(0x000a); // supported_groups
+    try extensions.writeU16(6);
     try extensions.writeU16(4);
-    try extensions.writeU16(2);
     try extensions.writeU16(handshake.group_x25519);
+    try extensions.writeU16(handshake.group_secp256r1);
     try extensions.writeU16(handshake.extension_key_share);
-    try extensions.writeU16(38);
-    try extensions.writeU16(36);
+    try extensions.writeU16(107);
+    try extensions.writeU16(105);
     try extensions.writeU16(handshake.group_x25519);
     try extensions.writeU16(32);
-    try extensions.append(&public_key);
+    try extensions.append(&x25519_public);
+    try extensions.writeU16(handshake.group_secp256r1);
+    try extensions.writeU16(65);
+    try extensions.append(&p256_public);
     if (options.alpn_protocols.len != 0) {
         handshake.writeAlpnExtension(extensions, options.alpn_protocols) catch
             return error.HandshakeFailed;
@@ -763,142 +1146,6 @@ fn containsProtocol(protocols: []const []const u8, protocol: []const u8) bool {
     return false;
 }
 
-fn verifyServerSignature(
-    scheme: u16,
-    signature: []const u8,
-    message: []const u8,
-    pub_key_algo: Certificate.Parsed.PubKeyAlgo,
-    pub_key: []const u8,
-) !void {
-    switch (scheme) {
-        handshake.signature_ecdsa_secp256r1_sha256 => {
-            const Signature = Ecdsa.EcdsaP256Sha256.Signature;
-            const PublicKey = Ecdsa.EcdsaP256Sha256.PublicKey;
-            const sig = try Signature.fromDer(signature);
-            const key = try PublicKey.fromSec1(pub_key);
-            try sig.verify(message, key);
-        },
-        handshake.signature_ecdsa_secp384r1_sha384 => {
-            const Signature = Ecdsa.EcdsaP384Sha384.Signature;
-            const PublicKey = Ecdsa.EcdsaP384Sha384.PublicKey;
-            const sig = try Signature.fromDer(signature);
-            const key = try PublicKey.fromSec1(pub_key);
-            try sig.verify(message, key);
-        },
-        handshake.signature_ed25519 => {
-            const Ed25519 = std.crypto.sign.Ed25519;
-            if (signature.len != Ed25519.Signature.encoded_length) {
-                return error.InvalidSignature;
-            }
-            if (pub_key.len != Ed25519.PublicKey.encoded_length) {
-                return error.InvalidSignature;
-            }
-            const sig = Ed25519.Signature.fromBytes(
-                signature[0..Ed25519.Signature.encoded_length].*,
-            );
-            const key = try Ed25519.PublicKey.fromBytes(
-                pub_key[0..Ed25519.PublicKey.encoded_length].*,
-            );
-            try sig.verify(message, key);
-        },
-        handshake.signature_rsa_pss_sha256,
-        handshake.signature_rsa_pss_sha384,
-        handshake.signature_rsa_pss_sha512,
-        => try verifyRsa(scheme, signature, message, pub_key_algo, pub_key),
-        else => return error.HandshakeFailed,
-    }
-}
-
-fn verifyRsa(
-    scheme: u16,
-    signature: []const u8,
-    message: []const u8,
-    pub_key_algo: Certificate.Parsed.PubKeyAlgo,
-    pub_key: []const u8,
-) !void {
-    if (pub_key_algo != .rsaEncryption and pub_key_algo != .rsassa_pss) {
-        return error.HandshakeFailed;
-    }
-    const components = try Certificate.rsa.PublicKey.parseDer(pub_key);
-    const key = try Certificate.rsa.PublicKey.fromBytes(
-        components.exponent,
-        components.modulus,
-    );
-    // RFC 8446 §4.4.3: the signature is a fixed-size RSA result, so its
-    // length must equal the certificate modulus. A mismatch would otherwise
-    // trip an assertion inside the PSS verifier.
-    if (signature.len != components.modulus.len) {
-        return error.HandshakeFailed;
-    }
-    // The std PSS verifier derives the encoded-message length from the
-    // modulus bit length and asserts that it equals the byte length. Keys
-    // whose modulus is more than six bits short of a whole byte (for example
-    // 2041-bit) would abort, so reject them before reaching the assertion.
-    if (components.modulus.len == 0) return error.HandshakeFailed;
-    const leading_zeros = @as(usize, @clz(components.modulus[0]));
-    const modulus_bits = components.modulus.len * 8 - leading_zeros;
-    if (modulus_bits + 6 < components.modulus.len * 8) {
-        return error.HandshakeFailed;
-    }
-    switch (signature.len) {
-        inline 256, 384, 512 => |modulus_len| {
-            const sig: *const [modulus_len]u8 = signature[0..modulus_len];
-            switch (scheme) {
-                handshake.signature_rsa_pkcs1_sha256 => try Certificate.rsa
-                    .PKCS1v1_5Signature.verify(
-                    modulus_len,
-                    sig,
-                    message,
-                    key,
-                    std.crypto.hash.sha2.Sha256,
-                ),
-                handshake.signature_rsa_pkcs1_sha384 => try Certificate.rsa
-                    .PKCS1v1_5Signature.verify(
-                    modulus_len,
-                    sig,
-                    message,
-                    key,
-                    std.crypto.hash.sha2.Sha384,
-                ),
-                handshake.signature_rsa_pkcs1_sha512 => try Certificate.rsa
-                    .PKCS1v1_5Signature.verify(
-                    modulus_len,
-                    sig,
-                    message,
-                    key,
-                    std.crypto.hash.sha2.Sha512,
-                ),
-                handshake.signature_rsa_pss_sha256 => try Certificate.rsa
-                    .PSSSignature.verify(
-                    modulus_len,
-                    sig,
-                    message,
-                    key,
-                    std.crypto.hash.sha2.Sha256,
-                ),
-                handshake.signature_rsa_pss_sha384 => try Certificate.rsa
-                    .PSSSignature.verify(
-                    modulus_len,
-                    sig,
-                    message,
-                    key,
-                    std.crypto.hash.sha2.Sha384,
-                ),
-                handshake.signature_rsa_pss_sha512 => try Certificate.rsa
-                    .PSSSignature.verify(
-                    modulus_len,
-                    sig,
-                    message,
-                    key,
-                    std.crypto.hash.sha2.Sha512,
-                ),
-                else => return error.HandshakeFailed,
-            }
-        },
-        else => return error.HandshakeFailed,
-    }
-}
-
 fn readerStream(
     io_r: *std.Io.Reader,
     io_w: *std.Io.Writer,
@@ -947,23 +1194,6 @@ fn writerDrain(
         }
     }
     return consumed;
-}
-
-fn rejectKeyUpdate(content: []const u8) InitError!void {
-    var offset: usize = 0;
-    while (offset < content.len) {
-        if (content.len - offset < 4) return error.HandshakeFailed;
-        const body_len: usize = std.mem.readInt(
-            u24,
-            content[offset + 1 ..][0..3],
-            .big,
-        );
-        if (body_len > content.len - offset - 4) {
-            return error.HandshakeFailed;
-        }
-        if (content[offset] == 24) return error.HandshakeFailed;
-        offset += 4 + body_len;
-    }
 }
 
 fn mapRecordError() InitError {
@@ -1045,6 +1275,36 @@ test "ALPN protocol names are bounded" {
     );
 }
 
+test "cipher suite list must be non-empty and unique" {
+    var input: std.Io.Reader = .failing;
+    var output: std.Io.Writer = .failing;
+    var dummy: [1]u8 = undefined;
+    const duplicate = [_]record.CipherSuite{
+        .aes_128_gcm_sha256,
+        .aes_128_gcm_sha256,
+    };
+    try std.testing.expectError(
+        error.HandshakeFailed,
+        Client.init(std.testing.io, &input, &output, .{
+            .server_name = "localhost",
+            .verify = false,
+            .cipher_suites = &.{},
+            .read_buffer = &dummy,
+            .write_buffer = &dummy,
+        }),
+    );
+    try std.testing.expectError(
+        error.HandshakeFailed,
+        Client.init(std.testing.io, &input, &output, .{
+            .server_name = "localhost",
+            .verify = false,
+            .cipher_suites = &duplicate,
+            .read_buffer = &dummy,
+            .write_buffer = &dummy,
+        }),
+    );
+}
+
 fn failingStream(
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
@@ -1116,72 +1376,4 @@ test "missing close_notify is a truncation unless explicitly allowed" {
         client.readPlaintext(&dest),
     );
     try std.testing.expect(client.eof_received);
-}
-
-test "post-handshake KeyUpdate is rejected even after a ticket" {
-    const content = [_]u8{
-        4, 0, 0, 0, // NewSessionTicket header, empty body
-        24, 0, 0, 0, // KeyUpdate header, empty body
-    };
-    try std.testing.expectError(
-        error.HandshakeFailed,
-        rejectKeyUpdate(&content),
-    );
-}
-
-test "RSA-PSS signature length must match the certificate modulus" {
-    const allocator = std.testing.allocator;
-    var key: std.ArrayList(u8) = .empty;
-    defer key.deinit(allocator);
-    try key.append(allocator, 0x30);
-    try key.append(allocator, 0x81);
-    try key.append(allocator, 0x86);
-    try key.append(allocator, 0x02);
-    try key.append(allocator, 0x81);
-    try key.append(allocator, 0x80);
-    try key.appendNTimes(allocator, 0x81, 128);
-    try key.appendSlice(allocator, &.{ 0x02, 0x01, 0x03 });
-
-    var signature: [256]u8 = undefined;
-    @memset(&signature, 1);
-    try std.testing.expectError(
-        error.HandshakeFailed,
-        verifyRsa(
-            handshake.signature_rsa_pss_sha256,
-            &signature,
-            "message",
-            .rsaEncryption,
-            key.items,
-        ),
-    );
-}
-
-test "RSA moduli with non-byte-aligned bit lengths are rejected" {
-    const allocator = std.testing.allocator;
-    var key: std.ArrayList(u8) = .empty;
-    defer key.deinit(allocator);
-    try key.append(allocator, 0x30);
-    try key.append(allocator, 0x81);
-    try key.append(allocator, 0x86);
-    try key.append(allocator, 0x02);
-    try key.append(allocator, 0x81);
-    try key.append(allocator, 0x80);
-    try key.append(allocator, 0x01);
-    try key.appendNTimes(allocator, 0x00, 126);
-    try key.append(allocator, 0x01);
-    try key.appendSlice(allocator, &.{ 0x02, 0x01, 0x03 });
-
-    var signature: [256]u8 = undefined;
-    @memset(&signature, 0);
-    signature[255] = 1;
-    try std.testing.expectError(
-        error.HandshakeFailed,
-        verifyRsa(
-            handshake.signature_rsa_pss_sha256,
-            &signature,
-            "message",
-            .rsaEncryption,
-            key.items,
-        ),
-    );
 }

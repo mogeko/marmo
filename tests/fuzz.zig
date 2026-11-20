@@ -345,7 +345,12 @@ fn fuzzTlsRecordRead(_: Context, smith: *std.testing.Smith) anyerror!void {
 fn fuzzTlsRecordOpen(_: Context, smith: *std.testing.Smith) anyerror!void {
     var input: [tls13.record.max_record]u8 = undefined;
     const len = smith.slice(&input);
-    var keys: tls13.record.Keys = .{ .seq = smith.value(u64) };
+    var keys: tls13.record.Keys = .{
+        .suite = tls13.record.CipherSuite.list[
+            smith.value(u8) % tls13.record.CipherSuite.list.len
+        ],
+        .seq = smith.value(u64),
+    };
     smith.bytes(&keys.key);
     smith.bytes(&keys.iv);
 
@@ -363,6 +368,9 @@ fn fuzzTlsRecordOpenValid(_: Context, smith: *std.testing.Smith) anyerror!void {
     var plain: [tls13.record.max_plaintext]u8 = undefined;
     const len = smith.slice(&plain);
     var keys: tls13.record.Keys = .{
+        .suite = tls13.record.CipherSuite.list[
+            smith.value(u8) % tls13.record.CipherSuite.list.len
+        ],
         .seq = smith.valueRangeAtMost(u64, 0, std.math.maxInt(u64) - 2),
     };
     smith.bytes(&keys.key);
@@ -404,7 +412,12 @@ fn fuzzTlsRecordOpenValid(_: Context, smith: *std.testing.Smith) anyerror!void {
 fn fuzzTlsRecordSeal(_: Context, smith: *std.testing.Smith) anyerror!void {
     var input: [tls13.record.max_plaintext]u8 = undefined;
     const len = smith.slice(&input);
-    var keys: tls13.record.Keys = .{ .seq = smith.value(u64) };
+    var keys: tls13.record.Keys = .{
+        .suite = tls13.record.CipherSuite.list[
+            smith.value(u8) % tls13.record.CipherSuite.list.len
+        ],
+        .seq = smith.value(u64),
+    };
     smith.bytes(&keys.key);
     smith.bytes(&keys.iv);
 
@@ -508,16 +521,38 @@ fn fuzzTlsCredentials(ctx: Context, smith: *std.testing.Smith) anyerror!void {
 
 fn fuzzTlsKeySchedule(_: Context, smith: *std.testing.Smith) anyerror!void {
     var shared_secret: [32]u8 = undefined;
-    var hello_hash: [32]u8 = undefined;
+    var hash_bytes: [tls13.handshake.max_hash_len]u8 = undefined;
     smith.bytes(&shared_secret);
-    smith.bytes(&hello_hash);
-    const schedule = tls13.handshake.KeySchedule.derive(shared_secret, hello_hash);
+    smith.bytes(&hash_bytes);
+    const suite = tls13.record.CipherSuite.list[
+        smith.value(u8) % tls13.record.CipherSuite.list.len
+    ];
+    const hash_len = suite.hashLength();
+    const hello_hash: tls13.handshake.TranscriptHash = .{
+        .bytes = hash_bytes,
+        .len = @intCast(hash_len),
+        .suite = suite,
+    };
+    const schedule = tls13.handshake.KeySchedule.derive(
+        suite,
+        &shared_secret,
+        hello_hash,
+    ) catch return;
     _ = tls13.handshake.finishedVerifyData(
+        suite,
         schedule.server_finished_key,
         hello_hash,
-    );
-    _ = schedule.clientAppSecret(hello_hash);
-    _ = schedule.serverAppSecret(hello_hash);
+    ) catch return;
+    _ = schedule.clientAppSecret(hello_hash) catch return;
+    _ = schedule.serverAppSecret(hello_hash) catch return;
+}
+
+fn fuzzTlsKeyUpdate(_: Context, smith: *std.testing.Smith) anyerror!void {
+    var input: [16]u8 = undefined;
+    const len = smith.slice(&input);
+    _ = tls13.handshake.parseKeyUpdate(input[0..len]) catch |err| switch (err) {
+        error.HandshakeFailed => return,
+    };
 }
 
 fn fuzzTrojanAuth(ctx: Context, smith: *std.testing.Smith) anyerror!void {
@@ -947,6 +982,7 @@ pub const targets = [_]Target{
     .{ .name = "tls_server_handshake_mutated", .max_input = 1024, .run = fuzzTlsServerHandshakeMutated },
     .{ .name = "tls_credentials", .max_input = 4096, .run = fuzzTlsCredentials },
     .{ .name = "tls_key_schedule", .max_input = 64, .run = fuzzTlsKeySchedule },
+    .{ .name = "tls_key_update", .max_input = 16, .run = fuzzTlsKeyUpdate },
     .{ .name = "tls_server_hello", .max_input = 16 * 1024, .run = fuzzTlsServerHello },
     .{ .name = "tls_cert_path", .max_input = 16 * 1024, .run = fuzzTlsCertPath },
     .{ .name = "ws_frame", .max_input = ws.max_frame_payload, .run = fuzzWsFrame },
@@ -1138,6 +1174,17 @@ test "fuzz corpus: TLS certificate path" {
             "\x30",
             "\x30\x01\x00",
             "\x30\x82\xff\xff",
+        },
+    });
+}
+
+test "fuzz corpus: TLS KeyUpdate" {
+    try std.testing.fuzz(testContext(), fuzzTlsKeyUpdate, .{
+        .corpus = &.{
+            "",
+            "\x18\x00\x00\x01\x00",
+            "\x18\x00\x00\x01\x01",
+            "\x18\x00\x00\x02\x00\x00",
         },
     });
 }
