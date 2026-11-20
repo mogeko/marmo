@@ -25,14 +25,36 @@
 
 ### Added
 
+- Client authentication (mTLS): the client sends a configured ECDSA P-256
+  chain and CertificateVerify; the server sends CertificateRequest, verifies
+  the client chain against a configured trust bundle with `clientAuth` EKU
+  checks, and enforces `none`/`optional`/`required` policy.
+- `TLS_AES_256_GCM_SHA384` and `TLS_CHACHA20_POLY1305_SHA256` alongside
+  `TLS_AES_128_GCM_SHA256`, with suite-specific transcript hash, HKDF hash,
+  secret/Finished lengths, and record keys. Negotiation is preference-ordered
+  on both roles, and a client rejects a suite it did not offer.
+- secp256r1 (P-256) ECDHE alongside X25519. The client sends both key shares;
+  the server selects a group that was shared. HelloRetryRequest is parsed and
+  rejected because the client already offered every supported group.
+- KeyUpdate in both roles: peer updates replace read traffic secrets and read
+  keys, `update_requested` is answered before the next application record, and
+  `Client.keyUpdate`/`Server.keyUpdate` can initiate an update. Read and write
+  key transitions touch disjoint state; the response flag is atomic.
+- Root config fields `tls.client_certificate`/`client_private_key` for
+  outbound TLS and `tls.client_ca`/`tls.client_auth` for inbound TLS, plus
+  credential loading through `src/transport/tls_credentials.zig`.
+- `tls_key_update` fuzz target, package loopback matrices for every
+  suite/group, mTLS policy tests, KeyUpdate-under-traffic tests, and
+  HelloRetryRequest parser tests.
+
 - ALPN negotiation on the client and server. `Options.alpn_protocols`,
   `ServerOptions.alpn_protocols`, and `negotiatedProtocol()` are available on
   both roles; a non-empty server list with no overlap fails the handshake
   (ADR-0012).
-- In-tree TLS 1.3 client with X25519, AES-128-GCM/SHA-256, and ECDSA
-  P-256/P-384, Ed25519, and RSA server-certificate verification. It replaces
-  `std.crypto.tls.Client`, which cannot send ALPN. The client now rejects
-  TLS 1.2-only servers and rejects post-handshake KeyUpdate.
+- In-tree TLS 1.3 client with X25519/P-256, the three AEAD suites, and ECDSA
+  P-256/P-384, Ed25519, and RSA server-certificate verification. It replaced
+  `std.crypto.tls.Client`, which cannot send ALPN. The client rejects
+  TLS 1.2-only servers; KeyUpdate is now supported.
 - Package tests for ALPN selection and the client/server handshake path.
 
 ### Fixed
@@ -44,16 +66,20 @@
 
 ### Known limitations
 
-- TLS 1.3 only, with X25519 and `TLS_AES_128_GCM_SHA256`; no AES-256-GCM,
-  ChaCha20-Poly1305, secp256r1/secp384r1 key exchange, or HelloRetryRequest.
-- No client authentication, PSK, session tickets, 0-RTT, KeyUpdate, TLS 1.2,
-  or CRL/OCSP revocation checking.
-- Server credentials are ECDSA P-256 only and a single certificate/key pair;
-  no RSA/Ed25519/P-384 server keys or SNI certificate selection.
+- TLS 1.3 only. X25519 and P-256 ECDHE; no P-384/X25519MLKEM or other groups,
+  and HelloRetryRequest is rejected rather than retried.
+- No PSK, session resumption, tickets, 0-RTT, TLS 1.2, ECH, record padding, or
+  CRL/OCSP revocation checking.
+- Server and client credentials are ECDSA P-256 only, with a single
+  certificate/key pair; no RSA/Ed25519/P-384 credentials or SNI certificate
+  selection.
 - Certificate policy still differs from OpenSSL: no-SAN certificates fall back
   to CN, leaf `keyUsage` is not checked, and anchor `pathLen`/`keyUsage` are
   not enforced.
-- No external cryptographic audit. Tests: 34 package tests.
+- Client-auth chain validation uses the configured bundle only; a future
+  `certificate_authorities` request hint and per-identity policy are out of
+  scope.
+- No external cryptographic audit. Tests: 47 package tests.
 
 ## 0.0.1 - 2026-11-19
 

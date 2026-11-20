@@ -66,3 +66,39 @@ our control.
   server. TLS 1.2-only servers are rejected.
 - Tested with in-tree client/server ALPN matrices (match, no overlap, absent)
   and by H2/WS transport tests that require the negotiated name.
+
+## Amendment (2026-11-20, direct implementation request by @mogeko)
+
+The TLS 1.3 scope listed above is extended. This amendment does not change the
+ALPN decision; it records the additional negotiated features and their bounds.
+
+- **Client authentication (mTLS).** The client can send a configured ECDSA
+  P-256 certificate chain and `CertificateVerify`. The server can send
+  `CertificateRequest`, verify the client chain against a configured trust
+  bundle, enforce `clientAuth` EKU on the leaf and any constrained CA, and
+  apply a `none`/`optional`/`required` policy. An empty client Certificate is
+  accepted only under `optional`; `required` fails the handshake.
+- **Cipher suites.** `TLS_AES_256_GCM_SHA384` (`0x1302`) and
+  `TLS_CHACHA20_POLY1305_SHA256` (`0x1303`) join
+  `TLS_AES_128_GCM_SHA256`. The transcript hash, HKDF hash, secret length,
+  AEAD key length, and Finished length follow the selected suite. The client
+  offers its configured preference order; the server picks its first entry
+  the client offered and rejects a selection that was not offered.
+- **Key exchange groups.** secp256r1 (`0x0017`) joins X25519. The client sends
+  both key shares, so a conforming server needs no HelloRetryRequest; the
+  server selects a group for which the client supplied a share. A
+  HelloRetryRequest is parsed and rejected because this client has already
+  offered every group it supports.
+- **KeyUpdate.** Both roles accept a peer KeyUpdate, replace the read traffic
+  secret and read keys, and answer `update_requested` before the next
+  application record. Either role can also send a KeyUpdate, which replaces
+  its write secret and write keys. Read and write key state is disjoint; the
+  write path stays serialized by the caller, and the pending-response flag is
+  atomic so the read path never mutates write keys.
+- **Root adapters.** Config gains `tls.client_certificate`/`client_private_key`
+  for outbound TLS, and `tls.client_ca`/`tls.client_auth` for inbound TLS.
+  Credentials and client CA files load through `tls_credentials.zig`.
+
+Still out of scope: session resumption/PSK/tickets/0-RTT, TLS 1.2,
+revocation/OCSP/CRL, ECH, record padding, SNI multi-certificate selection,
+RSA/Ed25519 server or client credentials, and external audit.
