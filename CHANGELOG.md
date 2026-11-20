@@ -42,8 +42,9 @@ and behavior may change between minor releases.
   send the ALPN extension. It verifies ECDSA, Ed25519, and RSA server
   certificates through the system CA bundle.
 - First-party `packages/http2`: HTTP/2 framing, HPACK with Huffman decoding,
-  SETTINGS, flow control, and a one-stream client/server transport
-  (ADR-0013). Root adapters expose `H2Stream` and `H2Dialer`.
+  SETTINGS, flow control, bounded 16-stream multiplexing, and 1xx/trailers for
+  gRPC-style callers (ADR-0013). Root adapters expose `H2Stream` and
+  `H2Dialer`.
 - First-party `packages/ws`: RFC 6455 client/server opening handshake, masked
   framing, continuation, ping/pong, and close (ADR-0014). Root adapters expose
   `WsStream` and `WsDialer`.
@@ -81,10 +82,11 @@ and behavior may change between minor releases.
   TLS 1.2, or CRL/OCSP, and only X25519 + AES-128-GCM. Certificate policy
   still falls back to CN and does not check leaf `keyUsage`. See
   [packages/tls13/CHANGELOG.md](packages/tls13/CHANGELOG.md).
-- HTTP/2: one stream per connection and not wired into `Config`/`Instance`;
-  `H2Stream`/`H2Dialer` are programmatic adapters only. No multiplexing,
-  gRPC, 1xx/trailers, CONNECT, server push, or graceful GOAWAY. See
-  [packages/http2/CHANGELOG.md](packages/http2/CHANGELOG.md).
+- HTTP/2: not wired into `Config`/`Instance`; `H2Stream`/`H2Dialer` are
+  programmatic adapters only. The package supports 16 concurrent streams and
+  1xx/trailers, but no server push/PRIORITY, h2c upgrade, HTTP/2 WebSocket, or
+  gRPC message framing; HPACK encoding has no Huffman/dynamic-table insertion.
+  See [packages/http2/CHANGELOG.md](packages/http2/CHANGELOG.md).
 - WebSocket: not wired into `Config`/`Instance`; `WsStream`/`WsDialer` are
   programmatic adapters only. No compression, subprotocol negotiation,
   Origin/auth handling, true half-close, or HTTP/2 WebSocket. A connection
