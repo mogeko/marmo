@@ -78,8 +78,17 @@ pub const TlsServerStream = struct {
 
         var buffer: [2]ServerHandshake = undefined;
         var select: std.Io.Select(ServerHandshake) = .init(io, &buffer);
-        select.concurrent(.server, serverHandshake, .{ self, options }) catch {
+        select.concurrent(.server, serverHandshake, .{ self, options }) catch |err| {
             drainServerHandshake(&select);
+            if (err == error.ConcurrencyUnavailable) {
+                self.server = serverHandshake(self, options) catch |handshake_err|
+                    switch (handshake_err) {
+                        error.Canceled => return error.Canceled,
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => return error.HandshakeFailed,
+                    };
+                return self;
+            }
             return error.HandshakeFailed;
         };
         select.concurrent(.timeout, handshakeTimeout, .{

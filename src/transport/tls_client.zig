@@ -82,8 +82,18 @@ pub const TlsClientStream = struct {
 
         var buffer: [2]ClientHandshake = undefined;
         var select: std.Io.Select(ClientHandshake) = .init(io, &buffer);
-        select.concurrent(.client, clientHandshake, .{ self, options }) catch {
+        select.concurrent(.client, clientHandshake, .{ self, options }) catch |err| {
             drainClientHandshake(&select);
+            if (err == error.ConcurrencyUnavailable) {
+                // Single-threaded embedders cannot host timer tasks; run the
+                // handshake inline and let the caller's guard bound it.
+                self.client = clientHandshake(self, options) catch |handshake_err|
+                    switch (handshake_err) {
+                        error.Canceled => return error.Canceled,
+                        else => return error.HandshakeFailed,
+                    };
+                return self;
+            }
             return error.HandshakeFailed;
         };
         select.concurrent(.timeout, handshakeTimeout, .{

@@ -211,10 +211,10 @@ pub const Guard = struct {
             .done => return,
         }
         self.phase.store(.done, .release);
-        // Some platforms report ENOTCONN for `.both` after a peer half-close;
-        // try the directions separately so the remaining side still sees EOF.
-        self.abort_stream.shutdown(self.io, .send) catch {};
-        self.abort_stream.shutdown(self.io, .recv) catch {};
+        // The abort path is also used when the guarded stream is wrapped by
+        // TLS/WS/H2, whose `.send` may wait on a writer. `.both` bypasses the
+        // write lock and is non-blocking in every in-tree adapter.
+        self.abort_stream.shutdown(self.io, .both) catch {};
 
         // Keep the peer lock across the abort. `stop`/`clearPeer` then cannot
         // let the connection task free the adapter while it is being aborted.
@@ -273,4 +273,83 @@ test "idle and grace deadlines remain independent" {
     try std.testing.expectEqual(idle, guard.idle_deadline_ns.load(.acquire));
     guard.touch();
     try std.testing.expect(guard.idle_deadline_ns.load(.acquire) >= idle);
+}
+
+const AbortRecorder = struct {
+    both: u32 = 0,
+    send: u32 = 0,
+
+    fn stream(self: *AbortRecorder) Stream {
+        return .{ .ctx = self, .vtable = &vtable };
+    }
+
+    fn read(_: *anyopaque, _: std.Io, _: [][]u8) Stream.ReadError!usize {
+        return 0;
+    }
+
+    fn write(
+        _: *anyopaque,
+        _: std.Io,
+        buffers: []const []const u8,
+    ) Stream.WriteError!usize {
+        var total: usize = 0;
+        for (buffers) |buffer| total += buffer.len;
+        return total;
+    }
+
+    fn shutdown(
+        ctx: *anyopaque,
+        _: std.Io,
+        how: Stream.ShutdownHow,
+    ) Stream.ShutdownError!void {
+        const self: *AbortRecorder = @ptrCast(@alignCast(ctx));
+        switch (how) {
+            .both => self.both += 1,
+            .send => self.send += 1,
+            .recv => {},
+        }
+    }
+
+    fn close(_: *anyopaque, _: std.Io) void {}
+
+    fn local(_: *anyopaque) @import("../net/endpoint.zig").Endpoint {
+        return .{ .ip = .{ .ip4 = .loopback(0) } };
+    }
+
+    fn remote(_: *anyopaque) @import("../net/endpoint.zig").Endpoint {
+        return .{ .ip = .{ .ip4 = .loopback(0) } };
+    }
+
+    const vtable: Stream.VTable = .{
+        .read = read,
+        .write = write,
+        .shutdown = shutdown,
+        .close = close,
+        .local = local,
+        .remote = remote,
+    };
+};
+
+test "the reaper aborts with .both instead of a blocking .send" {
+    var entries: [1]?*Guard = .{null};
+    var registry: Registry = .{ .entries = entries[0..] };
+    var metrics: Metrics = .{};
+    var recorder: AbortRecorder = .{};
+    var guard = Guard.init(
+        std.testing.io,
+        &registry,
+        &metrics,
+        recorder.stream(),
+        .{
+            .handshake_ns = 0,
+            .idle_ns = 0,
+            .uplink_only_ns = 0,
+            .downlink_only_ns = 0,
+        },
+    );
+    try std.testing.expect(guard.register());
+    registry.scan(std.testing.io, nowNs(std.testing.io) + 1);
+    try std.testing.expectEqual(@as(u32, 1), recorder.both);
+    try std.testing.expectEqual(@as(u32, 0), recorder.send);
+    guard.stop();
 }

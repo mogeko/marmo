@@ -35,6 +35,9 @@ pub const Params = struct {
     /// Wrapper tag for the [3] extensions field. Non-0xa3 values exercise
     /// std's low-five-bit tag comparison.
     extensions_tag: u8 = 0xa3,
+    /// OID used for the SAN extension. The legacy 2.5.29.7 alias exercises
+    /// std's duplicate SAN mapping.
+    san_oid: []const u8 = &.{ 0x55, 0x1d, 0x11 },
     /// Omits the explicit version field, producing a v1 certificate.
     omit_version: bool = false,
     /// Emits an issuerUniqueID [1] before the extensions field.
@@ -209,7 +212,7 @@ fn buildExtensions(gpa: std.mem.Allocator, params: Params) ![]u8 {
         try appendExtension(
             gpa,
             &extensions,
-            &.{ 0x55, 0x1d, 0x11 },
+            params.san_oid,
             false,
             value,
         );
@@ -221,7 +224,7 @@ fn buildExtensions(gpa: std.mem.Allocator, params: Params) ![]u8 {
         try appendExtension(
             gpa,
             &extensions,
-            &.{ 0x55, 0x1d, 0x11 },
+            params.san_oid,
             false,
             general_names,
         );

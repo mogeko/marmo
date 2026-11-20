@@ -1220,3 +1220,27 @@ test "unique identifiers before extensions are rejected" {
         }, &leaf),
     );
 }
+
+test "the legacy SAN OID is rejected before std parses it" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var cert = try test_cert.generateParams(allocator, io, .{
+        .san_oid = &.{ 0x55, 0x1d, 0x07 },
+        .san_der = &.{0x82},
+        .eku_server_auth = true,
+    });
+    defer cert.deinit(allocator);
+    var leaf: cert_path.Leaf = .{};
+    try std.testing.expectError(
+        error.CertificateRejected,
+        cert_path.verifyServerChain(&.{cert.der}, .{
+            .host = "localhost",
+            .verify_chain = false,
+            .now_sec = 0,
+            .bundle = null,
+        }, &leaf),
+    );
+}

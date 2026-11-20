@@ -715,6 +715,11 @@ fn parseExtensionList(
             if (kind == .leaf and !allowed) {
                 return error.CertificateRejected;
             }
+        } else if (std.mem.eql(u8, oid, &oid_subject_alt_name_legacy)) {
+            // Zig std also treats 2.5.29.7 as a subjectAltName alias, but
+            // OpenSSL ignores it. Reject it so its payload cannot bypass
+            // `validateGeneralNames` and reach std's unbounded parser.
+            return error.CertificateRejected;
         } else if (std.mem.eql(u8, oid, &oid_subject_alt_name)) {
             // `Certificate.Parsed.verifyHostName` reparses this value with an
             // unbounded DER parser, so bound it here first.
@@ -837,6 +842,7 @@ const oid_basic_constraints = [_]u8{ 0x55, 0x1d, 0x13 };
 const oid_key_usage = [_]u8{ 0x55, 0x1d, 0x0f };
 const oid_ext_key_usage = [_]u8{ 0x55, 0x1d, 0x25 };
 const oid_subject_alt_name = [_]u8{ 0x55, 0x1d, 0x11 };
+const oid_subject_alt_name_legacy = [_]u8{ 0x55, 0x1d, 0x07 };
 const oid_name_constraints = [_]u8{ 0x55, 0x1d, 0x1e };
 const oid_rsa_encryption = [_]u8{
     0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01,

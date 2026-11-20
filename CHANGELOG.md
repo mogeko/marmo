@@ -7,6 +7,12 @@ and behavior may change between minor releases.
 
 ### Security
 
+- Sixth re-audit (2026-11-20): TLS rejects the legacy `2.5.29.7` subjectAltName
+  alias that std still parses but OpenSSL ignores, closing a pre-chain
+  out-of-bounds path; TLS client/server handshakes fall back to inline
+  execution when timer concurrency is unavailable. The ADR-0015 reaper aborts
+  `abort_stream` with non-blocking `.both` instead of `.send`, so a wrapped
+  TLS/WS/H2 stream can no longer block the global scan on a write lock.
 - Fifth re-audit (2026-11-20): TLS rejects v1/v2 certificates that carry
   extensions and rejects issuer/subject unique identifiers, so the SAN can no
   longer be hidden from std's host-name verifier. HTTP/2 keeps delivering a

@@ -436,3 +436,30 @@ not check leaf keyUsage; H2 remains single-stream and shares one write lock
 between data and control frames. The global reaper design is recorded as an
 amendment inside ADR-0015 rather than a superseding ADR; this is a governance
 gap, not a runtime issue.
+
+## 10. Sixth re-audit (2026-11-20)
+
+The sixth pass replayed the fifth-round fixes and audited the certificate
+extension aliases used by Zig std. Fixed before this note:
+
+- TLS: the legacy subjectAltName OID `2.5.29.7` is rejected. std still maps it
+  to the SAN field and parses it without bounds, while OpenSSL ignores it, so
+  a malformed legacy SAN could panic the client before chain validation or
+  authorize a host OpenSSL would reject.
+- ADR-0015: the reaper aborts `abort_stream` with `.both` rather than `.send`.
+  `.send` on a wrapped TLS/WS/H2 stream can wait on a writer that a
+  backpressured peer is holding, which previously froze the global scan,
+  `stop`, and the accept loop. In-tree `Instance` passes the raw TCP stream,
+  where both calls are non-blocking; `.both` makes the contract independent of
+  the embedder's choice.
+- TLS adapters fall back to an inline handshake when the Io implementation
+  cannot provide timer concurrency.
+
+Residual (P2/P3): a `TcpStream`/H2 close still releases the file descriptor
+before waiting for in-flight reads, so a racing read can observe EBADF in
+Debug; WS client handshakes still use one timer task and the single-threaded
+fallback drops the configured timeout; a WS connection reserves 1 MiB before
+the handshake; outbound connect/DNS cannot be canceled by a handshake deadline;
+TLS still falls back to CN when no SAN is present and does not check leaf
+keyUsage; H2 remains single-stream and shares one write lock between data and
+control frames.
