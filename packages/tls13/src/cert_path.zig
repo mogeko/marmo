@@ -450,11 +450,19 @@ fn bundleTrusts(
             .index = index,
         };
         const parsed = anchor.parse() catch return error.CertificateRejected;
+        // Bundle.verify checks the subject's validity but not the trust
+        // anchor's; an expired or not-yet-valid root must not anchor a chain.
+        const not_before = std.math.cast(i64, parsed.validity.not_before) orelse
+            return error.CertificateRejected;
+        const not_after = std.math.cast(i64, parsed.validity.not_after) orelse
+            return error.CertificateRejected;
+        if (now_sec < not_before or now_sec > not_after) {
+            return error.CertificateRejected;
+        }
         const extensions = parseExtensions(
             bundle.bytes.items[index..],
             .issuer,
         ) catch return error.CertificateRejected;
-        _ = parsed;
         if (extensions.name_constraints) |constraints| {
             if (host) |name| try checkNameConstraints(constraints, name);
         }

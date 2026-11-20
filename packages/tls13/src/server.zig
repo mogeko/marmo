@@ -1244,3 +1244,46 @@ test "the legacy SAN OID is rejected before std parses it" {
         }, &leaf),
     );
 }
+
+test "an expired trust anchor is rejected" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var root = try test_cert.generateParams(allocator, io, .{
+        .common_name = "marmo expired root",
+        .san = null,
+        .ca = true,
+        .include_basic_constraints = true,
+        .include_key_usage = true,
+        .expired = true,
+    });
+    defer root.deinit(allocator);
+    var leaf_cert = try test_cert.generateParams(allocator, io, .{
+        .common_name = "proxy.test",
+        .issuer_name = "marmo expired root",
+        .issuer_key = root.key_pair,
+        .san = "proxy.test",
+        .include_basic_constraints = true,
+        .include_key_usage = true,
+        .eku_server_auth = true,
+    });
+    defer leaf_cert.deinit(allocator);
+
+    var bundle: std.crypto.Certificate.Bundle = .empty;
+    defer bundle.deinit(allocator);
+    try test_cert.addTrustedDer(&bundle, allocator, root.der, 946684800); // 2000-01-01
+
+    var leaf: cert_path.Leaf = .{};
+    const now = std.Io.Timestamp.now(io, .real).toSeconds();
+    try std.testing.expectError(
+        error.CertificateRejected,
+        cert_path.verifyServerChain(&.{leaf_cert.der}, .{
+            .host = "proxy.test",
+            .verify_chain = true,
+            .now_sec = now,
+            .bundle = &bundle,
+        }, &leaf),
+    );
+}

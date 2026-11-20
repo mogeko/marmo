@@ -7,6 +7,10 @@ and behavior may change between minor releases.
 
 ### Security
 
+- Seventh re-audit (2026-11-20): TLS validates the trust anchor's validity
+  window, so an expired root can no longer anchor a chain. WebSocket
+  fragmented messages over 1 MiB now send Close 1009, and the empty-frame
+  regression test appends a valid frame so removing the bound is detected.
 - Sixth re-audit (2026-11-20): TLS rejects the legacy `2.5.29.7` subjectAltName
   alias that std still parses but OpenSSL ignores, closing a pre-chain
   out-of-bounds path; TLS client/server handshakes fall back to inline

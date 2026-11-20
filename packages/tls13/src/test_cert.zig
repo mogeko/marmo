@@ -38,6 +38,8 @@ pub const Params = struct {
     /// OID used for the SAN extension. The legacy 2.5.29.7 alias exercises
     /// std's duplicate SAN mapping.
     san_oid: []const u8 = &.{ 0x55, 0x1d, 0x11 },
+    /// Uses a validity window that has already expired (1990-2000).
+    expired: bool = false,
     /// Omits the explicit version field, producing a v1 certificate.
     omit_version: bool = false,
     /// Emits an issuerUniqueID [1] before the extensions field.
@@ -82,7 +84,7 @@ pub fn generateParams(
         break :blk try buildName(gpa, name);
     } else subject_name;
     defer if (issuer_owned) gpa.free(issuer_name);
-    const validity = try buildValidity(gpa);
+    const validity = try buildValidity(gpa, params.expired);
     defer gpa.free(validity);
     const spki = try buildSpki(gpa, key_pair);
     defer gpa.free(spki);
@@ -161,10 +163,16 @@ fn buildName(gpa: std.mem.Allocator, common_name: []const u8) ![]u8 {
     return tlv(gpa, 0x30, rdn);
 }
 
-fn buildValidity(gpa: std.mem.Allocator) ![]u8 {
-    const not_before = try tlv(gpa, 0x17, "260101000000Z");
+fn buildValidity(gpa: std.mem.Allocator, expired: bool) ![]u8 {
+    const not_before = try tlv(gpa, 0x17, if (expired)
+        "900101000000Z"
+    else
+        "260101000000Z");
     defer gpa.free(not_before);
-    const not_after = try tlv(gpa, 0x17, "360101000000Z");
+    const not_after = try tlv(gpa, 0x17, if (expired)
+        "000101000000Z"
+    else
+        "360101000000Z");
     defer gpa.free(not_after);
     const content = try concat(gpa, &.{ not_before, not_after });
     defer gpa.free(content);

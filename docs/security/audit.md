@@ -463,3 +463,27 @@ the handshake; outbound connect/DNS cannot be canceled by a handshake deadline;
 TLS still falls back to CN when no SAN is present and does not check leaf
 keyUsage; H2 remains single-stream and shares one write lock between data and
 control frames.
+
+## 11. Seventh re-audit (2026-11-20)
+
+The seventh pass replayed the sixth-round fixes and checked every OID alias
+that Zig std maps for certificate fields. Fixed before this note:
+
+- TLS: trust-anchor validity is checked (`not_before`/`not_after`) before the
+  anchor is accepted. `Bundle.verify` checks the subject's validity but not
+  the anchor's, so an expired root such as a retired cross-sign could still
+  anchor a chain.
+- WebSocket: a fragmented message that exceeds 1 MiB (or the fragment count)
+  now sends Close 1009 before failing, matching the documented message limit;
+  the empty-frame regression test appends a valid data frame so removing the
+  bound changes the result instead of ending at EOF.
+
+Residual (P2/P3): the WS adapter reserves about 1 MiB per connection before
+the handshake (not reachable through an in-tree inbound yet); WS frame
+protocol violations still do not all send Close 1002 and text UTF-8 is not
+validated; `close` releases the file descriptor before waiting for in-flight
+I/O; the single-threaded WS fallback drops the configured handshake timeout;
+the WS client handshake still uses one timer task; outbound connect/DNS cannot
+be canceled by a handshake deadline; TLS still falls back to CN when no SAN is
+present and does not check leaf keyUsage; H2 remains single-stream and shares
+one write lock between data and control frames.

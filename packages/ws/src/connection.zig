@@ -90,10 +90,12 @@ pub const Connection = struct {
                         parsed.payload.len,
                     ) catch return error.ProtocolViolation;
                     if (self.message_len > max_message) {
+                        self.closeWithCode(1009);
                         return error.ProtocolViolation;
                     }
                     self.fragments += 1;
                     if (self.fragments > max_fragments_per_message) {
+                        self.closeWithCode(1009);
                         return error.ProtocolViolation;
                     }
                     self.in_message = !parsed.fin;
@@ -801,9 +803,11 @@ test "a standard-client sized single frame is delivered" {
 }
 
 test "empty frame floods are bounded per read" {
-    const frame_count = max_frames_per_read + 1;
-    // FIN|binary, MASK|0, then the mandatory four-byte mask key.
-    const encoded = try std.testing.allocator.alloc(u8, frame_count * 6);
+    const frame_count = 4096 + 1;
+    // FIN|binary, MASK|0, then the mandatory four-byte mask key. A valid data
+    // frame follows the flood: without the bound, read would return its byte
+    // instead of ProtocolViolation, so the test detects a removed bound.
+    const encoded = try std.testing.allocator.alloc(u8, frame_count * 6 + 7);
     defer std.testing.allocator.free(encoded);
     var index: usize = 0;
     while (index < frame_count) : (index += 1) {
@@ -811,6 +815,11 @@ test "empty frame floods are bounded per read" {
         encoded[index * 6 + 1] = 0x80;
         @memset(encoded[index * 6 + 2 ..][0..4], 0);
     }
+    const tail = frame_count * 6;
+    encoded[tail] = 0x82;
+    encoded[tail + 1] = 0x81;
+    @memset(encoded[tail + 2 ..][0..4], 0);
+    encoded[tail + 6] = 'x';
     var input = std.Io.Reader.fixed(encoded);
     var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
@@ -825,5 +834,48 @@ test "empty frame floods are bounded per read" {
     try std.testing.expectError(
         error.ProtocolViolation,
         connection.read(&buffers),
+    );
+}
+
+test "a fragmented message over 1 MiB sends close 1009" {
+    const chunk = 64 * 1024;
+    const frame_count = 17; // 17 * 64 KiB > 1 MiB
+    const encoded_len = frame_count * (14 + chunk);
+    const encoded = try std.testing.allocator.alloc(u8, encoded_len);
+    defer std.testing.allocator.free(encoded);
+    var offset: usize = 0;
+    for (0..frame_count) |index| {
+        encoded[offset] = if (index == 0) 0x02 else 0x00; // binary, no FIN
+        encoded[offset + 1] = 0x80 | 127;
+        std.mem.writeInt(u64, encoded[offset + 2 ..][0..8], chunk, .big);
+        @memset(encoded[offset + 10 ..][0..4], 0);
+        @memset(encoded[offset + 14 ..][0..chunk], 'x');
+        offset += 14 + chunk;
+    }
+
+    var input = std.Io.Reader.fixed(encoded);
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &output.writer,
+        .role = .server,
+    };
+    var buffer: [16 * 1024]u8 = undefined;
+    var buffers = [_][]u8{&buffer};
+    while (true) {
+        _ = connection.read(&buffers) catch |err| {
+            try std.testing.expectEqual(error.ProtocolViolation, err);
+            break;
+        };
+    }
+    try std.testing.expect(connection.close_sent);
+    const written = output.written();
+    try std.testing.expect(written.len >= 4);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x88, 0x02, 0x03, 0xf1 },
+        written[written.len - 4 ..],
     );
 }
