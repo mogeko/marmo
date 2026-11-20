@@ -39,6 +39,10 @@ dependencies = [
 [[package]]
 name = "marmo-transport"
 version = "0.0.2"
+dependencies = [
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "mio"
