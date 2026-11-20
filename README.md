@@ -15,13 +15,12 @@ forward proxying, Shadowsocks 2022 TCP/UDP (AES-128/256-GCM),
 domain/IP-CIDR/port routing, relay, metrics, TLS ALPN, HTTP/2 and WebSocket
 transport packages, and global connection limits/timeouts (ADR-0015).
 
-> **Migration in design (2026-11-21).** ADR-0017..ADR-0020 are accepted: the
-> target is Rust + tokio, a five-crate workspace, `rustls`/`aws-lc-rs`, and the
-> MIT OR Apache-2.0 license. The Zig tree is frozen; implementation starts only
-> after the architecture and roadmap pass final review (G1). See
-> [docs/architecture.md](docs/architecture.md) for the target design and
-> [docs/rust-migration.md](docs/rust-migration.md) for the feasibility study
-> and roadmap.
+> **Migration in progress (2026-11-21).** G1 passed: the Rust target is
+> accepted (ADR-0017..ADR-0020) and R0 is in progress on `rusty`. The Zig tree
+> is frozen and remains the 0.0.2 implementation; `master` stays Zig-only until
+> the parity integration merge. See [docs/architecture.md](docs/architecture.md)
+> for the target design and
+> [docs/rust-migration.md](docs/rust-migration.md) for the roadmap.
 
 **Transport status:** plaintext TCP, TCP/TLS, TLS+WebSocket, and TLS+HTTP/2 are
 wired in for VLESS; the in-tree TLS 1.3 client/server is shared. TLS, HTTP/2,
@@ -43,7 +42,11 @@ stream per HTTP/2 connection. QUIC and gRPC are not implemented (ADR-0007).
 
 ## Workspace
 
-This is a small monorepo: root library, `packages/`, and `examples/`.
+The repository is in migration. The Zig tree (`src/`, `packages/`, `examples/`)
+is frozen and remains the 0.0.2 implementation. The Rust target lives in
+`crates/` and is not released until the parity cutover.
+
+Zig (frozen):
 
 ```sh
 zig build test       # root and package tests
@@ -51,8 +54,16 @@ zig build check      # formatting check plus tests
 zig build examples   # build every example
 ```
 
-Package rules and the workspace contract are in
-[`packages/README.md`](packages/README.md).
+Rust:
+
+```sh
+cargo test --workspace
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+Workspace rules are in [`packages/README.md`](packages/README.md) (Zig, frozen)
+and [`crates/README.md`](crates/README.md) (Rust).
 
 ## Design highlights
 

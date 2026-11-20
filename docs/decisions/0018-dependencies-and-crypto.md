@@ -83,3 +83,11 @@ Delete the in-tree transport implementations and depend on maintained crates.
 - [ ] Choose a different crypto provider: ...
 
 Accepted 2026-11-21 as recommended.
+
+## Amendment (2026-11-21)
+
+The decider prefers not to use `cargo-deny`. The license gate is implemented
+as a `cargo tree --format '{l}'` check in CI (it fails on GPL/AGPL/MPL) plus a
+license review recorded in every dependency-changing PR. `cargo-audit` remains
+for advisories. The allowlist and the ban on copyleft dependencies are
+unchanged.

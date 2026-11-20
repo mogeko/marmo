@@ -84,3 +84,10 @@ release.
 
 Accepted 2026-11-21 as recommended. The relicensing commit records the
 copyright confirmation and replaces the license files.
+
+## Amendment (2026-11-21)
+
+The license gate no longer uses `cargo-deny`. CI runs a `cargo tree` check that
+rejects GPL/AGPL/MPL, and dependency-changing PRs record a license review. The
+dual-license choice and the allowlist (MIT, Apache-2.0, ISC, BSD, Unlicense,
+CC0, Unicode-3.0, CDLA-Permissive-2.0) are unchanged.

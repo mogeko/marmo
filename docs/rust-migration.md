@@ -329,8 +329,8 @@ New Rust-specific invariants:
 | --- | --- | --- |
 | Cancellation-safety bugs in protocol state machines | silent data loss, half-open sessions | cancel-safety column in the port matrix; drop-mid-await tests; `select!` discipline review |
 | Protocol regressions while porting | interop failures, security holes | byte fixtures unchanged; differential interop vs `shadowsocks-rust`/`sing-box`; fuzz before cutover |
-| Dependency supply chain | compromised or abandoned crates | pinned `Cargo.lock`, `--locked` CI, `cargo-deny` (licenses, advisories, bans), `cargo-audit`, MSRV policy, optional `cargo vendor` |
-| License drift (GPL/AGPL/MPL) | copyleft contamination | `cargo-deny` allowlist per ADR-0020; deny GPL/AGPL/MPL; `NOTICE`; CI gate |
+| Dependency supply chain | compromised or abandoned crates | pinned `Cargo.lock`, `--locked` CI, a `cargo tree` copyleft check, `cargo-audit`, MSRV policy, optional `cargo vendor` |
+| License drift (GPL/AGPL/MPL) | copyleft contamination | CI copyleft check per ADR-0020; deny GPL/AGPL/MPL; `NOTICE`; dependency-review gate |
 | C toolchain in crypto backend | breaks a stated constraint and CI simplicity | explicit decision; pin one provider (`aws-lc-rs` or `ring`); document the build prerequisite; CI image installs it |
 | Compile time / binary size | slower iteration | 5-crate workspace, tuned release profile, `cargo nextest` |
 | Throughput regression vs Zig | user-visible | criterion benches + loopback comparison against the Zig build before deleting it |
@@ -349,8 +349,8 @@ Write and accept ADR-0017..ADR-0020 (see §10) and approve
 
 ### R0 — scaffold and decisions (2 days)
 
-- `crates/` workspace, `rust-toolchain.toml`, MSRV, release profile.
-- CI: `fmt`, `clippy -D warnings`, `test`, `cargo-deny`, `cargo-audit`,
+- `crates/` workspace, MSRV in `Cargo.toml`, release profile.
+- CI: `fmt`, `clippy -D warnings`, `test`, `cargo-audit`, copyleft check,
   Linux x86_64 + macOS arm64 + Windows x86_64.
 - Move `tests/fixtures/` and `docs/protocols/` unchanged; keep the Zig tree
   building so fixtures can be cross-checked.
@@ -483,7 +483,7 @@ Status after the 2026-11-21 acceptance:
 
 | Item | Status | Decision |
 | --- | --- | --- |
-| Go / no-go | decided | Go; implementation starts at G1 |
+| Go / no-go | decided | Go; G1 passed 2026-11-21; R0 started on `rusty` |
 | License | decided | MIT OR Apache-2.0 (ADR-0020) |
 | Runtime | decided | tokio (ADR-0017); runtime-agnostic was rejected at +4-6 engineer-days |
 | Crypto backend | decided | C toolchain allowed; `aws-lc-rs` pinned (ADR-0018) |

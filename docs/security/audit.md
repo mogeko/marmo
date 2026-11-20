@@ -74,7 +74,7 @@ replacement is correct.
 
 | Risk | Mitigation |
 | --- | --- |
-| Dependency supply chain | `Cargo.lock` committed, `--locked` CI, `cargo-deny` (licenses, advisories, bans), `cargo-audit`; review every new build script, proc macro, and `unsafe` block |
+| Dependency supply chain | `Cargo.lock` committed, `--locked` CI, a `cargo tree` copyleft check, `cargo-audit`; review every new build script, proc macro, and `unsafe` block |
 | C crypto provider | One pinned provider (`aws-lc-rs`); CI builds it on all three OS targets; no runtime switch |
 | Unsafe code | `forbid(unsafe_code)` in `marmo-proto` and `marmo`; per-block justification in `marmo-transport` |
 | Cancel-safety | Every `select!` branch audited; drop-mid-await tests; no `MutexGuard` across `.await`; `loom` for session state |
@@ -82,7 +82,7 @@ replacement is correct.
 | TLS misconfiguration | TLS 1.3 only, ALPN/mTLS tested; verification always on; no config field that disables it |
 | Secret leakage | `secrecy` + `zeroize`; no secrets in `Debug` or span fields; constant-time comparisons |
 | Resource bounds | Every queue/table/cache bound at init; `Semaphore` for TCP and UDP; no unbounded `spawn` |
-| Supply-chain license drift | `cargo-deny` allowlist from ADR-0020; GPL/AGPL/MPL denied |
+| Supply-chain license drift | CI copyleft check from ADR-0020; GPL/AGPL/MPL denied; dependency PRs record a license review |
 
 ## 5. Audit plan (R4)
 
@@ -94,7 +94,7 @@ replacement is correct.
    Trojan, and VLESS, in both directions.
 4. Review the rustls configuration: verification, TLS 1.3 floor, ALPN, mTLS,
    platform verifier, no insecure escape hatch.
-5. Run `cargo-deny` and `cargo-audit`; record the dependency tree and the
+5. Run the copyleft check and `cargo-audit`; record the dependency tree and the
    provider version in the audit.
 6. Commission an external review before any production-readiness claim. The
    scope is the codecs, config, relay/cancellation paths, and dependency

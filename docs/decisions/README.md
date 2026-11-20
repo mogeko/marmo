@@ -38,9 +38,9 @@ Statuses: `Proposed` → `Accepted` | `Rejected` | `Superseded by ADR-NNNN`.
 | [0015](0015-connection-limits-and-timeouts.md) | Connection limits and idle timeouts | Accepted | global limits 1024/10/300/1/1; per-Instance reaper; UDP excluded |
 | [0016](0016-protocol-transport-wiring.md) | Protocol transport composition wiring | Accepted | VLESS `transport` tcp/ws/h2; TLS ALPN defaults; WS compression/subprotocols; H2 one stream per Instance connection |
 | [0017](0017-language-and-runtime.md) | Language, runtime, and interface model | Accepted (2026-11-21) | Rust + tokio |
-| [0018](0018-dependencies-and-crypto.md) | Dependencies and crypto backend | Accepted (2026-11-21) | in-tree transports deleted; `rustls` + `aws-lc-rs` |
+| [0018](0018-dependencies-and-crypto.md) | Dependencies and crypto backend | Accepted (2026-11-21; amended) | in-tree transports deleted; `rustls` + `aws-lc-rs`; `cargo tree` copyleft check |
 | [0019](0019-workspace-and-packaging.md) | Workspace layout and packaging | Accepted (2026-11-21) | five crates |
-| [0020](0020-license.md) | License change | Accepted (2026-11-21) | MIT OR Apache-2.0 |
+| [0020](0020-license.md) | License change | Accepted (2026-11-21; amended) | MIT OR Apache-2.0; `cargo tree` license review |
 
 ## Eras
 

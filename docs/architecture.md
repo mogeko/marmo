@@ -54,8 +54,9 @@ handling, and configuration storage.
 
 - **Language**: Rust, edition 2024. The MSRV is the lowest stable release that
   satisfies the pinned dependency set; it starts at 1.85 and is recorded in
-  `rust-toolchain.toml`, `Cargo.toml`, and CI. Raising it needs a commit
-  message that names the dependency and the version that forced it.
+  `Cargo.toml`. CI builds both the current stable and 1.85.0. Raising the MSRV
+  needs a commit message that names the dependency and the version that forced
+  it.
 - **Runtime**: tokio is the only supported runtime. The embedder owns the
   runtime; the library takes a `tokio::runtime::Handle` and never builds one
   implicitly. Codecs and policy code are runtime-free, but the I/O layer is
@@ -515,9 +516,10 @@ Rules:
 - **Crypto primitives** come from the TLS provider or RustCrypto crates
   (`aes-gcm`, `chacha20poly1305`, `blake3`); never implement AES, ChaCha20,
   Poly1305, BLAKE, SHA, HKDF, or X25519 by hand.
-- **License gate.** `cargo-deny` enforces the allowlist from ADR-0020 and
-  denies GPL/AGPL/MPL. `cargo-audit` runs in CI; `Cargo.lock` is committed
-  and CI uses `--locked`.
+- **License gate.** CI rejects GPL/AGPL/MPL with a `cargo tree --format '{l}'`
+  check; dependency-changing PRs record the same output as a license review.
+  `cargo-audit` covers advisories; `Cargo.lock` is committed and CI uses
+  `--locked`.
 - **Config validation** rejects a transport or protocol that is not
   implemented yet; there is no runtime fallback or hidden backend.
 
@@ -704,8 +706,7 @@ root.
 ## 15. Repository layout (target)
 
 ```
-Cargo.toml                 workspace
-rust-toolchain.toml        pin + MSRV
+Cargo.toml                 workspace + MSRV
 crates/
   marmo/                   facade: Instance, config, routing, inbound, outbound
   marmo-proto/             codecs, no I/O
@@ -745,7 +746,7 @@ are enforced by review, not by the compiler.
 - Interop runs against self-hosted `shadowsocks-rust` and `sing-box` binaries
   in CI. No GPL code is linked, ported, or distributed.
 - CI matrix: Linux x86_64, macOS arm64, Windows x86_64; `cargo fmt --check`,
-  `clippy -D warnings`, `cargo test`, `cargo deny check`, `cargo audit`.
+  `clippy -D warnings`, `cargo test`, `cargo audit`, and the copyleft check.
 - Benchmarks (`criterion`) and `miri`/`loom` runs are opt-in and never part of
   the default test job.
 
@@ -769,8 +770,8 @@ are enforced by review, not by the compiler.
 - Secrets are zeroized and compared in constant time; `unsafe` is
   `forbid`-denied in `marmo-proto` and `marmo` and requires a written
   justification in `marmo-transport`.
-- Dependency surface is part of the security surface: pinned lockfile,
-  `cargo-deny`, `cargo-audit`, and a documented review before accepting a new
+- Dependency surface is part of the security surface: pinned lockfile, the
+  copyleft check, `cargo-audit`, and a documented review before accepting a new
   crate with `unsafe` or a build script.
 - Cancellation safety is a security property: a dropped protocol state machine
   must not leave a half-authenticated session reachable.
@@ -780,8 +781,8 @@ are enforced by review, not by the compiler.
 ### 19.1 Gates
 
 - **G0 — decisions (done 2026-11-21).** ADR-0017..ADR-0020 accepted.
-- **G1 — plan.** This document and the roadmap approved; parity matrix frozen.
-  No code before G1.
+- **G1 — plan (done 2026-11-21).** This document and the roadmap approved; the
+  parity matrix is frozen. R0 has started on `rusty`.
 - **G2 — parity.** Every parity row green: unit, integration, fixture, interop,
   fuzz.
 - **G3 — cutover.** Zig tree deleted after a `zig-final` tag.
@@ -799,7 +800,7 @@ across an FFI boundary.
 
 | Phase | Work | Exit | Days |
 | --- | --- | --- | --- |
-| R0 | workspace, toolchain, CI (3 OS), cargo-deny/audit, fixtures, testkit | empty facade builds everywhere; license gate enforced | 2 |
+| R0 | workspace, toolchain, CI (3 OS), copyleft/audit gates, fixtures, testkit | empty facade builds everywhere; license gate enforced | 2 |
 | S | spikes: rustls ALPN/mTLS, quinn custom CC, relay throughput vs Zig | written findings, no merge | 2-3 |
 | R1 | net, Instance, cancellation, limits, relay, direct, TCP skeleton | loopback relay + deadline + limit tests | 3 |
 | R2 | serde config, routing, SOCKS5, HTTP, HTTP CONNECT, SS2022 | config snapshots, SS2022 interop, UDP caps | 5 |
@@ -824,7 +825,7 @@ working copy lives in `docs/rust-migration.md` and is frozen at G1.
 | --- | --- |
 | Cancellation-safety bugs in protocol state machines | cancel-safety column in the parity matrix; drop-mid-await tests; `select!` review |
 | Protocol regressions while porting | unchanged byte fixtures; differential interop; fuzz before cutover |
-| Dependency supply chain | pinned lockfile, `--locked`, `cargo-deny`, `cargo-audit`, review new build scripts |
+| Dependency supply chain | pinned lockfile, `--locked`, copyleft check, `cargo-audit`, review new build scripts |
 | C toolchain friction on Windows/macOS | one pinned provider, CI images documented; a platform that cannot build `aws-lc-rs` needs a new ADR, not a silent backend switch |
 | License-change consent | both copyright holders must agree; ADR-0020 records the decision |
 | Throughput regression vs Zig | S3 spike plus criterion benches before deleting the Zig tree |

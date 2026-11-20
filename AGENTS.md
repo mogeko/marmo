@@ -9,11 +9,11 @@ repository ships the library only: no CLI, daemon, or `app` layer.
 - Read `docs/architecture.md` and `docs/decisions/` before coding. A `Proposed`
   ADR is not approved: do not implement it. Use the `adr` skill to record a
   decision and wait for the user.
-- Migration freeze (2026-11-21): ADR-0017..ADR-0020 are accepted and
-  `docs/architecture.md` is the target Rust design. The architecture and
-  roadmap are in final review (G1). Until G1, do not add Zig features, refactor
-  the Zig tree, or start a Rust implementation. Security fixes and fixture
-  additions are the only Zig changes.
+- Migration freeze (2026-11-21): G1 passed; ADR-0017..ADR-0020 are accepted and
+  `docs/architecture.md` is the target Rust design. R0 has started on `rusty`.
+  The Zig tree remains frozen: no Zig features, no refactors, no exception
+  beyond security fixes and fixture additions. Rust work follows
+  `docs/architecture.md` and `crates/README.md`.
 - Accepted ADRs are immutable; supersede them with a new ADR instead of editing.
 - Keep `docs/architecture.md`, the ADR index, and this file in sync.
 - `Instance` is the composition root; do not add an application layer, CLI, or
@@ -21,6 +21,8 @@ repository ships the library only: no CLI, daemon, or `app` layer.
 
 ## Repo state
 
+- The Rust target lives in `crates/` (R0: workspace, CI, license gate). It is
+  unreleased; `master` stays Zig-only until the parity integration merge.
 - Phase 1 MVP is implemented. Phase 2 has started with outbound selectors:
   manual, round-robin, random, fallback, and least-latency, plus active TCP
   health probes, VLESS outbound and inbound over TCP/TLS/WebSocket/HTTP/2
@@ -208,3 +210,12 @@ Adapted from TigerBeetle's
 - Integration tests will use loopback port 0 and never live servers.
 - Protocol tests use synthetic fixtures under `tests/fixtures/<protocol>/`;
   provenance and license are recorded in `tests/fixtures/README.md`.
+
+Rust (target; rules in `crates/README.md`):
+
+- `cargo test --workspace` and `cargo test -p marmo-proto --test <name>`.
+- `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`.
+- `cargo audit` after dependency changes; CI rejects GPL/AGPL/MPL with a
+  `cargo tree` check. License changes also get a `cargo tree --format '{l}'`
+  review in the PR.
+- Fuzz targets run on nightly with `cargo +nightly fuzz run <target>`.
