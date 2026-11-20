@@ -16,6 +16,13 @@ pub const Options = struct {
     private_key: std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair,
     /// ALPN protocols in server preference order.
     alpn_protocols: []const []const u8 = &.{},
+    /// Preferred ECDHE group; null prefers X25519.
+    key_exchange_group: ?u16 = null,
+    /// Client-certificate policy.
+    client_auth: tls13.ClientAuth = .none,
+    /// Trust anchors for client certificates, loaded by the caller. Required
+    /// when `client_auth` is not `.none`.
+    client_ca: ?*const std.crypto.Certificate.Bundle = null,
     /// Treat a missing client close_notify as EOF instead of truncation.
     allow_truncation_attacks: bool = false,
     /// Bounded handshake duration. Zero disables the timeout.
@@ -138,6 +145,9 @@ pub const TlsServerStream = struct {
                 .certificate_chain = options.certificate_chain,
                 .private_key = options.private_key,
                 .alpn_protocols = options.alpn_protocols,
+                .key_exchange_group = options.key_exchange_group,
+                .client_auth = options.client_auth,
+                .client_ca = options.client_ca,
                 .allow_truncation_attacks = options.allow_truncation_attacks,
                 .read_buffer = &self.plain_read_buffer,
                 .write_buffer = &self.plain_write_buffer,

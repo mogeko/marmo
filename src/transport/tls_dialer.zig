@@ -16,6 +16,8 @@ pub const TlsDialer = struct {
     handshake_timeout_ns: u64,
     alpn_protocols: []const []const u8 = &.{},
     required_alpn: ?[]const u8 = null,
+    client_certificate_chain: []const []const u8 = &.{},
+    client_private_key: ?std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair = null,
     allow_truncation_attacks: bool = false,
     ca: tls13.Ca,
 
@@ -57,6 +59,8 @@ pub const TlsDialer = struct {
             .ca = if (self.insecure) null else &self.ca,
             .alpn_protocols = self.alpn_protocols,
             .required_alpn = self.required_alpn,
+            .client_certificate_chain = self.client_certificate_chain,
+            .client_private_key = self.client_private_key,
             .allow_truncation_attacks = self.allow_truncation_attacks,
             .handshake_timeout_ns = self.handshake_timeout_ns,
         }) catch |err| {
