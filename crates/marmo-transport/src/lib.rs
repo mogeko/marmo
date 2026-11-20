@@ -6,10 +6,14 @@
 #![deny(unsafe_code)]
 
 mod relay;
+pub mod tls;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub use relay::{RELAY_BUFFER_SIZE, RelayError, RelayOptions, RelayStats, relay};
+pub use tls::{
+    AcceptedTls, ClientAuth, TlsClient, TlsClientOptions, TlsError, TlsServer, TlsServerOptions,
+};
 
 /// Duplex, ordered bytes with half-close support.
 ///
