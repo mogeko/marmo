@@ -15,7 +15,7 @@ use marmo_net::{Endpoint, Network};
 use marmo_proto::shadowsocks::{Key, Method};
 use marmo_transport::BoxStream;
 use thiserror::Error;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::runtime::Handle;
 use tokio::task::JoinSet;
 use tokio::time::{interval, timeout};
@@ -25,9 +25,9 @@ use crate::config::{Config, ConfigError, InboundProtocol, OutboundProtocol};
 use crate::direct;
 use crate::inbound::{self, http, socks5};
 use crate::limits::Limits;
-use crate::outbound::{self, http_connect};
+use crate::outbound::{self, http_connect, udp::UdpOutbound};
 use crate::routing::{Action, Router, RoutingError};
-use crate::shadowsocks::credentials;
+use crate::shadowsocks::{SsUdpClient, credentials};
 use crate::supervisor::Supervisor;
 
 /// A built instance; no sockets are open yet.
@@ -85,11 +85,25 @@ impl Instance {
                 address: spec.listen.to_string(),
                 source,
             })?;
+            let udp = if matches!(spec.kind, InboundKind::Shadowsocks { .. }) {
+                let socket =
+                    UdpSocket::bind(local_addr)
+                        .await
+                        .map_err(|source| BindError::Inbound {
+                            inbound: spec.tag.to_string(),
+                            address: local_addr.to_string(),
+                            source,
+                        })?;
+                Some(socket)
+            } else {
+                None
+            };
             bound.push(BoundInbound {
                 tag: spec.tag,
                 kind: spec.kind,
                 listener,
                 local_addr,
+                udp,
             });
         }
 
@@ -267,12 +281,25 @@ pub struct BoundInstance {
 }
 
 impl BoundInstance {
-    /// Returns the bound address for each inbound.
+    /// Returns the bound address of every listener: TCP per inbound, plus UDP
+    /// for protocols that serve both.
     pub fn local_addrs(&self) -> impl Iterator<Item = BoundAddr<'_>> {
-        self.inbounds.iter().map(|inbound| BoundAddr {
-            tag: inbound.tag.as_ref(),
-            network: Network::Tcp,
-            addr: inbound.local_addr,
+        self.inbounds.iter().flat_map(|inbound| {
+            let tcp = BoundAddr {
+                tag: inbound.tag.as_ref(),
+                network: Network::Tcp,
+                addr: inbound.local_addr,
+            };
+            let udp = inbound
+                .udp
+                .as_ref()
+                .and_then(|socket| socket.local_addr().ok())
+                .map(|addr| BoundAddr {
+                    tag: inbound.tag.as_ref(),
+                    network: Network::Udp,
+                    addr,
+                });
+            std::iter::once(tcp).chain(udp)
         })
     }
 
@@ -439,6 +466,33 @@ impl Context {
             )),
         }
     }
+
+    /// Opens a datagram path for `action`, or `None` when it has no UDP.
+    pub(crate) async fn udp_outbound(
+        &self,
+        action: Action,
+        ipv4: bool,
+    ) -> io::Result<Option<UdpOutbound>> {
+        match action {
+            Action::Direct => Ok(Some(UdpOutbound::direct(ipv4).await?)),
+            Action::Route(id) => match self.outbounds.get(id.index() as usize) {
+                Some(OutboundKind::Direct) => Ok(Some(UdpOutbound::direct(ipv4).await?)),
+                Some(OutboundKind::Shadowsocks {
+                    server,
+                    method,
+                    key,
+                }) => Ok(Some(UdpOutbound::Shadowsocks(
+                    SsUdpClient::connect(server, *method, Arc::clone(key)).await?,
+                ))),
+                Some(OutboundKind::Http { .. }) => Ok(None),
+                None => Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "outbound id is out of range",
+                )),
+            },
+            Action::Reject(_) => Ok(None),
+        }
+    }
 }
 
 fn boxed(stream: TcpStream) -> (BoxStream, Option<SocketAddr>) {
@@ -477,13 +531,27 @@ struct BoundInbound {
     kind: InboundKind,
     listener: TcpListener,
     local_addr: SocketAddr,
+    udp: Option<UdpSocket>,
 }
 
-async fn serve_inbound(inbound: BoundInbound, context: Arc<Context>) -> Result<(), ServeError> {
+async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Result<(), ServeError> {
     let token = context.supervisor.token();
     let mut connections = JoinSet::new();
     let mut reap = interval(Duration::from_secs(1));
     let mut fatal = None;
+    let runtime = context.runtime.clone();
+
+    if let Some(socket) = inbound.udp.take() {
+        if let InboundKind::Shadowsocks { method, key } = &inbound.kind {
+            let udp_context = Arc::clone(&context);
+            let tag = Arc::clone(&inbound.tag);
+            let (method, key) = (*method, Arc::clone(key));
+            let _ = connections.spawn_on(
+                inbound::shadowsocks_udp::serve(socket, udp_context, tag, method, key),
+                &runtime,
+            );
+        }
+    }
 
     loop {
         while connections.try_join_next().is_some() {}

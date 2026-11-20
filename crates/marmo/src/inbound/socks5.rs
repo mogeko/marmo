@@ -15,9 +15,9 @@ use tokio::net::{TcpStream, UdpSocket};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-use crate::direct;
 use crate::instance::Context;
-use crate::routing::Metadata;
+use crate::outbound::udp::UdpOutbound;
+use crate::routing::{Action, Metadata};
 
 const ATYP_IPV4: u8 = 0x01;
 const ATYP_DOMAIN: u8 = 0x03;
@@ -219,23 +219,29 @@ enum UdpEvent {
     Cancel,
     Control(io::Result<usize>),
     Client(io::Result<(usize, SocketAddr)>),
-    Upstream(io::Result<(usize, SocketAddr)>),
+    Upstream(io::Result<(usize, Endpoint)>),
 }
 
 async fn udp_event(
     token: &CancellationToken,
     client: &mut TcpStream,
     client_socket: &UdpSocket,
-    upstream: &UdpSocket,
+    upstream: &mut Option<UdpOutbound>,
     client_buffer: &mut [u8],
     upstream_buffer: &mut [u8],
     control_buffer: &mut [u8],
 ) -> UdpEvent {
+    let awaiting = async {
+        match upstream {
+            Some(connection) => connection.recv_from(upstream_buffer).await,
+            None => std::future::pending().await,
+        }
+    };
     tokio::select! {
         _ = token.cancelled() => UdpEvent::Cancel,
         result = client.read(control_buffer) => UdpEvent::Control(result),
         result = client_socket.recv_from(client_buffer) => UdpEvent::Client(result),
-        result = upstream.recv_from(upstream_buffer) => UdpEvent::Upstream(result),
+        result = awaiting => UdpEvent::Upstream(result),
     }
 }
 
@@ -258,10 +264,6 @@ async fn udp_associate(
         let _ = send_reply(&mut client, ReplyStatus::GeneralFailure, None).await;
         return;
     };
-    let Ok(upstream) = UdpSocket::bind(bind).await else {
-        let _ = send_reply(&mut client, ReplyStatus::GeneralFailure, None).await;
-        return;
-    };
     let Ok(local) = client_socket.local_addr() else {
         let _ = send_reply(&mut client, ReplyStatus::GeneralFailure, None).await;
         return;
@@ -276,6 +278,8 @@ async fn udp_associate(
 
     let tcp_peer_ip = client.peer_addr().ok().map(|address| address.ip());
     let mut client_address = None;
+    let mut upstream: Option<UdpOutbound> = None;
+    let mut upstream_action: Option<Action> = None;
     let mut client_buffer = vec![0_u8; UDP_BUFFER];
     let mut upstream_buffer = vec![0_u8; UDP_BUFFER];
     let mut reply_buffer = vec![0_u8; UDP_REPLY_BUFFER];
@@ -289,7 +293,7 @@ async fn udp_associate(
                     &token,
                     &mut client,
                     &client_socket,
-                    &upstream,
+                    &mut upstream,
                     &mut client_buffer,
                     &mut upstream_buffer,
                     &mut control_buffer,
@@ -305,7 +309,7 @@ async fn udp_associate(
                 &token,
                 &mut client,
                 &client_socket,
-                &upstream,
+                &mut upstream,
                 &mut client_buffer,
                 &mut upstream_buffer,
                 &mut control_buffer,
@@ -339,7 +343,7 @@ async fn udp_associate(
                 let Ok(request) = parse_udp(&client_buffer[..length]) else {
                     continue;
                 };
-                let destination = request.destination;
+                let destination = request.destination.clone();
                 let metadata = Metadata {
                     network: Network::Udp,
                     source: Endpoint::from(source),
@@ -348,13 +352,22 @@ async fn udp_associate(
                     inbound: Some(&inbound),
                 };
                 let action = context.router.route(&metadata);
-                if !context.udp_direct(action) {
-                    continue;
+                if upstream_action != Some(action) {
+                    if upstream.is_some() {
+                        continue;
+                    }
+                    match context.udp_outbound(action, ipv4).await {
+                        Ok(Some(connection)) => {
+                            upstream = Some(connection);
+                            upstream_action = Some(action);
+                        }
+                        _ => continue,
+                    }
                 }
-                let Ok(target) = direct::resolve_udp(&destination, ipv4).await else {
+                let Some(connection) = upstream.as_mut() else {
                     continue;
                 };
-                let _ = upstream.send_to(request.payload, target).await;
+                let _ = connection.send_to(&destination, request.payload).await;
             }
             UdpEvent::Upstream(result) => {
                 let Ok((length, source)) = result else {
@@ -363,7 +376,6 @@ async fn udp_associate(
                 let Some(client_address) = client_address else {
                     continue;
                 };
-                let source = Endpoint::from(source);
                 let Ok(encoded) =
                     encode_udp(&source, &upstream_buffer[..length], &mut reply_buffer)
                 else {
