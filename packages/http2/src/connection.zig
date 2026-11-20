@@ -93,6 +93,7 @@ pub const Connection = struct {
     local_closed: bool = false,
     headers_seen: bool = false,
     response_headers_seen: bool = false,
+    send_updates_disabled: bool = false,
 
     pub fn stream(self: *Connection) ?Stream {
         if (self.stream_id == 0) return null;
@@ -295,9 +296,22 @@ pub const Connection = struct {
         // the connection is about to become read-only. Writing an update here
         // races a peer that has already closed its socket and would discard
         // data that was just received.
-        if (parsed.payload.len != 0 and !end_stream) {
-            try self.sendWindowUpdate(0, parsed.payload.len);
-            try self.sendWindowUpdate(self.stream_id, parsed.payload.len);
+        //
+        // Once an update cannot be written the peer is gone for writing
+        // purposes, but the frame we already copied remains valid. Keep
+        // delivering it instead of turning a control-frame write failure into
+        // data loss; the next read will surface the transport error.
+        if (parsed.payload.len != 0 and !end_stream and
+            !self.send_updates_disabled)
+        {
+            self.sendWindowUpdate(0, parsed.payload.len) catch {
+                self.send_updates_disabled = true;
+            };
+            if (!self.send_updates_disabled) {
+                self.sendWindowUpdate(self.stream_id, parsed.payload.len) catch {
+                    self.send_updates_disabled = true;
+                };
+            }
         }
     }
 
@@ -829,6 +843,9 @@ pub const Server = struct {
                     const decoded = try self.connection.readHeaderBlock(parsed);
                     try validateRequest(decoded, self.path);
                     self.connection.stream_id = parsed.stream_id;
+                    // A later HEADERS on this stream is trailers; reject it
+                    // rather than overwriting the request header storage.
+                    self.connection.headers_seen = true;
                     self.connection.send_window.store(
                         self.connection.peer_initial_window,
                         .release,
@@ -1188,4 +1205,32 @@ test "a second HEADERS block is rejected instead of overwriting the request" {
             .payload = &payload,
         }),
     );
+}
+
+test "a failed WINDOW_UPDATE write keeps the received DATA" {
+    var input = std.Io.Reader.fixed(&.{});
+    var output: [0]u8 = .{};
+    var output_writer = std.Io.Writer.fixed(&output);
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &output_writer,
+        .role = .client,
+        .stream_id = 1,
+    };
+    var payload = [_]u8{ 'h', 'i' };
+    try connection.handleFrame(.{
+        .frame_type = frame.type_data,
+        .flags = 0,
+        .stream_id = 1,
+        .payload = &payload,
+    });
+    try std.testing.expect(connection.send_updates_disabled);
+    var buffer: [8]u8 = undefined;
+    var buffers = [_][]u8{&buffer};
+    const read_len = try connection.readStream(1, &buffers);
+    // It must return the copied bytes before the transport failure is
+    // reported on a later call.
+    try std.testing.expectEqual(@as(usize, 2), read_len);
+    try std.testing.expectEqualStrings("hi", buffer[0..2]);
 }

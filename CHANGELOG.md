@@ -7,6 +7,13 @@ and behavior may change between minor releases.
 
 ### Security
 
+- Fifth re-audit (2026-11-20): TLS rejects v1/v2 certificates that carry
+  extensions and rejects issuer/subject unique identifiers, so the SAN can no
+  longer be hidden from std's host-name verifier. HTTP/2 keeps delivering a
+  DATA frame when its WINDOW_UPDATE write fails and marks the server's first
+  HEADERS block as seen so trailers cannot overwrite request headers.
+  WebSocket fixes the empty-frame regression test and zeroizes the handshake
+  buffers on failure.
 - Fourth re-audit (2026-11-20): TLS now rejects non-canonical `[3]` extension
   wrappers or validates their SAN payload, and rejects RSA moduli whose bit
   length would trip the std PSS assertion. The ADR-0015 reaper holds the peer

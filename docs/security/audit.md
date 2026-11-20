@@ -231,12 +231,14 @@ under the testing allocator, which reports leaks.
   decoders do not allocate. The fuzz harness uses fixed buffers and bounded
   per-iteration caches.
 - **Caps**: handshake message 16 KiB, TLS record 16 KiB + 256, HTTP head 8 KiB,
-  WS handshake 8 KiB, WS frame 64 KiB, H2 frame 16 KiB, H2 header block 64 KiB,
+  WS handshake 8 KiB, WS read frame 1 MiB (writes fragment at 64 KiB),
+  H2 frame 16 KiB, H2 header block 64 KiB,
   H2 dynamic table 4 KiB, XUDP meta 512, VLESS domain 255, Trojan request 320
   and authentication prefix 58, Trojan UDP frame 65535, SS2022 payload 65535,
   SS UDP sessions 128, config 4 MiB.
-- **Slow peers**: TLS, WS, and H2 handshakes have a configurable timeout
-  (default 10 s) in the root adapters. SOCKS5/HTTP handshakes, Trojan
+- **Slow peers**: TLS and WS client handshakes default to 10 s; the WS server
+  adapter defaults to no internal timer and relies on the ADR-0015 reaper.
+  H2 handshakes use the same configurable timeout. SOCKS5/HTTP handshakes, Trojan
   authentication-prefix reads, Trojan UDP associations, and relay idle time
   are not bounded yet (F-13/F-14/F-17).
 - **Trojan fallback**: unauthenticated traffic is replayed to a configured,
@@ -268,9 +270,10 @@ in-flight operations before freeing on `close`.
 
 - WebSocket handshake parsing is capped at 8 KiB; the request line, required
   upgrade headers, version, path, and `Sec-WebSocket-Key` are validated, and
-  `Sec-WebSocket-Accept` is compared in constant time. Frames are capped at
-  64 KiB, control frames at 125 bytes and must not be fragmented, client
-  frames must be masked, and server frames must be unmasked. Text frames are
+  `Sec-WebSocket-Accept` is compared in constant time. Reads accept a single
+  frame up to the 1 MiB message limit, writes fragment at 64 KiB, control
+  frames are capped at 125 bytes and must not be fragmented, client frames
+  must be masked, and server frames must be unmasked. Text frames are
   accepted without UTF-8 validation because the transport is byte-oriented.
 - HTTP/2 caps frames at 16 KiB, header blocks at 64 KiB, the HPACK dynamic
   table at 4 KiB, and each header name/value at 256/4096 bytes. Integer and
@@ -405,3 +408,31 @@ violations from the frame codec do not always send Close 1002; WS `close` is
 not idempotent for callers that free the adapter; H2 control-frame writes
 share the data write lock (head-of-line blocking); H2 remains single-stream;
 TLS CN fallback, leaf keyUsage, and key-strength policy differ from OpenSSL.
+
+## 9. Fifth re-audit (2026-11-20)
+
+The fifth pass re-ran the fourth-round PoCs against OpenSSL 4.1, curl/nghttp2,
+Python `h2`/`hpack`, Python `websockets`, and Node/undici, and added
+structured certificate mutation (79k ReleaseSafe cases) plus stateful H2/HPACK
+fuzzing. Fixed before this note:
+
+- TLS: certificates with extensions must be v3, and issuer/subject unique
+  identifiers are rejected. Previously a v1 certificate (or a uniqueID before
+  the extensions wrapper) made std ignore the SAN and fall back to CN while
+  this module still validated the SAN. Fixed.
+- HTTP/2: a failed WINDOW_UPDATE write no longer discards the DATA frame that
+  was already copied; delivery continues and the next read reports the
+  transport error. The server's `acceptStream` marks the first HEADERS block,
+  so trailer HEADERS cannot overwrite request headers.
+- WebSocket: the empty-frame regression test now uses valid masked frames, and
+  the handshake-failure path zeroizes the socket buffers.
+
+Residual (P2/P3): WS client handshakes still use one timer task and the
+single-threaded fallback drops the configured timeout; a WebSocket connection
+reserves 1 MiB for large frames before the handshake; `Io.Threaded` runs about
+two worker threads per relay; outbound connect/DNS cannot be canceled by a
+handshake deadline; TLS still falls back to CN when no SAN is present and does
+not check leaf keyUsage; H2 remains single-stream and shares one write lock
+between data and control frames. The global reaper design is recorded as an
+amendment inside ADR-0015 rather than a superseding ADR; this is a governance
+gap, not a runtime issue.

@@ -35,6 +35,10 @@ pub const Params = struct {
     /// Wrapper tag for the [3] extensions field. Non-0xa3 values exercise
     /// std's low-five-bit tag comparison.
     extensions_tag: u8 = 0xa3,
+    /// Omits the explicit version field, producing a v1 certificate.
+    omit_version: bool = false,
+    /// Emits an issuerUniqueID [1] before the extensions field.
+    unique_id: bool = false,
 };
 
 pub fn generate(
@@ -84,11 +88,19 @@ pub fn generateParams(
 
     const version_inner = try tlv(gpa, 0x02, &.{2});
     defer gpa.free(version_inner);
-    const version = try tlv(gpa, 0xa0, version_inner);
+    const version = if (params.omit_version)
+        try gpa.dupe(u8, &.{})
+    else
+        try tlv(gpa, 0xa0, version_inner);
     defer gpa.free(version);
     const serial = try tlv(gpa, 0x02, &.{1});
     defer gpa.free(serial);
 
+    const unique_id = if (params.unique_id)
+        try tlv(gpa, 0x81, &.{0})
+    else
+        try gpa.dupe(u8, &.{});
+    defer gpa.free(unique_id);
     const tbs_content = try concat(gpa, &.{
         version,
         serial,
@@ -97,6 +109,7 @@ pub fn generateParams(
         validity,
         subject_name,
         spki,
+        unique_id,
         extensions,
     });
     defer gpa.free(tbs_content);

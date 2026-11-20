@@ -109,6 +109,10 @@ pub const WsStream = struct {
     }
 
     fn destroyBase(self: *WsStream) void {
+        // A failed handshake may have buffered request headers (Authorization,
+        // Cookie) or early frame bytes.
+        std.crypto.secureZero(u8, &self.socket_read_buffer);
+        std.crypto.secureZero(u8, &self.socket_write_buffer);
         self.gpa.destroy(self);
     }
 

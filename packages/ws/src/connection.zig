@@ -802,12 +802,14 @@ test "a standard-client sized single frame is delivered" {
 
 test "empty frame floods are bounded per read" {
     const frame_count = max_frames_per_read + 1;
-    const encoded = try std.testing.allocator.alloc(u8, frame_count * 2);
+    // FIN|binary, MASK|0, then the mandatory four-byte mask key.
+    const encoded = try std.testing.allocator.alloc(u8, frame_count * 6);
     defer std.testing.allocator.free(encoded);
     var index: usize = 0;
     while (index < frame_count) : (index += 1) {
-        encoded[index * 2] = 0x82;
-        encoded[index * 2 + 1] = 0x80; // empty masked binary frame
+        encoded[index * 6] = 0x82;
+        encoded[index * 6 + 1] = 0x80;
+        @memset(encoded[index * 6 + 2 ..][0..4], 0);
     }
     var input = std.Io.Reader.fixed(encoded);
     var output: std.Io.Writer.Allocating = .init(std.testing.allocator);

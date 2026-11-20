@@ -145,6 +145,8 @@ fn validateCertificateShape(bytes: []const u8) Error!void {
 
 fn validateTbsCertificate(bytes: []const u8, tbs: Tlv) Error!void {
     var cursor = tbs.content_start;
+    var version_value: u8 = 0;
+    var has_version = false;
     var field = try childTlv(bytes, &cursor, tbs.content_end);
     if (field.tag == 0xa0) {
         var version_cursor = field.content_start;
@@ -160,6 +162,8 @@ fn validateTbsCertificate(bytes: []const u8, tbs: Tlv) Error!void {
         {
             return error.CertificateRejected;
         }
+        version_value = version_bytes[0];
+        has_version = true;
         field = try childTlv(bytes, &cursor, tbs.content_end);
     }
     // serialNumber
@@ -174,23 +178,26 @@ fn validateTbsCertificate(bytes: []const u8, tbs: Tlv) Error!void {
     try validateName(bytes, &cursor, tbs.content_end);
     try validateSubjectPublicKeyInfo(bytes, &cursor, tbs.content_end);
 
+    var has_extensions = false;
     while (cursor < tbs.content_end) {
         const optional = try childTlv(bytes, &cursor, tbs.content_end);
-        switch (optional.tag) {
-            0x81, 0x82 => {
-                if (optional.content_end == optional.content_start) {
-                    return error.CertificateRejected;
-                }
-            },
-            else => {
-                // std compares only the low five tag bits, so a non-canonical
-                // wrapper for [3] still reaches its extension parser.
-                if (optional.tag & 0x1f != 0x03) {
-                    return error.CertificateRejected;
-                }
-                try validateExtensions(bytes, optional);
-            },
+        const low_bits = optional.tag & 0x1f;
+        // RFC 5280 §4.1.2.8: conforming CAs MUST NOT generate unique
+        // identifiers, and std stops looking for extensions when it meets
+        // one. Reject them instead of letting SAN and CN checks diverge.
+        if (low_bits == 0x01 or low_bits == 0x02) {
+            return error.CertificateRejected;
         }
+        // std compares only the low five tag bits, so a non-canonical
+        // wrapper for [3] still reaches its extension parser.
+        if (low_bits != 0x03) return error.CertificateRejected;
+        has_extensions = true;
+        try validateExtensions(bytes, optional);
+    }
+    // Extensions are a v3 feature. A v1/v2 certificate carrying them makes
+    // std skip them entirely and fall back to the common name.
+    if (has_extensions and (!has_version or version_value != 2)) {
+        return error.CertificateRejected;
     }
 }
 
@@ -605,7 +612,20 @@ fn parseExtensions(
     var cursor = tbs.slice.start;
     const version = elementAt(bytes, cursor) orelse
         return error.CertificateRejected;
-    if (identifier(version) == 0xa0) cursor = version.slice.end;
+    var version_value: u8 = 0;
+    if (identifier(version) == 0xa0) {
+        const inner = elementAt(bytes, version.slice.start) orelse
+            return error.CertificateRejected;
+        if (inner.identifier.tag != .integer or
+            inner.slice.end != version.slice.end or
+            inner.slice.end - inner.slice.start != 1)
+        {
+            return error.CertificateRejected;
+        }
+        version_value = bytes[inner.slice.start];
+        if (version_value > 2) return error.CertificateRejected;
+        cursor = version.slice.end;
+    }
 
     const skippable = [_]der.Tag{
         .integer,
@@ -632,8 +652,13 @@ fn parseExtensions(
         // extensions wrapper, so non-canonical [3] encodings (0x43/0x83/0xc3)
         // must still be parsed here or their SAN payload would escape
         // validation while std happily reads it.
-        if (identifier(field) & 0x1f != 0x03) continue;
+        const low_bits = identifier(field) & 0x1f;
+        if (low_bits == 0x01 or low_bits == 0x02) {
+            return error.CertificateRejected;
+        }
+        if (low_bits != 0x03) continue;
         if (found_extensions) return error.CertificateRejected;
+        if (version_value != 2) return error.CertificateRejected;
         found_extensions = true;
         try parseExtensionList(bytes, field, kind, &extensions);
     }

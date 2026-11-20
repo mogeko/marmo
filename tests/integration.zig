@@ -2417,7 +2417,16 @@ test "handshake timeout closes a silent inbound" {
     var buffers = [_][]u8{&buffer};
     const read_len = client.read(io, &buffers) catch 0;
     try std.testing.expectEqual(@as(usize, 0), read_len);
-    try std.Io.sleep(io, .{ .nanoseconds = 100 * std.time.ns_per_ms }, .awake);
+    var waits: usize = 0;
+    while (waits < 200) : (waits += 1) {
+        const current = instance.metricsSnapshot();
+        if (current.timeouts_handshake >= 1 and
+            current.connections_active == 0)
+        {
+            break;
+        }
+        try std.Io.sleep(io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake);
+    }
     const snapshot = instance.metricsSnapshot();
     try std.testing.expect(snapshot.timeouts_handshake >= 1);
     try std.testing.expectEqual(@as(u64, 0), snapshot.connections_active);
@@ -2475,6 +2484,14 @@ test "idle timeout closes a relay with no traffic" {
     const read_len = client.read(io, &buffers) catch 0;
     try std.testing.expectEqual(@as(usize, 0), read_len);
     try std.Io.sleep(io, .{ .nanoseconds = 100 * std.time.ns_per_ms }, .awake);
+    var waits: usize = 0;
+    while (waits < 200) : (waits += 1) {
+        const current = instance.metricsSnapshot();
+        if (current.timeouts_idle >= 1 and current.connections_active == 0) {
+            break;
+        }
+        try std.Io.sleep(io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake);
+    }
     const snapshot = instance.metricsSnapshot();
     try std.testing.expect(snapshot.timeouts_idle >= 1);
     try std.testing.expectEqual(@as(u64, 0), snapshot.connections_active);

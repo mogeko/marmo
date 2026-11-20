@@ -1174,3 +1174,49 @@ test "non-canonical extension wrapper must not bypass SAN validation" {
         }, &leaf),
     );
 }
+
+test "v1 certificates with extensions are rejected" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var cert = try test_cert.generateParams(allocator, io, .{
+        .omit_version = true,
+        .eku_server_auth = true,
+    });
+    defer cert.deinit(allocator);
+    var leaf: cert_path.Leaf = .{};
+    try std.testing.expectError(
+        error.CertificateRejected,
+        cert_path.verifyServerChain(&.{cert.der}, .{
+            .host = "localhost",
+            .verify_chain = false,
+            .now_sec = 0,
+            .bundle = null,
+        }, &leaf),
+    );
+}
+
+test "unique identifiers before extensions are rejected" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var cert = try test_cert.generateParams(allocator, io, .{
+        .unique_id = true,
+        .eku_server_auth = true,
+    });
+    defer cert.deinit(allocator);
+    var leaf: cert_path.Leaf = .{};
+    try std.testing.expectError(
+        error.CertificateRejected,
+        cert_path.verifyServerChain(&.{cert.der}, .{
+            .host = "localhost",
+            .verify_chain = false,
+            .now_sec = 0,
+            .bundle = null,
+        }, &leaf),
+    );
+}
