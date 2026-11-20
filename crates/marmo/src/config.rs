@@ -54,6 +54,7 @@ impl Config {
             path: ".".into(),
             source,
         })?;
+        config.validate()?;
         Ok(config)
     }
 
@@ -292,7 +293,7 @@ pub enum OutboundProtocol {
 }
 
 /// Outbound TLS settings.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Tls {
     /// SNI override.
@@ -311,6 +312,21 @@ pub struct Tls {
     pub allow_truncation_attacks: bool,
     /// TLS handshake deadline.
     pub handshake_timeout_s: u16,
+}
+
+impl Default for Tls {
+    fn default() -> Self {
+        Self {
+            sni: None,
+            insecure: false,
+            alpn: None,
+            required_alpn: None,
+            client_certificate: None,
+            client_private_key: None,
+            allow_truncation_attacks: false,
+            handshake_timeout_s: 10,
+        }
+    }
 }
 
 /// Selector strategy.
@@ -414,6 +430,14 @@ pub enum ConfigError {
         #[source]
         source: serde_json::Error,
     },
+    /// The document parsed but violates a cross-field constraint.
+    #[error("invalid configuration at {path}: {message}")]
+    Validate {
+        /// JSON-like field path, for example `inbounds[0].tag`.
+        path: String,
+        /// What is wrong.
+        message: String,
+    },
 }
 
 impl fmt::Debug for Config {
@@ -453,6 +477,7 @@ mod tests {
             "certificate": "cert.pem",
             "private_key": "key.pem",
             "alpn": ["h2", "http/1.1"],
+            "client_ca": "ca.pem",
             "client_auth": "required"
           },
           "transport": {
