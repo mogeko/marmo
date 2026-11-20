@@ -1,9 +1,13 @@
 name: Build & Test
 
+# The Zig tree is frozen and is the release line on master/dev. Rust work
+# targets `rusty` and is gated by .github/workflows/rust.yml; do not run the
+# Zig jobs on PRs that target the migration branch.
 on:
   push:
     branches: [master, dev]
   pull_request:
+    branches: [master, dev]
 
 jobs:
   build-and-test:
