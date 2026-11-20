@@ -95,6 +95,10 @@ dependencies = [
 [[package]]
 name = "marmo-proto"
 version = "0.0.2"
+dependencies = [
+ "marmo-net",
+ "thiserror",
+]
 
 [[package]]
 name = "marmo-testkit"

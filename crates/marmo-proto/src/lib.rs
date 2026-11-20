@@ -3,3 +3,6 @@
 //! No I/O and no tokio: decoders take bounded bytes and return typed errors so
 //! they can be fuzzed in isolation. See `docs/architecture.md` §8.8.
 #![forbid(unsafe_code)]
+
+/// SOCKS5 wire codec (RFC 1928).
+pub mod socks5;
