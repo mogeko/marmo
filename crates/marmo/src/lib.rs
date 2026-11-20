@@ -10,6 +10,7 @@ mod direct;
 mod inbound;
 mod instance;
 mod limits;
+mod outbound;
 mod routing;
 mod supervisor;
 mod validate;

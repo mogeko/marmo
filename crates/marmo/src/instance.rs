@@ -21,8 +21,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::{Config, ConfigError, InboundProtocol, OutboundProtocol};
 use crate::direct;
-use crate::inbound::socks5;
+use crate::inbound::{http, socks5};
 use crate::limits::Limits;
+use crate::outbound::http_connect;
 use crate::routing::{Action, Router, RoutingError};
 use crate::supervisor::Supervisor;
 
@@ -83,6 +84,7 @@ impl Instance {
             })?;
             bound.push(BoundInbound {
                 tag: spec.tag,
+                kind: spec.kind,
                 listener,
                 local_addr,
             });
@@ -151,12 +153,16 @@ impl InstanceBuilder {
 
         let mut inbounds = Vec::with_capacity(self.config.inbounds.len());
         for inbound in &self.config.inbounds {
-            if inbound.protocol != InboundProtocol::Socks5 {
-                return Err(BuildError::UnsupportedInbound {
-                    tag: inbound.tag.clone(),
-                    protocol: inbound.protocol,
-                });
-            }
+            let kind = match inbound.protocol {
+                InboundProtocol::Socks5 => InboundKind::Socks5,
+                InboundProtocol::Http => InboundKind::Http,
+                protocol => {
+                    return Err(BuildError::UnsupportedInbound {
+                        tag: inbound.tag.clone(),
+                        protocol,
+                    });
+                }
+            };
             let endpoint =
                 Endpoint::parse(&inbound.listen).map_err(|_| BuildError::InboundListen {
                     tag: inbound.tag.clone(),
@@ -170,6 +176,7 @@ impl InstanceBuilder {
             };
             inbounds.push(InboundSpec {
                 tag: Arc::from(inbound.tag.as_str()),
+                kind,
                 listen,
             });
         }
@@ -178,6 +185,20 @@ impl InstanceBuilder {
         for outbound in &self.config.outbounds {
             match outbound.protocol {
                 OutboundProtocol::Direct => outbounds.push(OutboundKind::Direct),
+                OutboundProtocol::Http => {
+                    let Some(server) = outbound.server.as_deref() else {
+                        return Err(BuildError::OutboundEndpoint {
+                            tag: outbound.tag.clone(),
+                            value: String::new(),
+                        });
+                    };
+                    let server =
+                        Endpoint::parse(server).map_err(|_| BuildError::OutboundEndpoint {
+                            tag: outbound.tag.clone(),
+                            value: server.to_string(),
+                        })?;
+                    outbounds.push(OutboundKind::Http { server });
+                }
                 protocol => {
                     return Err(BuildError::UnsupportedOutbound {
                         tag: outbound.tag.clone(),
@@ -343,6 +364,7 @@ impl Context {
             Action::Direct => direct::connect(target).await,
             Action::Route(id) => match self.outbounds.get(id.index() as usize) {
                 Some(OutboundKind::Direct) => direct::connect(target).await,
+                Some(OutboundKind::Http { server }) => http_connect::connect(server, target).await,
                 None => Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "outbound id is out of range",
@@ -356,18 +378,27 @@ impl Context {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum OutboundKind {
     Direct,
+    Http { server: Endpoint },
+}
+
+#[derive(Clone, Copy, Debug)]
+enum InboundKind {
+    Socks5,
+    Http,
 }
 
 struct InboundSpec {
     tag: Arc<str>,
+    kind: InboundKind,
     listen: SocketAddr,
 }
 
 struct BoundInbound {
     tag: Arc<str>,
+    kind: InboundKind,
     listener: TcpListener,
     local_addr: SocketAddr,
 }
@@ -410,11 +441,19 @@ async fn serve_inbound(inbound: BoundInbound, context: Arc<Context>) -> Result<(
                     continue;
                 };
                 let tag = Arc::clone(&inbound.tag);
+                let kind = inbound.kind;
                 let task_context = Arc::clone(&context);
                 let runtime = context.runtime.clone();
                 let _ = connections.spawn_on(async move {
                     let _permit = permit;
-                    socks5::handle(stream, task_context, tag).await;
+                    match kind {
+                        InboundKind::Socks5 => {
+                            socks5::handle(stream, task_context, tag).await;
+                        }
+                        InboundKind::Http => {
+                            http::handle(stream, task_context, tag).await;
+                        }
+                    }
                 }, &runtime);
             }
         }
@@ -468,6 +507,14 @@ pub enum BuildError {
         tag: String,
         /// Configured listen string.
         listen: String,
+    },
+    /// The outbound server endpoint is missing or invalid.
+    #[error("outbound '{tag}' has an invalid server: {value}")]
+    OutboundEndpoint {
+        /// Outbound tag.
+        tag: String,
+        /// Configured server string.
+        value: String,
     },
 }
 

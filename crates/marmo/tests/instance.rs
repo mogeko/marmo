@@ -258,7 +258,13 @@ async fn rejects_unsupported_protocols() {
     let config = Config::from_json(
         r#"{
           "inbounds": [
-            { "tag": "http", "protocol": "http", "listen": "127.0.0.1:0" }
+            {
+              "tag": "ss",
+              "protocol": "shadowsocks",
+              "listen": "127.0.0.1:0",
+              "method": "2022-blake3-aes-128-gcm",
+              "password": "MDEyMzQ1Njc4OWFiY2RlZg=="
+            }
           ],
           "route": { "final": "direct" }
         }"#,

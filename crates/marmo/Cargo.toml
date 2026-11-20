@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 base64.workspace = true
+httparse.workspace = true
 marmo-net = { workspace = true, features = ["serde"] }
 marmo-proto.workspace = true
 marmo-transport.workspace = true
