@@ -525,6 +525,18 @@ mod tests {
     }
 
     #[test]
+    fn parses_pem_with_crlf_line_endings() {
+        let certificate = SERVER_CERT.replace('\n', "\r\n");
+        let key = SERVER_KEY.replace('\n', "\r\n");
+        assert!(
+            !parse_certificates(&certificate)
+                .expect("certificates")
+                .is_empty()
+        );
+        assert!(parse_private_key(&key).is_ok());
+    }
+
+    #[test]
     fn rejects_invalid_credentials() {
         assert!(matches!(
             TlsServer::new(&TlsServerOptions {

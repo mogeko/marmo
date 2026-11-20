@@ -77,11 +77,30 @@ async fn socks5_connect(client: &mut TcpStream, target: SocketAddr) {
 }
 
 fn json_string(value: &str) -> String {
-    let escaped = value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n");
-    format!("\"{escaped}\"")
+    use std::fmt::Write as _;
+
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            control if control < ' ' => {
+                let _ = write!(escaped, "\\u{:04x}", u32::from(control));
+            }
+            other => escaped.push(other),
+        }
+    }
+    escaped.push('"');
+    escaped
+}
+
+#[test]
+fn json_escaping_handles_crlf() {
+    assert_eq!(json_string("a\r\nb"), "\"a\\r\\nb\"");
 }
 
 fn trojan_inbound(fallback: Option<SocketAddr>) -> String {
