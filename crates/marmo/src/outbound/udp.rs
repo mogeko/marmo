@@ -7,6 +7,7 @@ use marmo_net::Endpoint;
 use tokio::net::UdpSocket;
 
 use crate::direct;
+use crate::outbound::trojan::TrojanUdpClient;
 use crate::shadowsocks::SsUdpClient;
 
 /// An established datagram path to one outbound.
@@ -15,6 +16,8 @@ pub(crate) enum UdpOutbound {
     Direct { socket: UdpSocket, ipv4: bool },
     /// A Shadowsocks 2022 association with one server.
     Shadowsocks(SsUdpClient),
+    /// A Trojan UDP association over one TLS stream.
+    Trojan(TrojanUdpClient),
 }
 
 impl UdpOutbound {
@@ -40,6 +43,7 @@ impl UdpOutbound {
                 Ok(())
             }
             Self::Shadowsocks(client) => client.send_to(target, payload).await,
+            Self::Trojan(client) => client.send_to(target, payload).await,
         }
     }
 
@@ -51,6 +55,7 @@ impl UdpOutbound {
                 Ok((length, Endpoint::from(source)))
             }
             Self::Shadowsocks(client) => client.recv_from(buffer).await,
+            Self::Trojan(client) => client.recv_from(buffer).await,
         }
     }
 }

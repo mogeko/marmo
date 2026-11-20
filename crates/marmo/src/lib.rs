@@ -14,6 +14,7 @@ mod outbound;
 mod routing;
 mod shadowsocks;
 mod supervisor;
+mod trojan;
 mod validate;
 
 pub use config::{Config, ConfigError};
