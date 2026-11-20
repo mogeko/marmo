@@ -1,38 +1,70 @@
 # HTTP/2
 
 Sources consult: [RFC 9113](https://www.rfc-editor.org/rfc/rfc9113) (HTTP/2),
-[RFC 7541](https://www.rfc-editor.org/rfc/rfc7541) (HPACK). Implemented in
-`packages/http2` (ADR-0013); the root package provides `Stream`/`Dialer`
-adapters.
+[RFC 7541](https://www.rfc-editor.org/rfc/rfc7541) (HPACK), RFC 8441 (extended
+CONNECT, not implemented). Implemented in `packages/http2` (ADR-0013); the root
+package provides `Stream`/`Dialer` adapters. Reference behavior was checked
+locally against Python `h2` 4.4.1, Python `hpack` 4.2.0, and curl 8.7.1
+(nghttp2 1.69.0); no live third-party servers are used.
 
 ## Implemented scope
 
 - Connection preface, SETTINGS and SETTINGS ACK, PING/ACK, GOAWAY,
-  RST_STREAM, WINDOW_UPDATE, and CONTINUATION.
+  RST_STREAM, WINDOW_UPDATE, PRIORITY (ignored), CONTINUATION, and
+  unknown-frame ignoring.
 - Frames are capped at 16 KiB; stream ids and reserved bits are validated.
 - HPACK decoding with the static table, a 4 KiB dynamic table, integer
-  decoding, and RFC 7541 Appendix B Huffman decoding. Encoding uses static
-  indices and literals without Huffman.
-- One active stream per connection (`MAX_CONCURRENT_STREAMS = 1`), with
-  stream and connection flow control. The initial stream window is 1 MiB.
-- Client opens stream 1 with caller-provided headers; server accepts the first
-  HEADERS frame and exposes the decoded list. Both roles expose a duplex byte
-  stream over DATA frames.
+  decoding bounded to 32 bits, and RFC 7541 Appendix B Huffman decoding.
+  Encoding uses static indices and literals without Huffman or dynamic-table
+  insertion. Header lists are accounted per RFC 9113 as
+  `name.len + value.len + 32`; `MAX_HEADER_LIST_SIZE = 8 KiB` is advertised and
+  enforced.
+- Multiplexing over a fixed 16-stream table: odd/even stream ids,
+  OPEN/HALF_CLOSED_LOCAL/HALF_CLOSED_REMOTE/CLOSED state, per-stream DATA
+  queues and header/trailer storage, and a frame pump that demultiplexes
+  frames for concurrent readers and writers.
+- Flow control in both directions. The initial stream receive window is 8 KiB
+  and the connection window is 128 KiB. WINDOW_UPDATE is sent as DATA is
+  consumed; padding is credited when the frame is parsed. A violation sends
+  GOAWAY with `FLOW_CONTROL_ERROR`.
+- Strict header validation: pseudo headers must precede regular fields, be
+  unique, known, and lowercase; field names are token-checked; values reject
+  CR/LF/NUL/controls and leading/trailing whitespace; connection-specific
+  headers are rejected; `TE` may only be `trailers`; CONNECT omits
+  `:scheme`/`:path` and requires `:authority` (or `Host`); `:status` is a
+  three-digit 100-599 value.
+- gRPC-enabling semantics: 1xx informational responses before the final
+  response, a second HEADERS block as trailers with END_STREAM, and separate
+  accessors for initial headers, trailers, and the last 1xx status.
+- GOAWAY/RST_STREAM behavior: local connection errors send GOAWAY with the
+  matching code and cancel the connection; stream errors send RST_STREAM and
+  leave other streams usable. Graceful close sends GOAWAY with `NO_ERROR` and
+  stops new streams.
+- Buffers (frames, raw header blocks, per-stream DATA/header/trailer storage)
+  and the HPACK table are zeroized on deinit and on stream abort/reuse.
 
-The Huffman table in `packages/http2/src/huffman_table.zig` is generated from
-RFC 7541 Appendix B; `code`/`bits` pairs are transcribed from the RFC text, not
-ported from an implementation.
+## Test evidence
+
+Package tests cover multi-stream interleaving, trailers/1xx, per-stream flow
+control, RST/GOAWAY state transitions, SETTINGS deltas and limits, strict
+header validation, and a bounded stateful frame-pump smoke test. A local
+differential harness generated 24 HPACK block sets with Python `hpack` 4.2.0
+(Huffman and non-Huffman, dynamic-table reuse, long values) and decoded them
+with this package. A Python `h2` 4.4.1 client exercised two concurrent streams
+against `Server`; the Python server exercised `Client` with 1xx, final
+headers, bodies, and trailers. curl 8.7.1 (nghttp2 1.69.0) fetched a response
+from `Server` with `--http2-prior-knowledge`. The harness is not committed.
 
 ## Known gaps
 
-- No multiplexing, server push, PRIORITY effects, or HTTP/1.1 translation.
+- No server push (and no PUSH_PROMISE support), PRIORITY effects, HTTP/1.1
+  upgrade/h2c, connection pooling, or HTTP/2 WebSocket.
 - No general request router, caching, or response-body framing beyond DATA.
-- A writer can wait for WINDOW_UPDATE; the receive side must be reading frames
-  on the same connection. A peer that stops reading can stall the writer.
-- No external audit. Parser fuzz targets are `http2_frame` and `http2_hpack`.
-
-## Fuzz targets
-
-`http2_frame` parses arbitrary frame bytes; `http2_hpack` decodes arbitrary
-header blocks with bounded storage and header arrays. Both run in the
-deterministic corpus smoke and in `zig build fuzz`.
+- gRPC message framing is application-level and out of scope.
+- Root `Config`/`Instance` wiring, protocol-level VLESS/VMess H2 transport, and
+  the root `h2_*` adapters are unchanged; the package remains transport-only.
+- A blocked writer pumps frames itself; with many streams and an application
+  that never reads, flow control eventually stalls that stream by design.
+- No external audit. Parser fuzz targets remain `http2_frame` and
+  `http2_hpack`; the connection state machine is covered by unit tests and a
+  deterministic stateful pump test.

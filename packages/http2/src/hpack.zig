@@ -3,7 +3,7 @@
 const std = @import("std");
 const huffman_table = @import("huffman_table.zig");
 
-pub const max_header_list = 64 * 1024;
+pub const max_header_list = 8 * 1024;
 pub const max_headers = 128;
 pub const max_dynamic_size = 4096;
 pub const max_dynamic_entries = 128;
@@ -102,6 +102,48 @@ const DynamicEntry = struct {
     }
 };
 
+const DecodeState = struct {
+    storage: []u8,
+    headers: []Header,
+    storage_used: usize = 0,
+    header_count: usize = 0,
+    list_size: usize = 0,
+    header_seen: bool = false,
+    size_updates: usize = 0,
+    max_list_size: usize,
+
+    fn append(
+        self: *DecodeState,
+        name: []const u8,
+        value: []const u8,
+    ) Error!void {
+        if (self.header_count == self.headers.len) return error.Malformed;
+        if (name.len == 0 or name.len > max_name or value.len > max_value) {
+            return error.Malformed;
+        }
+        const entry_size = name.len + value.len + 32;
+        if (entry_size > self.max_list_size -| self.list_size) {
+            return error.OutOfMemory;
+        }
+        const name_copy = try ensureInStorage(
+            self.storage,
+            &self.storage_used,
+            name,
+        );
+        const value_copy = try ensureInStorage(
+            self.storage,
+            &self.storage_used,
+            value,
+        );
+        self.headers[self.header_count] = .{
+            .name = name_copy,
+            .value = value_copy,
+        };
+        self.header_count += 1;
+        self.list_size += entry_size;
+    }
+};
+
 pub const Decoder = struct {
     entries: [max_dynamic_entries]DynamicEntry = undefined,
     storage: [max_dynamic_size]u8 = undefined,
@@ -120,83 +162,129 @@ pub const Decoder = struct {
         storage: []u8,
         headers: []Header,
     ) Error![]Header {
-        var storage_used: usize = 0;
-        var header_count: usize = 0;
-        var pos: usize = 0;
-        var header_seen = false;
-        var size_updates: usize = 0;
+        return self.decodeBounded(block, storage, headers, max_header_list);
+    }
 
+    /// Decodes a header block while enforcing a caller-selected header-list
+    /// limit. RFC 9113 counts `name.len + value.len + 32` per field, so the
+    /// byte-only storage limit is not sufficient.
+    pub fn decodeBounded(
+        self: *Decoder,
+        block: []const u8,
+        storage: []u8,
+        headers: []Header,
+        max_list_size: usize,
+    ) Error![]Header {
+        var state: DecodeState = .{
+            .storage = storage,
+            .headers = headers,
+            .max_list_size = max_list_size,
+        };
+        var pos: usize = 0;
         while (pos < block.len) {
-            const first = block[pos];
-            if (first & 0x80 != 0) {
-                header_seen = true;
-                const index = try decodeInt(block, &pos, 7);
-                const header = try self.lookup(index);
-                try appendHeader(
-                    &storage_used,
-                    storage,
-                    headers,
-                    &header_count,
-                    header.name,
-                    header.value,
-                );
-                continue;
-            }
-            if (first & 0x40 != 0) {
-                header_seen = true;
-                const name = try self.decodeName(block, &pos, 6, storage, &storage_used);
-                const value = try decodeString(block, &pos, storage, &storage_used);
-                try appendHeader(
-                    &storage_used,
-                    storage,
-                    headers,
-                    &header_count,
-                    name,
-                    value,
-                );
-                try self.add(name, value);
-                continue;
-            }
-            if (first & 0x20 != 0) {
-                if (header_seen or size_updates >= 2) {
-                    return error.Malformed;
-                }
-                size_updates += 1;
-                const size = try decodeInt(block, &pos, 5);
-                if (size > max_dynamic_size) return error.Malformed;
-                self.max_size = size;
-                self.evict();
-                continue;
-            }
-            header_seen = true;
-            const name = try self.decodeName(block, &pos, 4, storage, &storage_used);
-            const value = try decodeString(block, &pos, storage, &storage_used);
-            try appendHeader(
-                &storage_used,
-                storage,
-                headers,
-                &header_count,
-                name,
-                value,
-            );
+            try self.decodeField(&state, block, &pos);
         }
-        return headers[0..header_count];
+        return headers[0..state.header_count];
+    }
+
+    fn decodeField(
+        self: *Decoder,
+        state: *DecodeState,
+        block: []const u8,
+        pos: *usize,
+    ) Error!void {
+        const first = block[pos.*];
+        if (first & 0x80 != 0) {
+            return self.decodeIndexed(state, block, pos);
+        }
+        if (first & 0x40 != 0) {
+            return self.decodeIncremental(state, block, pos);
+        }
+        if (first & 0x20 != 0) {
+            return self.decodeSizeUpdate(state, block, pos);
+        }
+        return self.decodeLiteral(state, block, pos);
+    }
+
+    fn decodeIndexed(
+        self: *Decoder,
+        state: *DecodeState,
+        block: []const u8,
+        pos: *usize,
+    ) Error!void {
+        state.header_seen = true;
+        const index = try decodeInt(block, pos, 7);
+        const header = try self.lookup(index);
+        try state.append(header.name, header.value);
+    }
+
+    fn decodeIncremental(
+        self: *Decoder,
+        state: *DecodeState,
+        block: []const u8,
+        pos: *usize,
+    ) Error!void {
+        state.header_seen = true;
+        const name = try self.decodeName(state, block, pos, 6);
+        const value = try decodeString(block, pos, state.storage, &state.storage_used);
+        try state.append(name, value);
+        try self.add(name, value);
+    }
+
+    fn decodeSizeUpdate(
+        self: *Decoder,
+        state: *DecodeState,
+        block: []const u8,
+        pos: *usize,
+    ) Error!void {
+        if (state.header_seen or state.size_updates >= 2) {
+            return error.Malformed;
+        }
+        state.size_updates += 1;
+        const size = try decodeInt(block, pos, 5);
+        if (size > max_dynamic_size) return error.Malformed;
+        self.max_size = size;
+        self.evict();
+    }
+
+    fn decodeLiteral(
+        self: *Decoder,
+        state: *DecodeState,
+        block: []const u8,
+        pos: *usize,
+    ) Error!void {
+        state.header_seen = true;
+        const name = try self.decodeName(state, block, pos, 4);
+        const value = try decodeString(block, pos, state.storage, &state.storage_used);
+        try state.append(name, value);
+    }
+
+    pub fn zeroize(self: *Decoder) void {
+        std.crypto.secureZero(u8, &self.storage);
+        for (&self.entries) |*entry| entry.* = .{};
+        self.storage_len = 0;
+        self.count = 0;
+        self.size = 0;
     }
 
     fn decodeName(
         self: *Decoder,
+        state: *DecodeState,
         block: []const u8,
         pos: *usize,
         prefix: u4,
-        storage: []u8,
-        storage_used: *usize,
     ) Error![]const u8 {
         const index = try decodeInt(block, pos, prefix);
         if (index == 0) {
-            return decodeString(block, pos, storage, storage_used);
+            return decodeString(
+                block,
+                pos,
+                state.storage,
+                &state.storage_used,
+            );
         }
         const header = try self.lookup(index);
-        return copyToStorage(storage, storage_used, header.name);
+        return copyToStorage(state.storage, &state.storage_used, header.name);
     }
 
     fn lookup(self: *const Decoder, index: usize) Error!Header {
@@ -295,27 +383,6 @@ pub const Decoder = struct {
     }
 };
 
-fn appendHeader(
-    storage_used: *usize,
-    storage: []u8,
-    headers: []Header,
-    header_count: *usize,
-    name: []const u8,
-    value: []const u8,
-) Error!void {
-    if (header_count.* == headers.len) return error.Malformed;
-    if (name.len == 0 or name.len > max_name or value.len > max_value) {
-        return error.Malformed;
-    }
-    const name_copy = try ensureInStorage(storage, storage_used, name);
-    const value_copy = try ensureInStorage(storage, storage_used, value);
-    headers[header_count.*] = .{
-        .name = name_copy,
-        .value = value_copy,
-    };
-    header_count.* += 1;
-}
-
 fn ensureInStorage(
     storage: []u8,
     used: *usize,
@@ -335,6 +402,7 @@ fn copyToStorage(
     used: *usize,
     bytes: []const u8,
 ) Error![]const u8 {
+    if (used.* > storage.len) return error.Malformed;
     if (storage.len - used.* < bytes.len) return error.OutOfMemory;
     @memcpy(storage[used.*..][0..bytes.len], bytes);
     const result = storage[used.*..][0..bytes.len];
@@ -351,6 +419,7 @@ fn decodeString(
     if (pos.* >= block.len) return error.Malformed;
     const huffman = block[pos.*] & 0x80 != 0;
     const length = try decodeInt(block, pos, 7);
+    if (length > max_value) return error.Malformed;
     if (block.len - pos.* < length) return error.Malformed;
     const encoded = block[pos.*..][0..length];
     pos.* += length;
@@ -367,18 +436,22 @@ fn decodeInt(block: []const u8, pos: *usize, prefix_bits: u4) Error!usize {
     if (pos.* >= block.len) return error.Malformed;
     const shift_bits: u3 = @intCast(prefix_bits);
     const mask: u8 = (@as(u8, 1) << shift_bits) - 1;
-    var value: usize = block[pos.*] & mask;
+    var value: u64 = block[pos.*] & mask;
     pos.* += 1;
-    if (value < mask) return value;
+    if (value < mask) return @intCast(value);
 
+    // HPACK integers are used as lengths and table indices, all bounded by
+    // 32 bits. Accumulate in 64 bits and reject anything above that instead
+    // of overflowing the native `usize` on 32-bit targets.
     var shift: u6 = 0;
     while (true) {
         if (pos.* >= block.len) return error.Malformed;
         const byte = block[pos.*];
         pos.* += 1;
         if (shift > 28) return error.Malformed;
-        value += @as(usize, byte & 0x7f) << shift;
-        if (byte & 0x80 == 0) return value;
+        value += @as(u64, byte & 0x7f) << shift;
+        if (value > std.math.maxInt(u32)) return error.Malformed;
+        if (byte & 0x80 == 0) return @intCast(value);
         shift += 7;
     }
 }
@@ -597,7 +670,9 @@ test "dynamic table indexes a second block" {
     _ = try decoder.decode(block[0..pos], &storage, &headers);
     try std.testing.expectEqual(@as(usize, 0), decoder.count);
 
-    const incremental = [_]u8{ 0x40, 0x06, 'x', '-', 't', 'e', 's', 't', 0x05, 'v', 'a', 'l', 'u', 'e' };
+    const incremental = [_]u8{
+        0x40, 0x06, 'x', '-', 't', 'e', 's', 't', 0x05, 'v', 'a', 'l', 'u', 'e',
+    };
     _ = try decoder.decode(&incremental, &storage, &headers);
     try std.testing.expectEqual(@as(usize, 1), decoder.count);
     const indexed = [_]u8{0xbe};
@@ -664,7 +739,7 @@ test "encoder rejects invalid header names and values" {
 }
 
 test "literal headers are bounded by max_name and max_value" {
-    var block: [max_header_list]u8 = undefined;
+    var block: [max_value + 64]u8 = undefined;
     var pos: usize = 0;
     var large_value: [max_value + 1]u8 = undefined;
     @memset(&large_value, 'a');
@@ -675,9 +750,48 @@ test "literal headers are bounded by max_name and max_value" {
 
     var decoder = Decoder.init();
     var storage: [max_header_list]u8 = undefined;
-    var headers: [4]Header = undefined;
+    var headers: [64]Header = undefined;
     try std.testing.expectError(
         error.Malformed,
         decoder.decode(block[0..pos], &storage, &headers),
+    );
+}
+
+test "header-list accounting rejects an oversized decoded list" {
+    var block: [16 * 1024]u8 = undefined;
+    var value: [200]u8 = undefined;
+    @memset(&value, 'a');
+    var pos: usize = 0;
+    var index: usize = 0;
+    while (index < 40) : (index += 1) {
+        try encodeHeader(&block, &pos, "x-list", &value);
+    }
+    var decoder = Decoder.init();
+    var storage: [max_header_list]u8 = undefined;
+    var headers: [max_headers]Header = undefined;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        decoder.decode(block[0..pos], &storage, &headers),
+    );
+}
+
+test "HPACK integers larger than 32 bits are rejected" {
+    const block = [_]u8{
+        0x40,
+        0x7f,
+        0xff,
+        0xff,
+        0xff,
+        0xff,
+        0x0f,
+        0x01,
+        'v',
+    };
+    var decoder = Decoder.init();
+    var storage: [256]u8 = undefined;
+    var headers: [4]Header = undefined;
+    try std.testing.expectError(
+        error.Malformed,
+        decoder.decode(&block, &storage, &headers),
     );
 }

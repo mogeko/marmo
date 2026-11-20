@@ -1,8 +1,8 @@
 //! HTTP/2 transport package.
 //!
-//! Implements the HTTP/2 framing, HPACK, SETTINGS, flow control, and
-//! one-stream duplex transport needed by proxy protocols. It imports only
-//! `std` and operates on `std.Io.Reader`/`Writer`.
+//! Implements bounded HTTP/2 multiplexing, framing, HPACK, SETTINGS, flow
+//! control, 1xx responses, and trailers for proxy and gRPC-style transports.
+//! It imports only `std` and operates on `std.Io.Reader`/`Writer`.
 
 const std = @import("std");
 
