@@ -10,10 +10,10 @@ repository ships the library only: no CLI, daemon, or `app` layer.
   ADR is not approved: do not implement it. Use the `adr` skill to record a
   decision and wait for the user.
 - Migration freeze (2026-11-21): G1 passed; ADR-0017..ADR-0020 are accepted and
-  `docs/architecture.md` is the target Rust design. R0 has started on `rusty`.
-  The Zig tree remains frozen: no Zig features, no refactors, no exception
-  beyond security fixes and fixture additions. Rust work follows
-  `docs/architecture.md` and `crates/README.md`.
+  `docs/architecture.md` is the target Rust design. R1 is complete; R2 is
+  next. The Zig tree remains frozen: no Zig features, no
+  refactors, no exception beyond security fixes and fixture additions. Rust
+  work follows `docs/architecture.md` and `crates/README.md`.
 - Accepted ADRs are immutable; supersede them with a new ADR instead of editing.
 - Keep `docs/architecture.md`, the ADR index, and this file in sync.
 - `Instance` is the composition root; do not add an application layer, CLI, or

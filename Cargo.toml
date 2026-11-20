@@ -11,6 +11,8 @@ repository = "https://github.com/mogeko/marmo"
 authors = ["Zheng Junyi"]
 
 [workspace.dependencies]
+marmo-net = { path = "crates/marmo-net" }
+marmo-transport = { path = "crates/marmo-transport" }
 thiserror = "2.0"
 tokio = { version = "1.54", default-features = false, features = [
     "io-util",
@@ -20,6 +22,7 @@ tokio = { version = "1.54", default-features = false, features = [
     "sync",
     "time",
 ] }
+tokio-util = { version = "0.7", features = ["rt"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

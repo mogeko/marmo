@@ -8,5 +8,12 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[dependencies]
+marmo-net.workspace = true
+marmo-transport.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
 [lints]
 workspace = true

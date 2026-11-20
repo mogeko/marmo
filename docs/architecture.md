@@ -812,6 +812,11 @@ Parity total: ~25 engineer-days (range 18-35), where an engineer-day is six
 productive hours. If the runtime-agnostic alternative in ADR-0017 is chosen,
 add 4-6 days and a second runtime test matrix.
 
+R0 and R1 are complete. R1 delivered the address layer, relay, admission
+control, cancellation, direct connect, and the internal TCP engine with
+loopback tests. The public `Instance` lifecycle is wired in R2 together with
+the serde config, so R1 does not expose a public facade yet.
+
 ### 19.4 Parity matrix
 
 One row per capability (config field, protocol, transport, matcher, limit,

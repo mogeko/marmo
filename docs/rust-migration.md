@@ -483,7 +483,7 @@ Status after the 2026-11-21 acceptance:
 
 | Item | Status | Decision |
 | --- | --- | --- |
-| Go / no-go | decided | Go; G1 passed 2026-11-21; R0 started on `rusty` |
+| Go / no-go | decided | Go; G1 passed 2026-11-21; R1 complete; R2 next |
 | License | decided | MIT OR Apache-2.0 (ADR-0020) |
 | Runtime | decided | tokio (ADR-0017); runtime-agnostic was rejected at +4-6 engineer-days |
 | Crypto backend | decided | C toolchain allowed; `aws-lc-rs` pinned (ADR-0018) |
