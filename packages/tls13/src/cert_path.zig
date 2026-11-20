@@ -103,9 +103,278 @@ pub fn validateCertificateDer(bytes: []const u8) Error!void {
             depth += 1;
             cursor = tlv.content_start;
         } else {
+            if (tlv.tag == 0x03) {
+                // `std.crypto.Certificate` indexes the first BIT STRING byte
+                // (the unused-bit count) without a length check.
+                if (tlv.content_end == tlv.content_start) {
+                    return error.CertificateRejected;
+                }
+                if (bytes[tlv.content_start] > 7) {
+                    return error.CertificateRejected;
+                }
+            }
             cursor = tlv.content_end;
         }
     }
+    try validateCertificateShape(bytes);
+}
+
+/// Mirrors the field accesses performed by `Certificate.parse` so every
+/// offset it dereferences is backed by a complete DER element. A purely
+/// generic TLV walk is not enough: the std parser also indexes empty
+/// sequences, zero-length BIT STRINGs, and malformed SAN payloads.
+fn validateCertificateShape(bytes: []const u8) Error!void {
+    const certificate = try readTlv(bytes, 0);
+    if (certificate.tag != 0x30) return error.CertificateRejected;
+    if (certificate.content_end != bytes.len) {
+        return error.CertificateRejected;
+    }
+    var cursor = certificate.content_start;
+    const tbs = try childTlv(bytes, &cursor, certificate.content_end);
+    if (tbs.tag != 0x30) return error.CertificateRejected;
+    try validateTbsCertificate(bytes, tbs);
+
+    cursor = tbs.next;
+    try validateAlgorithmIdentifier(bytes, &cursor, certificate.content_end);
+    const signature = try childTlv(bytes, &cursor, certificate.content_end);
+    if (signature.tag != 0x03) return error.CertificateRejected;
+    if (cursor != certificate.content_end) {
+        return error.CertificateRejected;
+    }
+}
+
+fn validateTbsCertificate(bytes: []const u8, tbs: Tlv) Error!void {
+    var cursor = tbs.content_start;
+    var field = try childTlv(bytes, &cursor, tbs.content_end);
+    if (field.tag == 0xa0) {
+        var version_cursor = field.content_start;
+        const version = try childTlv(bytes, &version_cursor, field.content_end);
+        if (version.tag != 0x02) return error.CertificateRejected;
+        if (version_cursor != field.content_end) {
+            return error.CertificateRejected;
+        }
+        const version_bytes = bytes[version.content_start..version.content_end];
+        if (!std.mem.eql(u8, version_bytes, &.{0}) and
+            !std.mem.eql(u8, version_bytes, &.{1}) and
+            !std.mem.eql(u8, version_bytes, &.{2}))
+        {
+            return error.CertificateRejected;
+        }
+        field = try childTlv(bytes, &cursor, tbs.content_end);
+    }
+    // serialNumber
+    if (field.tag != 0x02) return error.CertificateRejected;
+    if (field.content_end == field.content_start) {
+        return error.CertificateRejected;
+    }
+    // signature AlgorithmIdentifier, issuer, validity, subject, SPKI
+    try validateAlgorithmIdentifier(bytes, &cursor, tbs.content_end);
+    try validateName(bytes, &cursor, tbs.content_end);
+    try validateValidity(bytes, &cursor, tbs.content_end);
+    try validateName(bytes, &cursor, tbs.content_end);
+    try validateSubjectPublicKeyInfo(bytes, &cursor, tbs.content_end);
+
+    while (cursor < tbs.content_end) {
+        const optional = try childTlv(bytes, &cursor, tbs.content_end);
+        switch (optional.tag) {
+            0x81, 0x82 => {
+                if (optional.content_end == optional.content_start) {
+                    return error.CertificateRejected;
+                }
+            },
+            else => {
+                // std compares only the low five tag bits, so a non-canonical
+                // wrapper for [3] still reaches its extension parser.
+                if (optional.tag & 0x1f != 0x03) {
+                    return error.CertificateRejected;
+                }
+                try validateExtensions(bytes, optional);
+            },
+        }
+    }
+}
+
+fn validateAlgorithmIdentifier(
+    bytes: []const u8,
+    cursor: *usize,
+    limit: usize,
+) Error!void {
+    const algorithm = try childTlv(bytes, cursor, limit);
+    if (algorithm.tag != 0x30) return error.CertificateRejected;
+    var inner = algorithm.content_start;
+    const oid = try childTlv(bytes, &inner, algorithm.content_end);
+    if (oid.tag != 0x06 or oid.content_end == oid.content_start) {
+        return error.CertificateRejected;
+    }
+    // At most one parameters element, and it must fit the sequence.
+    if (inner != algorithm.content_end) {
+        _ = try childTlv(bytes, &inner, algorithm.content_end);
+        if (inner != algorithm.content_end) {
+            return error.CertificateRejected;
+        }
+    }
+}
+
+fn validateName(bytes: []const u8, cursor: *usize, limit: usize) Error!void {
+    const name = try childTlv(bytes, cursor, limit);
+    if (name.tag != 0x30) return error.CertificateRejected;
+    var rdn_cursor = name.content_start;
+    while (rdn_cursor < name.content_end) {
+        const rdn = try childTlv(bytes, &rdn_cursor, name.content_end);
+        if (rdn.tag != 0x31) return error.CertificateRejected;
+        var atav_cursor = rdn.content_start;
+        while (atav_cursor < rdn.content_end) {
+            const atav = try childTlv(bytes, &atav_cursor, rdn.content_end);
+            if (atav.tag != 0x30) return error.CertificateRejected;
+            var value_cursor = atav.content_start;
+            const attribute = try childTlv(bytes, &value_cursor, atav.content_end);
+            if (attribute.tag != 0x06 or
+                attribute.content_end == attribute.content_start)
+            {
+                return error.CertificateRejected;
+            }
+            _ = try childTlv(bytes, &value_cursor, atav.content_end);
+            if (value_cursor != atav.content_end) {
+                return error.CertificateRejected;
+            }
+        }
+    }
+}
+
+fn validateValidity(bytes: []const u8, cursor: *usize, limit: usize) Error!void {
+    const validity = try childTlv(bytes, cursor, limit);
+    if (validity.tag != 0x30) return error.CertificateRejected;
+    var time_cursor = validity.content_start;
+    const not_before = try childTlv(bytes, &time_cursor, validity.content_end);
+    try validateTime(bytes, not_before);
+    const not_after = try childTlv(bytes, &time_cursor, validity.content_end);
+    try validateTime(bytes, not_after);
+    if (time_cursor != validity.content_end) {
+        return error.CertificateRejected;
+    }
+}
+
+fn validateTime(_: []const u8, time: Tlv) Error!void {
+    switch (time.tag) {
+        0x17 => if (time.content_end - time.content_start != 13) {
+            return error.CertificateRejected;
+        },
+        0x18 => if (time.content_end - time.content_start < 15) {
+            return error.CertificateRejected;
+        },
+        else => return error.CertificateRejected,
+    }
+}
+
+fn validateSubjectPublicKeyInfo(
+    bytes: []const u8,
+    cursor: *usize,
+    limit: usize,
+) Error!void {
+    const info = try childTlv(bytes, cursor, limit);
+    if (info.tag != 0x30) return error.CertificateRejected;
+    var inner = info.content_start;
+    try validateAlgorithmIdentifier(bytes, &inner, info.content_end);
+    const bit_string = try childTlv(bytes, &inner, info.content_end);
+    if (bit_string.tag != 0x03) return error.CertificateRejected;
+    // One unused-bit byte plus at least one key byte.
+    if (bit_string.content_end - bit_string.content_start < 2) {
+        return error.CertificateRejected;
+    }
+    if (bytes[bit_string.content_start] != 0) {
+        return error.CertificateRejected;
+    }
+    if (inner != info.content_end) return error.CertificateRejected;
+
+    const key = bytes[bit_string.content_start + 1 .. bit_string.content_end];
+    if (isRsaAlgorithmIdentifier(bytes, info.content_start, info.content_end)) {
+        try validateRsaPublicKey(key);
+    }
+}
+
+fn isRsaAlgorithmIdentifier(
+    bytes: []const u8,
+    start: usize,
+    end: usize,
+) bool {
+    const algorithm = readTlv(bytes, start) catch return false;
+    if (algorithm.tag != 0x30 or algorithm.content_end > end) return false;
+    const oid = readTlv(bytes, algorithm.content_start) catch return false;
+    if (oid.tag != 0x06) return false;
+    const value = bytes[oid.content_start..oid.content_end];
+    return std.mem.eql(u8, value, &oid_rsa_encryption) or
+        std.mem.eql(u8, value, &oid_rsassa_pss);
+}
+
+fn validateRsaPublicKey(key: []const u8) Error!void {
+    const sequence = readTlv(key, 0) catch return error.CertificateRejected;
+    if (sequence.tag != 0x30) return error.CertificateRejected;
+    if (sequence.content_end != key.len) return error.CertificateRejected;
+    var cursor = sequence.content_start;
+    const modulus = try childTlv(key, &cursor, sequence.content_end);
+    if (modulus.tag != 0x02 or modulus.content_end == modulus.content_start) {
+        return error.CertificateRejected;
+    }
+    const exponent = try childTlv(key, &cursor, sequence.content_end);
+    if (exponent.tag != 0x02 or exponent.content_end == exponent.content_start) {
+        return error.CertificateRejected;
+    }
+    if (cursor != sequence.content_end) return error.CertificateRejected;
+}
+
+fn validateExtensions(bytes: []const u8, outer: Tlv) Error!void {
+    if (outer.content_end == outer.content_start) {
+        return error.CertificateRejected;
+    }
+    var cursor = outer.content_start;
+    const list = try childTlv(bytes, &cursor, outer.content_end);
+    if (list.tag != 0x30) return error.CertificateRejected;
+    if (cursor != outer.content_end) return error.CertificateRejected;
+    var extension_cursor = list.content_start;
+    while (extension_cursor < list.content_end) {
+        const extension = try childTlv(bytes, &extension_cursor, list.content_end);
+        if (extension.tag != 0x30) return error.CertificateRejected;
+        var field_cursor = extension.content_start;
+        const oid = try childTlv(bytes, &field_cursor, extension.content_end);
+        if (oid.tag != 0x06 or oid.content_end == oid.content_start) {
+            return error.CertificateRejected;
+        }
+        var value = try childTlv(bytes, &field_cursor, extension.content_end);
+        if (value.tag == 0x01) {
+            if (value.content_end != value.content_start + 1) {
+                return error.CertificateRejected;
+            }
+            value = try childTlv(bytes, &field_cursor, extension.content_end);
+        }
+        if (value.tag != 0x04) return error.CertificateRejected;
+        if (field_cursor != extension.content_end) {
+            return error.CertificateRejected;
+        }
+    }
+}
+
+/// Bounds every GeneralName before `std.crypto.Certificate.verifyHostName`
+/// walks the same structure without length checks.
+fn validateGeneralNames(value: []const u8) Error!void {
+    const sequence = readTlv(value, 0) catch return error.CertificateRejected;
+    if (sequence.tag != 0x30) return error.CertificateRejected;
+    if (sequence.content_end != value.len) return error.CertificateRejected;
+    var cursor = sequence.content_start;
+    while (cursor < sequence.content_end) {
+        const name = readTlv(value, cursor) catch return error.CertificateRejected;
+        if (name.content_end > sequence.content_end) {
+            return error.CertificateRejected;
+        }
+        cursor = name.next;
+    }
+}
+
+fn childTlv(bytes: []const u8, cursor: *usize, limit: usize) Error!Tlv {
+    if (cursor.* >= limit) return error.CertificateRejected;
+    const tlv = try readTlv(bytes, cursor.*);
+    if (tlv.content_end > limit) return error.CertificateRejected;
+    cursor.* = tlv.next;
+    return tlv;
 }
 
 const Tlv = struct {
@@ -418,7 +687,9 @@ fn parseExtensionList(
                 return error.CertificateRejected;
             }
         } else if (std.mem.eql(u8, oid, &oid_subject_alt_name)) {
-            // Host-name validation is already handled by Certificate.Parsed.
+            // `Certificate.Parsed.verifyHostName` reparses this value with an
+            // unbounded DER parser, so bound it here first.
+            try validateGeneralNames(value);
         } else if (std.mem.eql(u8, oid, &oid_name_constraints)) {
             extensions.name_constraints = value;
         } else if (critical) {
@@ -538,6 +809,12 @@ const oid_key_usage = [_]u8{ 0x55, 0x1d, 0x0f };
 const oid_ext_key_usage = [_]u8{ 0x55, 0x1d, 0x25 };
 const oid_subject_alt_name = [_]u8{ 0x55, 0x1d, 0x11 };
 const oid_name_constraints = [_]u8{ 0x55, 0x1d, 0x1e };
+const oid_rsa_encryption = [_]u8{
+    0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01,
+};
+const oid_rsassa_pss = [_]u8{
+    0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0a,
+};
 const oid_server_auth = [_]u8{
     0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01,
 };

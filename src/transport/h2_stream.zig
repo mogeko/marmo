@@ -174,7 +174,10 @@ pub const H2Stream = struct {
                 // frames; `.send` means H2 END_STREAM, not TCP FIN.
                 return;
             },
-            .both => return self.inner.shutdown(io, .both),
+            .both => {
+                self.h2_stream.cancel();
+                return self.inner.shutdown(io, .both);
+            },
         }
     }
 

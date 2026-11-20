@@ -170,7 +170,14 @@ pub const Guard = struct {
     /// Removes the guard from the reaper before the stream is closed.
     pub fn stop(self: *Guard) void {
         if (self.done.swap(true, .acq_rel)) return;
+        self.clearPeer();
         self.registry.remove(self.io, self);
+    }
+
+    pub fn clearPeer(self: *Guard) void {
+        self.peer_lock.lock(self.io) catch return;
+        defer self.peer_lock.unlock(self.io);
+        self.peer_stream = null;
     }
 
     pub fn setPeer(self: *Guard, peer: Stream) void {
@@ -213,8 +220,9 @@ pub const Guard = struct {
         self.peer_stream = null;
         self.peer_lock.unlock(self.io);
         if (peer) |stream| {
-            stream.shutdown(self.io, .send) catch {};
-            stream.shutdown(self.io, .recv) catch {};
+            // Use the abort path: it must not wait on a writer or emit a
+            // protocol-level close frame while the reaper holds its lock.
+            stream.shutdown(self.io, .both) catch {};
         }
     }
 };

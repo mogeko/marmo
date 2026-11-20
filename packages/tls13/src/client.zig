@@ -824,6 +824,12 @@ fn verifyRsa(
         components.exponent,
         components.modulus,
     );
+    // RFC 8446 §4.4.3: the signature is a fixed-size RSA result, so its
+    // length must equal the certificate modulus. A mismatch would otherwise
+    // trip an assertion inside the PSS verifier.
+    if (signature.len != components.modulus.len) {
+        return error.HandshakeFailed;
+    }
     switch (signature.len) {
         inline 256, 384, 512 => |modulus_len| {
             const sig: *const [modulus_len]u8 = signature[0..modulus_len];
@@ -1110,5 +1116,32 @@ test "post-handshake KeyUpdate is rejected even after a ticket" {
     try std.testing.expectError(
         error.HandshakeFailed,
         rejectKeyUpdate(&content),
+    );
+}
+
+test "RSA-PSS signature length must match the certificate modulus" {
+    const allocator = std.testing.allocator;
+    var key: std.ArrayList(u8) = .empty;
+    defer key.deinit(allocator);
+    try key.append(allocator, 0x30);
+    try key.append(allocator, 0x81);
+    try key.append(allocator, 0x86);
+    try key.append(allocator, 0x02);
+    try key.append(allocator, 0x81);
+    try key.append(allocator, 0x80);
+    try key.appendNTimes(allocator, 0x81, 128);
+    try key.appendSlice(allocator, &.{ 0x02, 0x01, 0x03 });
+
+    var signature: [256]u8 = undefined;
+    @memset(&signature, 1);
+    try std.testing.expectError(
+        error.HandshakeFailed,
+        verifyRsa(
+            handshake.signature_rsa_pss_sha256,
+            &signature,
+            "message",
+            .rsaEncryption,
+            key.items,
+        ),
     );
 }

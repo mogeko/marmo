@@ -17,7 +17,10 @@ pub const ClientOptions = struct {
 
 pub const ServerOptions = struct {
     path: []const u8 = "/",
-    handshake_timeout_ns: u64 = default_handshake_timeout_ns,
+    /// Zero disables the per-connection timer. Inbound servers must instead
+    /// enforce ADR-0015 handshake deadlines with the connection reaper; each
+    /// enabled timer costs one sleeping task on `Io.Threaded`.
+    handshake_timeout_ns: u64 = 0,
 };
 
 pub const CreateError = error{
@@ -28,8 +31,26 @@ pub const CreateError = error{
 };
 
 const Handshake = union(enum) {
-    done: anyerror!void,
     timeout: std.Io.Cancelable!void,
+};
+
+const HandshakeTimer = struct {
+    io: std.Io,
+    inner: Stream,
+    timeout_ns: u64,
+    fired: std.atomic.Value(bool) = .init(false),
+
+    fn run(self: *HandshakeTimer) std.Io.Cancelable!void {
+        try std.Io.sleep(
+            self.io,
+            .{ .nanoseconds = @intCast(self.timeout_ns) },
+            .awake,
+        );
+        self.fired.store(true, .release);
+        // The handshake runs on the calling task; aborting the transport is
+        // the only portable way to unblock its pending read.
+        self.inner.shutdown(self.io, .both) catch {};
+    }
 };
 
 pub const WsStream = struct {
@@ -212,39 +233,24 @@ fn runHandshake(
         return handshake(self, options) catch |err| mapHandshakeError(err);
     }
 
-    var buffer: [2]Handshake = undefined;
-    var select: std.Io.Select(Handshake) = .init(self.io, &buffer);
-    select.concurrent(.done, handshake, .{ self, options }) catch {
-        drainHandshake(&select);
-        return error.HandshakeFailed;
+    // One timer task, not one task per handshake phase: the handshake itself
+    // stays on the calling task.
+    var timer: HandshakeTimer = .{
+        .io = self.io,
+        .inner = self.inner,
+        .timeout_ns = timeout_ns,
     };
-    select.concurrent(.timeout, handshakeTimeout, .{
-        self.io,
-        timeout_ns,
-    }) catch {
+    var buffer: [1]Handshake = undefined;
+    var select: std.Io.Select(Handshake) = .init(self.io, &buffer);
+    select.concurrent(.timeout, HandshakeTimer.run, .{&timer}) catch {
         drainHandshake(&select);
         return error.HandshakeFailed;
     };
 
-    const result = select.await() catch |err| {
-        drainHandshake(&select);
-        switch (err) {
-            error.Canceled => return error.Canceled,
-        }
-    };
-    switch (result) {
-        .done => |done| {
-            drainHandshake(&select);
-            done catch |err| return mapHandshakeError(err);
-        },
-        .timeout => |timed_out| {
-            drainHandshake(&select);
-            timed_out catch |err| switch (err) {
-                error.Canceled => return error.Canceled,
-            };
-            return error.TimedOut;
-        },
-    }
+    const result = handshake(self, options);
+    drainHandshake(&select);
+    if (timer.fired.load(.acquire)) return error.TimedOut;
+    result catch |err| return mapHandshakeError(err);
 }
 
 fn handshake(self: *WsStream, options: HandshakeOptions) anyerror!void {
@@ -269,7 +275,6 @@ fn handshake(self: *WsStream, options: HandshakeOptions) anyerror!void {
 fn drainHandshake(select: *std.Io.Select(Handshake)) void {
     while (select.cancel()) |result| {
         switch (result) {
-            .done => |done| done catch {},
             .timeout => |timed_out| timed_out catch {},
         }
     }
@@ -281,10 +286,6 @@ fn mapHandshakeError(err: anyerror) CreateError {
         error.OutOfMemory => error.OutOfMemory,
         else => error.HandshakeFailed,
     };
-}
-
-fn handshakeTimeout(io: std.Io, timeout_ns: u64) std.Io.Cancelable!void {
-    try std.Io.sleep(io, .{ .nanoseconds = @intCast(timeout_ns) }, .awake);
 }
 
 const SocketReader = struct {
@@ -416,9 +417,9 @@ const BlockingInner = struct {
         io: std.Io,
         how: Stream.ShutdownHow,
     ) Stream.ShutdownError!void {
-        _ = ctx;
-        _ = io;
         _ = how;
+        const self: *BlockingInner = @ptrCast(@alignCast(ctx));
+        self.release.set(io);
     }
 
     fn close(ctx: *anyopaque, io: std.Io) void {
@@ -470,4 +471,19 @@ test "close waits for a blocked read before freeing the adapter" {
     try inner.started.wait(io);
     stream.close(io);
     try std.testing.expectError(error.Canceled, future.await(io));
+}
+
+test "handshake timeout aborts a silent peer" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var inner: BlockingInner = .{};
+    const result = WsStream.createServer(
+        io,
+        std.testing.allocator,
+        inner.stream(),
+        .{ .handshake_timeout_ns = 20 * std.time.ns_per_ms },
+    );
+    try std.testing.expectError(error.TimedOut, result);
 }

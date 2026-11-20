@@ -47,6 +47,7 @@ pub fn relayWithGuard(
         value.setPeer(remote);
         value.markRelay();
     }
+    defer if (guard) |value| value.clearPeer();
 
     var upstream = io.concurrent(
         copyWrapper,

@@ -1100,3 +1100,50 @@ test "validateCredentials rejects malformed DER without panicking" {
         validateCredentials(&.{&tiny}, key_pair),
     );
 }
+
+test "malformed SAN DER is rejected before host-name verification" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // A one-byte extnValue makes std's unbounded DER parse read past the end.
+    var cert = try test_cert.generateParams(allocator, io, .{
+        .san_der = &.{0x82},
+        .eku_server_auth = true,
+    });
+    defer cert.deinit(allocator);
+    var leaf: cert_path.Leaf = .{};
+    try std.testing.expectError(
+        error.CertificateRejected,
+        cert_path.verifyServerChain(&.{cert.der}, .{
+            .host = "localhost",
+            .verify_chain = false,
+            .now_sec = 0,
+            .bundle = null,
+        }, &leaf),
+    );
+}
+
+test "zero-length signature BIT STRING is rejected" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var cert = try test_cert.generateParams(allocator, io, .{
+        .empty_signature = true,
+        .eku_server_auth = true,
+    });
+    defer cert.deinit(allocator);
+    var leaf: cert_path.Leaf = .{};
+    try std.testing.expectError(
+        error.CertificateRejected,
+        cert_path.verifyServerChain(&.{cert.der}, .{
+            .host = "localhost",
+            .verify_chain = false,
+            .now_sec = 0,
+            .bundle = null,
+        }, &leaf),
+    );
+}

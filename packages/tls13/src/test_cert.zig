@@ -22,11 +22,16 @@ pub const Params = struct {
     issuer_name: ?[]const u8 = null,
     issuer_key: ?Ecdsa.KeyPair = null,
     san: ?[]const u8 = "localhost",
+    /// Overrides the encoded SAN extension value verbatim. Used to exercise
+    /// malformed inner structures that std's host-name verifier would parse.
+    san_der: ?[]const u8 = null,
     ca: bool = false,
     path_len: ?u16 = null,
     include_basic_constraints: bool = false,
     include_key_usage: bool = false,
     eku_server_auth: bool = false,
+    /// Emits a zero-length SIGNATURE BIT STRING for parser hardening tests.
+    empty_signature: bool = false,
 };
 
 pub fn generate(
@@ -96,7 +101,10 @@ pub fn generateParams(
     defer gpa.free(tbs);
 
     const signing_key = params.issuer_key orelse key_pair;
-    const signature_value = try buildSignatureValue(gpa, signing_key, tbs);
+    const signature_value = if (params.empty_signature)
+        try tlv(gpa, 0x03, &.{})
+    else
+        try buildSignatureValue(gpa, signing_key, tbs);
     defer gpa.free(signature_value);
 
     const certificate_content = try concat(gpa, &.{
@@ -181,7 +189,15 @@ fn buildExtensions(gpa: std.mem.Allocator, params: Params) ![]u8 {
     var extensions: std.ArrayList(u8) = .empty;
     defer extensions.deinit(gpa);
 
-    if (params.san) |san| {
+    if (params.san_der) |value| {
+        try appendExtension(
+            gpa,
+            &extensions,
+            &.{ 0x55, 0x1d, 0x11 },
+            false,
+            value,
+        );
+    } else if (params.san) |san| {
         const dns_name = try tlv(gpa, 0x82, san);
         defer gpa.free(dns_name);
         const general_names = try tlv(gpa, 0x30, dns_name);

@@ -44,6 +44,8 @@ repository ships the library only: no CLI, daemon, or `app` layer.
   of the root build.
 - ADR-0001–0015 are accepted. ADR-0015 connection limits/timeouts are
   implemented with a global `limits` policy and one reaper per `Instance`.
+  The reaper aborts peers with the non-blocking `.both` path, and the WS
+  server adapter leaves handshake deadlines to that reaper by default.
   New architecture decisions need a new ADR.
 - Snell is deferred and WireGuard is out of scope (ADR-0002).
 
@@ -183,8 +185,8 @@ Adapted from TigerBeetle's
 ## Commands and tests
 
 - `zig build test` runs the root unit, public API, and integration tests, the
-  package tests, and the deterministic fuzz corpus smoke (165 today: 58 root
-  unit, 4 public API, 27 integration, 25 tls13, 20 http2, 19 ws, 12 fuzz).
+  package tests, and the deterministic fuzz corpus smoke (171 today: 59 root
+  unit, 4 public API, 28 integration, 28 tls13, 21 http2, 19 ws, 12 fuzz).
   `zig build check` adds the formatting check, and `zig build examples` builds
   all examples. CI runs `zig build check` and
   `zig build test -Doptimize=ReleaseSafe`.

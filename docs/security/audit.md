@@ -349,3 +349,31 @@ Residual: TLS RA-05 (outbound connect/DNS cannot yet be canceled by the
 handshake deadline), WebSocket handshake timeout still uses a per-connection
 sleep task, single WS frames remain capped at 64 KiB, and H2 remains limited to
 one stream per connection. These are tracked for the next hardening pass.
+
+## 7. Third re-audit (2026-11-20)
+
+The third pass replayed the second-round findings and added end-to-end probes
+against OpenSSL 4.1, curl/nghttp2, Python `h2`/`hpack`, and Python
+`websockets`. Fixed before this note:
+
+- TLS: the DER prevalidator now mirrors the std parser's accesses — certificate
+  and TBSCertificate field order/types, Name/RDN/ATV bounds, validity times,
+  SPKI and RSA public-key shape, non-empty BIT STRINGs (including the
+  signature), extension wrappers, and SAN `GeneralNames`. Malformed SANs and
+  zero-length signature BIT STRINGs are rejected before `std` can index past
+  the end. RSA-PSS CertificateVerify lengths must equal the modulus.
+- ADR-0015: the reaper aborts the peer with `.both` (no write lock and no
+  protocol close frame) and `Guard.stop`/relay exit clear the peer reference,
+  closing the dangling-peer window. HTTP/2 `.both` cancels waiters.
+- HTTP/2: a blocked writer pumps frames while waiting for window credit, so
+  `WINDOW_UPDATE` is still processed after the peer half-closes; the reader
+  task can be gone. DATA padding is stripped and validated.
+- WebSocket: the handshake uses a single timer task that aborts the transport
+  instead of spawning two tasks, and `ServerOptions` defaults to no internal
+  timer so inbound servers rely on the ADR-0015 reaper.
+
+Residual (P2/P3): outbound connect/DNS still cannot be canceled by a
+handshake deadline (TLS-07/RA-05); protocol violations from the WS frame codec
+do not always send Close 1002; WS needs a handshake-level soak; H2 still uses a
+single stream per connection; TLS CN fallback and leaf keyUsage differ from
+OpenSSL policy; H2 1xx and strict token validation remain open.

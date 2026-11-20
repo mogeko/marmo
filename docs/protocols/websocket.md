@@ -14,15 +14,25 @@ provides `Stream`/`Dialer` adapters.
 - RFC 6455 frames: FIN/opcode/mask, 7/16/64-bit lengths, client masking,
   binary/text, continuation, ping/pong, and close. Control frames must be
   final and at most 125 bytes; frame payloads are capped at 64 KiB.
-- Writes use binary messages; reads accept text and binary payloads as bytes.
-  The transport does not validate UTF-8.
+- Writes use binary messages and split payloads over 64 KiB into a binary
+  frame plus continuation frames; reads accept text and binary payloads as
+  bytes. The transport does not validate UTF-8.
+- Close handling echoes valid close frames, answers invalid codes with 1002,
+  invalid UTF-8 with 1007, and oversized frames or messages with 1009.
+- Message, fragment, and per-read control limits are bounded (1 MiB, 1024, and
+  1024); hits are treated as protocol violations.
 
 ## Known gaps
 
 - No extensions (including `permessage-deflate`), subprotocol negotiation,
   redirects, or HTTP proxy authentication.
-- No dedicated close-code policy beyond echoing a received close frame.
-- No external audit. Parser fuzz targets are `ws_frame` and `ws_handshake`.
+- Protocol violations detected by the frame codec are reported to the caller;
+  only close-frame, oversize, and message-limit paths send a close frame.
+- Server handshakes default to no internal timer so that inbound servers use
+  the ADR-0015 reaper; standalone embedders that need a self-contained
+  deadline set `handshake_timeout_ns` (one sleeping task per handshake).
+- No external audit. Parser fuzz targets are `ws_frame`, `ws_handshake`, and
+  `ws_connection`.
 
 ## Fuzz targets
 

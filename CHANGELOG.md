@@ -7,6 +7,15 @@ and behavior may change between minor releases.
 
 ### Security
 
+- Third re-audit (2026-11-20): TLS now validates the full certificate shape
+  (TBSCertificate fields, SAN/GeneralName bounds, BIT STRING lengths, RSA SPKI)
+  before std parsing, and rejects RSA-PSS signatures whose length differs from
+  the certificate modulus. The ADR-0015 reaper no longer takes a writer lock
+  or emits protocol close frames while aborting peers, relay exits clear the
+  peer stream, HTTP/2 processes flow-control frames while a writer waits for
+  window (including after the peer half-closes) and strips DATA padding, and
+  the WS adapter uses one timer task instead of two while the server default
+  defers handshake deadlines to the instance reaper.
 - Second re-audit (2026-11-20): TLS certificate DER is prevalidated before
   `std.crypto.Certificate` parsing (empty/truncated certificates no longer
   abort), pathLen/name constraints cover IP and trust anchors, and intermediate

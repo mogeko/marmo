@@ -45,6 +45,10 @@ pub const Stream = struct {
         return self.connection.closeStream(self.id);
     }
 
+    pub fn cancel(self: Stream) void {
+        self.connection.cancel();
+    }
+
     pub fn sendHeaders(
         self: Stream,
         headers: []const Header,
@@ -264,11 +268,18 @@ pub const Connection = struct {
         }
         if (self.remote_end_stream.load(.acquire)) return error.ProtocolViolation;
         if (self.pending_len != 0) return error.ProtocolViolation;
-        if (parsed.payload.len > self.pending.len) {
+        var payload = parsed.payload;
+        if (parsed.flags & frame.flag_padded != 0) {
+            if (payload.len == 0) return error.ProtocolViolation;
+            const pad_len = payload[0];
+            if (pad_len > payload.len - 1) return error.ProtocolViolation;
+            payload = payload[1 .. payload.len - pad_len];
+        }
+        if (payload.len > self.pending.len) {
             return error.ProtocolViolation;
         }
-        @memcpy(self.pending[0..parsed.payload.len], parsed.payload);
-        self.pending_len = parsed.payload.len;
+        @memcpy(self.pending[0..payload.len], payload);
+        self.pending_len = payload.len;
         self.pending_offset = 0;
         if (parsed.flags & frame.flag_end_stream != 0) {
             self.remote_end_stream.store(true, .release);
@@ -454,6 +465,19 @@ pub const Connection = struct {
                     @min(available, @as(i64, self.peer_max_frame_size)),
                     @as(i64, frame.max_frame_size),
                 );
+            }
+            if (self.input_mutex.tryLock()) {
+                defer self.input_mutex.unlock(self.io);
+                self.processFrame() catch |err| {
+                    self.stream_aborted.store(true, .release);
+                    self.window_event.set(self.io);
+                    return switch (err) {
+                        error.Canceled => error.Canceled,
+                        error.Closed => error.Closed,
+                        else => err,
+                    };
+                };
+                continue;
             }
             self.window_event.wait(self.io) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
@@ -1083,5 +1107,44 @@ test "request pseudo headers and configured path are enforced" {
     try std.testing.expectError(
         error.ProtocolViolation,
         validateRequest(&missing_authority, null),
+    );
+}
+
+test "padded DATA strips padding before delivery" {
+    const allocator = std.testing.allocator;
+    var storage: std.Io.Writer.Allocating = .init(allocator);
+    defer storage.deinit();
+    var input = std.Io.Reader.fixed(&.{});
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &storage.writer,
+        .role = .client,
+        .stream_id = 1,
+    };
+    var payload = [_]u8{ 3, 'h', 'i', 0, 0, 0 };
+    try connection.handleFrame(.{
+        .frame_type = frame.type_data,
+        .flags = frame.flag_padded,
+        .stream_id = 1,
+        .payload = &payload,
+    });
+    var buffer: [8]u8 = undefined;
+    var buffers = [_][]u8{&buffer};
+    const read_len = try connection.readStream(1, &buffers);
+    try std.testing.expectEqual(@as(usize, 2), read_len);
+    try std.testing.expectEqualStrings("hi", buffer[0..2]);
+
+    connection.remote_end_stream.store(false, .release);
+    payload[0] = 6;
+    connection.pending_len = 0;
+    try std.testing.expectError(
+        error.ProtocolViolation,
+        connection.handleFrame(.{
+            .frame_type = frame.type_data,
+            .flags = frame.flag_padded,
+            .stream_id = 1,
+            .payload = &payload,
+        }),
     );
 }
