@@ -69,12 +69,19 @@ from `Server` with `--http2-prior-knowledge`. The harness is not committed.
   upgrade/h2c, connection pooling, or HTTP/2 WebSocket.
 - No general request router, caching, or response-body framing beyond DATA.
 - gRPC message framing is application-level and out of scope.
-- Root `Config`/`Instance` wiring, protocol-level VLESS/VMess H2 transport, and
-  the root `h2_*` adapters are unchanged; the package remains transport-only.
+- VLESS outbound/inbound can select `transport.network = "h2"` (ADR-0016),
+  with TLS ALPN `h2` and a configured path/host (the inbound enforces `path`,
+  not `host`). `Instance` currently serves
+  one VLESS stream per H2 connection, so the package's 16-stream multiplexer
+  and connection pooling are not yet used by the root library. VMess and gRPC
+  remain unimplemented.
 - The server cannot send 1xx responses. The fixed 8 KiB per-stream receive
   window is a throughput trade-off for high-RTT single-stream use.
 - A blocked writer pumps frames itself; with many streams and an application
   that never reads, flow control eventually stalls that stream by design.
+- The adapter handshake timer uses a running/done/fired state so a late timer
+  cannot abort a completed connection; `Instance` disables it and relies on
+  the ADR-0015 reaper.
 - No external audit. Parser fuzz targets remain `http2_frame` and
   `http2_hpack`; the connection state machine is covered by unit tests and a
   deterministic stateful pump test.

@@ -36,13 +36,15 @@ Statuses: `Proposed` → `Accepted` | `Rejected` | `Superseded by ADR-NNNN`.
 | [0013](0013-http2-package.md) | HTTP/2 transport package | Accepted | `packages/http2`; 16-stream multiplexing; framing/HPACK/flow control; 1xx/trailers |
 | [0014](0014-websocket-package.md) | WebSocket transport package | Accepted | `packages/ws`; RFC 6455, permessage-deflate, subprotocols |
 | [0015](0015-connection-limits-and-timeouts.md) | Connection limits and idle timeouts | Accepted | global limits 1024/10/300/1/1; per-Instance reaper; UDP excluded |
+| [0016](0016-protocol-transport-wiring.md) | Protocol transport composition wiring | Accepted | VLESS `transport` tcp/ws/h2; TLS ALPN defaults; WS compression/subprotocols; H2 one stream per Instance connection |
 
 ## Accepted decisions
 
 ADR-0001–0010 were accepted on 2026-11-18 (ADR-0010 on 2026-11-19); ADR-0011
 was accepted on 2026-11-19. ADR-0012–0014 were accepted on 2026-11-19 on the
 direct implementation request. ADR-0015 was accepted on 2026-11-20 after
-reference-implementation research.
+reference-implementation research; ADR-0016 was accepted on 2026-11-20 on the
+direct implementation request.
 
 - **ADR-0002**: Snell deferred, WireGuard abandoned; all other protocols and
   phases accepted.
@@ -53,7 +55,10 @@ reference-implementation research.
   routed through `Dispatch` and has no default endpoint.
 - **ADR-0012–0014**: TLS ALPN is negotiated on both sides by an in-tree TLS
   1.3 client/server; HTTP/2 and WebSocket are std-only first-party packages
-  with one active stream (H2) and bounded RFC 6455 framing (WS).
+  with bounded 16-stream H2 multiplexing and RFC 6455 framing (WS).
+- **ADR-0016**: VLESS inbounds/outbounds accept a strict `transport` object
+  (`tcp`, `ws`, `h2`) with transport-aware ALPN defaults and WebSocket
+  compression/subprotocol options; other protocols reject it.
 - **ADR-0015**: a global `limits` policy caps TCP connections and applies
   handshake, idle, and half-close grace timeouts, enforced by one reaper per
   `Instance`.

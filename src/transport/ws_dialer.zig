@@ -12,6 +12,9 @@ pub const WsDialer = struct {
     base: Dialer,
     host: []const u8,
     path: []const u8 = "/",
+    subprotocols: []const []const u8 = &.{},
+    compression: bool = false,
+    compression_no_context_takeover: bool = false,
     handshake_timeout_ns: u64 = ws_stream.default_handshake_timeout_ns,
 
     pub fn init(
@@ -46,6 +49,9 @@ pub const WsDialer = struct {
         const ws = ws_stream.WsStream.createClient(io, self.gpa, inner, .{
             .host = self.host,
             .path = self.path,
+            .subprotocols = self.subprotocols,
+            .compression = self.compression,
+            .compression_no_context_takeover = self.compression_no_context_takeover,
             .handshake_timeout_ns = self.handshake_timeout_ns,
         }) catch |err| {
             inner.close(io);

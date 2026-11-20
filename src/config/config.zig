@@ -42,11 +42,34 @@ pub const Config = struct {
         password: ?[]const u8 = null,
         uuid: ?[]const u8 = null,
         tls: ?InboundTls = null,
+        /// Optional L7 stream transport for protocols that support one.
+        transport: ?StreamTransport = null,
         /// Optional Trojan fallback endpoint for unauthenticated traffic.
         fallback: ?[]const u8 = null,
     };
 
     pub const InboundProtocol = enum { http, shadowsocks, socks5, trojan, vless };
+
+    pub const StreamNetwork = enum { tcp, ws, h2 };
+
+    /// L7 stream transport layered between the protocol and TLS/TCP.
+    ///
+    /// `tcp` is the default and carries the protocol directly. `ws` is an
+    /// RFC 6455 binary-message tunnel; `h2` is an HTTP/2 POST stream and
+    /// requires TLS with ALPN `h2`.
+    pub const StreamTransport = struct {
+        network: StreamNetwork = .tcp,
+        /// HTTP path for WebSocket or HTTP/2; must start with `/`.
+        path: []const u8 = "/",
+        /// HTTP `Host`/`:authority` sent by the outbound. The inbound does
+        /// not enforce a host yet; null derives it from the configured
+        /// server. Path matching is enforced on both sides.
+        host: ?[]const u8 = null,
+        /// WebSocket permessage-deflate (RFC 7692).
+        compression: bool = false,
+        /// WebSocket subprotocols, in preference order.
+        subprotocols: ?[]const []const u8 = null,
+    };
 
     pub const InboundTls = struct {
         /// PEM or DER certificate chain file, leaf first.
@@ -72,6 +95,8 @@ pub const Config = struct {
         password: ?[]const u8 = null,
         uuid: ?[]const u8 = null,
         tls: ?Tls = null,
+        /// Optional L7 stream transport for protocols that support one.
+        transport: ?StreamTransport = null,
         xudp: bool = false,
         nodes: ?[]const []const u8 = null,
         strategy: ?Strategy = null,
@@ -229,7 +254,7 @@ fn validateInbounds(
             .socks5, .http => {
                 if (inbound.method != null or inbound.password != null or
                     inbound.uuid != null or inbound.tls != null or
-                    inbound.fallback != null)
+                    inbound.transport != null or inbound.fallback != null)
                 {
                     diagnostic.set(
                         "inbounds[{d}]: socks5/http do not take credentials, TLS, or fallback",
@@ -250,9 +275,11 @@ fn validateShadowsocksInbound(
     index: usize,
     diagnostic: *Diagnostic,
 ) ValidationError!void {
-    if (inbound.uuid != null or inbound.tls != null or inbound.fallback != null) {
+    if (inbound.uuid != null or inbound.tls != null or
+        inbound.transport != null or inbound.fallback != null)
+    {
         diagnostic.set(
-            "inbounds[{d}]: uuid/tls/fallback do not apply to shadowsocks",
+            "inbounds[{d}]: uuid/tls/transport/fallback do not apply to shadowsocks",
             .{index},
         );
         return error.InvalidConfig;
@@ -325,6 +352,211 @@ fn validateVlessInbound(
         .{index},
     ) catch return error.InvalidConfig;
     try validateAlpn(tls.alpn, null, alpn_path, diagnostic);
+    try validateInboundTransport(inbound, index, diagnostic);
+}
+
+fn validateInboundTransport(
+    inbound: Config.Inbound,
+    index: usize,
+    diagnostic: *Diagnostic,
+) ValidationError!void {
+    const transport = inbound.transport orelse return;
+    var base_buffer: [64]u8 = undefined;
+    const base = std.fmt.bufPrint(
+        &base_buffer,
+        "inbounds[{d}].transport",
+        .{index},
+    ) catch return error.InvalidConfig;
+    try validateTransportShape(transport, base, diagnostic);
+
+    const tls = inbound.tls orelse {
+        diagnostic.set(
+            "inbounds[{d}].tls: required for vless ws/h2",
+            .{index},
+        );
+        return error.InvalidConfig;
+    };
+    if (transport.network == .h2) {
+        if (tls.alpn) |protocols| {
+            if (!containsProtocol(protocols, "h2")) {
+                diagnostic.set(
+                    "inbounds[{d}].tls.alpn: must contain 'h2' for the h2 transport",
+                    .{index},
+                );
+                return error.InvalidConfig;
+            }
+        }
+    } else if (tls.alpn) |protocols| {
+        if (protocols.len != 0 and !containsProtocol(protocols, "http/1.1")) {
+            diagnostic.set(
+                "inbounds[{d}].tls.alpn: must contain 'http/1.1' for the ws transport",
+                .{index},
+            );
+            return error.InvalidConfig;
+        }
+    }
+}
+
+fn validateOutboundTransport(
+    outbound: Config.Outbound,
+    index: usize,
+    diagnostic: *Diagnostic,
+) ValidationError!void {
+    const transport = outbound.transport orelse return;
+    var base_buffer: [64]u8 = undefined;
+    const base = std.fmt.bufPrint(
+        &base_buffer,
+        "outbounds[{d}].transport",
+        .{index},
+    ) catch return error.InvalidConfig;
+    try validateTransportShape(transport, base, diagnostic);
+
+    if (transport.network == .ws) {
+        if (outbound.tls) |tls| {
+            if (tls.alpn) |protocols| {
+                if (protocols.len != 0 and
+                    !containsProtocol(protocols, "http/1.1"))
+                {
+                    diagnostic.set(
+                        "outbounds[{d}].tls.alpn: must contain 'http/1.1' for the ws transport",
+                        .{index},
+                    );
+                    return error.InvalidConfig;
+                }
+            }
+        }
+        return;
+    }
+    if (transport.network != .h2) return;
+    const tls = outbound.tls orelse {
+        diagnostic.set(
+            "outbounds[{d}].tls: required for the h2 transport",
+            .{index},
+        );
+        return error.InvalidConfig;
+    };
+    if (tls.alpn) |protocols| {
+        if (!containsProtocol(protocols, "h2")) {
+            diagnostic.set(
+                "outbounds[{d}].tls.alpn: must contain 'h2' for the h2 transport",
+                .{index},
+            );
+            return error.InvalidConfig;
+        }
+    }
+    if (tls.required_alpn) |required| {
+        if (!std.mem.eql(u8, required, "h2")) {
+            diagnostic.set(
+                "outbounds[{d}].tls.required_alpn: must be 'h2' for the h2 transport",
+                .{index},
+            );
+            return error.InvalidConfig;
+        }
+    }
+}
+
+fn validateTransportShape(
+    transport: Config.StreamTransport,
+    base: []const u8,
+    diagnostic: *Diagnostic,
+) ValidationError!void {
+    switch (transport.network) {
+        .tcp => {
+            if (!std.mem.eql(u8, transport.path, "/") or
+                transport.host != null or transport.compression or
+                transport.subprotocols != null)
+            {
+                diagnostic.set(
+                    "{s}: tcp does not take path, host, compression, or subprotocols",
+                    .{base},
+                );
+                return error.InvalidConfig;
+            }
+        },
+        .ws, .h2 => {
+            if (!validPath(transport.path)) {
+                diagnostic.set("{s}.path: invalid path '{s}'", .{
+                    base,
+                    transport.path,
+                });
+                return error.InvalidConfig;
+            }
+            if (transport.host) |host| {
+                if (!validHost(host)) {
+                    diagnostic.set("{s}.host: invalid host", .{base});
+                    return error.InvalidConfig;
+                }
+            }
+            if (transport.network == .h2) {
+                if (transport.compression or transport.subprotocols != null) {
+                    diagnostic.set(
+                        "{s}: compression and subprotocols only apply to ws",
+                        .{base},
+                    );
+                    return error.InvalidConfig;
+                }
+            } else if (transport.subprotocols) |protocols| {
+                try validateSubprotocols(protocols, base, diagnostic);
+            }
+        },
+    }
+}
+
+fn validateSubprotocols(
+    protocols: []const []const u8,
+    base: []const u8,
+    diagnostic: *Diagnostic,
+) ValidationError!void {
+    if (protocols.len > 16) {
+        diagnostic.set("{s}.subprotocols: too many values", .{base});
+        return error.InvalidConfig;
+    }
+    for (protocols, 0..) |protocol, index| {
+        if (protocol.len == 0 or protocol.len > 64 or !isHttpToken(protocol)) {
+            diagnostic.set("{s}.subprotocols[{d}]: invalid token", .{
+                base,
+                index,
+            });
+            return error.InvalidConfig;
+        }
+    }
+}
+
+fn validPath(path: []const u8) bool {
+    if (path.len == 0 or path.len > 255 or path[0] != '/') return false;
+    for (path) |byte| {
+        if (byte <= 0x20 or byte == 0x7f) return false;
+    }
+    return true;
+}
+
+fn validHost(host: []const u8) bool {
+    if (host.len == 0 or host.len > 255) return false;
+    for (host) |byte| {
+        if (byte <= 0x20 or byte == 0x7f) return false;
+    }
+    return true;
+}
+
+fn isHttpToken(text: []const u8) bool {
+    for (text) |byte| {
+        if (!std.ascii.isAlphanumeric(byte) and
+            byte != '!' and byte != '#' and byte != '$' and byte != '%' and
+            byte != '&' and byte != '\'' and byte != '*' and byte != '+' and
+            byte != '-' and byte != '.' and byte != '^' and byte != '_' and
+            byte != '`' and byte != '|' and byte != '~')
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn containsProtocol(protocols: []const []const u8, wanted: []const u8) bool {
+    for (protocols) |protocol| {
+        if (std.mem.eql(u8, protocol, wanted)) return true;
+    }
+    return false;
 }
 
 fn validateInboundTlsAuth(
@@ -371,6 +603,13 @@ fn validateTrojanInbound(
     if (inbound.method != null or inbound.uuid != null) {
         diagnostic.set(
             "inbounds[{d}]: trojan does not take method or uuid",
+            .{index},
+        );
+        return error.InvalidConfig;
+    }
+    if (inbound.transport != null) {
+        diagnostic.set(
+            "inbounds[{d}].transport: only applies to vless",
             .{index},
         );
         return error.InvalidConfig;
@@ -544,6 +783,13 @@ fn rejectVlessFields(
         );
         return error.InvalidConfig;
     }
+    if (outbound.transport != null) {
+        diagnostic.set(
+            "outbounds[{d}].transport: only applies to vless",
+            .{index},
+        );
+        return error.InvalidConfig;
+    }
 }
 
 fn validateOutboundTls(
@@ -631,6 +877,13 @@ fn validateTrojan(
         );
         return error.InvalidConfig;
     }
+    if (outbound.transport != null) {
+        diagnostic.set(
+            "outbounds[{d}].transport: only applies to vless",
+            .{index},
+        );
+        return error.InvalidConfig;
+    }
 
     const server_text = outbound.server orelse {
         diagnostic.set("outbounds[{d}].server: required for trojan", .{index});
@@ -692,8 +945,14 @@ fn validateVless(
         return error.InvalidConfig;
     };
 
-    const tls_config = outbound.tls orelse return;
+    const tls_config = outbound.tls orelse {
+        // Plain VLESS over TCP or WebSocket is allowed. The h2 transport
+        // rejects a missing TLS object in validateOutboundTransport.
+        try validateOutboundTransport(outbound, index, diagnostic);
+        return;
+    };
     try validateOutboundTls(tls_config, server, index, diagnostic);
+    try validateOutboundTransport(outbound, index, diagnostic);
 }
 
 fn rejectSelectorFields(
@@ -1391,6 +1650,178 @@ test "TLS ALPN config validates names and required selection" {
     );
     try std.testing.expectEqualStrings(
         "inbounds[0].tls.alpn[1]: duplicate 'h2'",
+        diagnostic.message(),
+    );
+}
+
+test "config validates VLESS stream transports" {
+    var diagnostic: Diagnostic = .{};
+    var valid_ws = try fromJson(std.testing.allocator,
+        \\{
+        \\  "inbounds": [
+        \\    { "tag": "vless", "protocol": "vless", "listen": "127.0.0.1:443",
+        \\      "uuid": "00112233-4455-6677-8899-aabbccddeeff",
+        \\      "tls": { "certificate": "cert.pem", "private_key": "key.pem" },
+        \\      "transport": { "network": "ws", "path": "/ws",
+        \\                     "compression": true,
+        \\                     "subprotocols": ["marmo"] } }
+        \\  ],
+        \\  "outbounds": [
+        \\    { "tag": "proxy", "protocol": "vless",
+        \\      "server": "example.com:443",
+        \\      "uuid": "00112233-4455-6677-8899-aabbccddeeff",
+        \\      "tls": { "sni": "example.com" },
+        \\      "transport": { "network": "ws", "path": "/ws",
+        \\                     "compression": true,
+        \\                     "subprotocols": ["marmo"] } }
+        \\  ],
+        \\  "route": { "final": "proxy" }
+        \\}
+    );
+    defer valid_ws.deinit();
+    try validate(valid_ws.inner.value, &diagnostic);
+
+    var valid_h2 = try fromJson(std.testing.allocator,
+        \\{
+        \\  "inbounds": [
+        \\    { "tag": "vless", "protocol": "vless", "listen": "127.0.0.1:443",
+        \\      "uuid": "00112233-4455-6677-8899-aabbccddeeff",
+        \\      "tls": { "certificate": "cert.pem", "private_key": "key.pem" },
+        \\      "transport": { "network": "h2", "path": "/h2" } }
+        \\  ],
+        \\  "outbounds": [
+        \\    { "tag": "proxy", "protocol": "vless",
+        \\      "server": "example.com:443",
+        \\      "uuid": "00112233-4455-6677-8899-aabbccddeeff",
+        \\      "tls": { "sni": "example.com", "alpn": ["h2"] },
+        \\      "transport": { "network": "h2", "path": "/h2" } }
+        \\  ],
+        \\  "route": { "final": "proxy" }
+        \\}
+    );
+    defer valid_h2.deinit();
+    try validate(valid_h2.inner.value, &diagnostic);
+
+    var h2_without_tls = try fromJson(std.testing.allocator,
+        \\{
+        \\  "outbounds": [
+        \\    { "tag": "proxy", "protocol": "vless",
+        \\      "server": "example.com:443",
+        \\      "uuid": "00112233-4455-6677-8899-aabbccddeeff",
+        \\      "transport": { "network": "h2" } }
+        \\  ]
+        \\}
+    );
+    defer h2_without_tls.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(h2_without_tls.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "outbounds[0].tls: required for the h2 transport",
+        diagnostic.message(),
+    );
+
+    var h2_bad_alpn = try fromJson(std.testing.allocator,
+        \\{
+        \\  "outbounds": [
+        \\    { "tag": "proxy", "protocol": "vless",
+        \\      "server": "example.com:443",
+        \\      "uuid": "00112233-4455-6677-8899-aabbccddeeff",
+        \\      "tls": { "sni": "example.com", "alpn": ["http/1.1"] },
+        \\      "transport": { "network": "h2" } }
+        \\  ]
+        \\}
+    );
+    defer h2_bad_alpn.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(h2_bad_alpn.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "outbounds[0].tls.alpn: must contain 'h2' for the h2 transport",
+        diagnostic.message(),
+    );
+
+    var h2_compression = try fromJson(std.testing.allocator,
+        \\{
+        \\  "inbounds": [
+        \\    { "tag": "vless", "protocol": "vless", "listen": "127.0.0.1:443",
+        \\      "uuid": "00112233-4455-6677-8899-aabbccddeeff",
+        \\      "tls": { "certificate": "cert.pem", "private_key": "key.pem" },
+        \\      "transport": { "network": "h2", "compression": true } }
+        \\  ]
+        \\}
+    );
+    defer h2_compression.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(h2_compression.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "inbounds[0].transport: compression and subprotocols only apply to ws",
+        diagnostic.message(),
+    );
+
+    var bad_path = try fromJson(std.testing.allocator,
+        \\{
+        \\  "outbounds": [
+        \\    { "tag": "proxy", "protocol": "vless",
+        \\      "server": "example.com:443",
+        \\      "uuid": "00112233-4455-6677-8899-aabbccddeeff",
+        \\      "tls": { "sni": "example.com" },
+        \\      "transport": { "network": "ws", "path": "ws" } }
+        \\  ]
+        \\}
+    );
+    defer bad_path.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(bad_path.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "outbounds[0].transport.path: invalid path 'ws'",
+        diagnostic.message(),
+    );
+
+    var ws_bad_alpn = try fromJson(std.testing.allocator,
+        \\{
+        \\  "outbounds": [
+        \\    { "tag": "proxy", "protocol": "vless",
+        \\      "server": "example.com:443",
+        \\      "uuid": "00112233-4455-6677-8899-aabbccddeeff",
+        \\      "tls": { "sni": "example.com", "alpn": ["h2"] },
+        \\      "transport": { "network": "ws" } }
+        \\  ]
+        \\}
+    );
+    defer ws_bad_alpn.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(ws_bad_alpn.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "outbounds[0].tls.alpn: must contain 'http/1.1' for the ws transport",
+        diagnostic.message(),
+    );
+
+    var trojan_transport = try fromJson(std.testing.allocator,
+        \\{
+        \\  "outbounds": [
+        \\    { "tag": "proxy", "protocol": "trojan",
+        \\      "server": "example.com:443", "password": "secret",
+        \\      "tls": { "sni": "example.com" },
+        \\      "transport": { "network": "ws" } }
+        \\  ]
+        \\}
+    );
+    defer trojan_transport.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(trojan_transport.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "outbounds[0].transport: only applies to vless",
         diagnostic.message(),
     );
 }

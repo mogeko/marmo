@@ -544,3 +544,25 @@ accepted signature schemes, the certificate_request_context is checked,
 copies are zeroized. Remaining TLS gaps include anchor `pathLen`/`keyUsage`,
 leaf `keyUsage`, missing alerts, single-record handshake messages, and fuzz
 coverage for the client-auth parsers.
+
+## 14. Protocol transport wiring (2026-11-20)
+
+VLESS now exposes WebSocket and HTTP/2 through a strict `transport` object
+(ADR-0016). The wiring adds no new parser: it reuses the bounded WS/H2 packages
+and their existing fuzz targets. The new attack surface is the config schema
+(network/path/host/compression/subprotocols), TLS ALPN defaults, and the
+H2 stream lifecycle.
+
+- `Instance` keeps the ADR-0015 handshake/idle guards authoritative and
+  disables the WS/H2 adapter timers. Standalone adapters use a running/done/
+  fired state so a platform sleep that is not canceled promptly cannot abort a
+  completed connection.
+- The H2 inbound adapter can accept multiple streams, but `Instance` currently
+  consumes one stream per H2 connection. Root-level multiplexing needs a
+  per-stream lifecycle and guard audit before it is enabled; the package's
+  16-stream limit still bounds any direct package caller.
+- WS compression and subprotocols are configuration-selected and remain
+  bounded by the package limits. Inbound VLESS still requires TLS for TCP, WS,
+  and H2; outbound H2 requires TLS and ALPN `h2`.
+- Tests: 271 total (63 root, 4 public API, 32 integration, 48 tls13, 44 http2,
+  66 ws, 14 fuzz), including loopback VLESS-over-WS/H2 and config validation.

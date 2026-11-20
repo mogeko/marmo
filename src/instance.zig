@@ -1,6 +1,7 @@
 //! Instance: configuration, listeners, outbounds, and connection dispatch.
 
 const std = @import("std");
+const http2 = @import("http2");
 const config_module = @import("config/config.zig");
 const Config = config_module.Config;
 const Diagnostic = @import("core/diagnostic.zig").Diagnostic;
@@ -33,6 +34,14 @@ const TlsDialer = @import("transport/tls_dialer.zig").TlsDialer;
 const tls_server = @import("transport/tls_server.zig");
 const TlsServerStream = tls_server.TlsServerStream;
 const tls_credentials = @import("transport/tls_credentials.zig");
+const ws_dialer = @import("transport/ws_dialer.zig");
+const WsDialer = ws_dialer.WsDialer;
+const ws_stream = @import("transport/ws_stream.zig");
+const WsStream = ws_stream.WsStream;
+const h2_dialer = @import("transport/h2_dialer.zig");
+const H2Dialer = h2_dialer.H2Dialer;
+const h2_stream = @import("transport/h2_stream.zig");
+const H2Server = h2_stream.H2Server;
 const PacketConn = @import("transport/packet.zig").PacketConn;
 const Stream = @import("transport/stream.zig").Stream;
 const TcpStream = @import("transport/tcp.zig").TcpStream;
@@ -67,6 +76,7 @@ const BoundInbound = struct {
     shadowsocks: ?*ss_inbound.Context = null,
     udp_server: ?*ss_udp.Server = null,
     tls: ?tls_server.Options = null,
+    transport: Config.StreamTransport = .{},
     trojan: ?trojan_inbound.Context = null,
     vless_uuid: ?vless_protocol.Uuid = null,
 };
@@ -506,9 +516,10 @@ fn handleConnection(context: *ConnContext) !void {
     defer self.releaseConnection();
 
     var stream = context.stream;
+    var close_stream = true;
     defer {
         context.guard.stop();
-        stream.close(self.io);
+        if (close_stream) stream.close(self.io);
     }
     if (context.inbound.tls) |tls_options| {
         var options = tls_options;
@@ -522,67 +533,214 @@ fn handleConnection(context: *ConnContext) !void {
         stream = tls.stream();
     }
 
+    switch (context.inbound.transport.network) {
+        .tcp => {},
+        .ws => {
+            const ws = WsStream.createServer(
+                self.io,
+                self.gpa,
+                stream,
+                .{
+                    .path = context.inbound.transport.path,
+                    .subprotocols = context.inbound.transport.subprotocols orelse
+                        &.{},
+                    .compression = context.inbound.transport.compression,
+                    // The ADR-0015 reaper owns the handshake deadline.
+                    .handshake_timeout_ns = 0,
+                },
+            ) catch |err| return err;
+            stream = ws.stream();
+        },
+        .h2 => {
+            const server = H2Server.create(
+                self.io,
+                self.gpa,
+                stream,
+                .{
+                    .path = context.inbound.transport.path,
+                    // The ADR-0015 reaper owns the handshake deadline.
+                    .handshake_timeout_ns = 0,
+                },
+            ) catch |err| return err;
+            // `server` owns the TLS/TCP stream from here on.
+            close_stream = false;
+            try handleH2Connection(self, context, server);
+            return;
+        },
+    }
+
     var arena = std.heap.ArenaAllocator.init(self.gpa);
     defer arena.deinit();
+    try dispatchInbound(
+        self,
+        context.inbound,
+        stream,
+        self.dispatch(),
+        arena.allocator(),
+        &context.guard,
+    );
+}
 
-    const dispatch = self.dispatch();
-    switch (context.inbound.protocol) {
+fn dispatchInbound(
+    self: *Instance,
+    inbound: *BoundInbound,
+    stream: Stream,
+    dispatch: Dispatch,
+    arena: std.mem.Allocator,
+    guard: *ConnectionGuard,
+) !void {
+    switch (inbound.protocol) {
         .socks5 => try socks5.handle(
             self.io,
             stream,
-            context.inbound.tag,
+            inbound.tag,
             dispatch,
-            arena.allocator(),
-            &context.guard,
+            arena,
+            guard,
         ),
         .http => try http_inbound.handle(
             self.io,
             stream,
-            context.inbound.tag,
+            inbound.tag,
             dispatch,
-            arena.allocator(),
-            &context.guard,
+            arena,
+            guard,
         ),
         .shadowsocks => try ss_inbound.handle(
             self.io,
             self.gpa,
             stream,
-            context.inbound.tag,
+            inbound.tag,
             dispatch,
-            context.inbound.shadowsocks orelse return error.InvalidConfig,
-            &context.guard,
+            inbound.shadowsocks orelse return error.InvalidConfig,
+            guard,
         ),
         .trojan => {
-            var trojan_context = context.inbound.trojan orelse
+            var trojan_context = inbound.trojan orelse
                 return error.InvalidConfig;
             defer std.crypto.secureZero(u8, std.mem.asBytes(&trojan_context));
             try trojan_inbound.handle(
                 self.io,
                 stream,
-                context.inbound.tag,
+                inbound.tag,
                 dispatch,
-                arena.allocator(),
+                arena,
                 &trojan_context,
-                &context.guard,
+                guard,
             );
         },
         .vless => {
             var vless_context: vless_inbound.Context = .{
-                .uuid = context.inbound.vless_uuid orelse
+                .uuid = inbound.vless_uuid orelse
                     return error.InvalidConfig,
             };
             defer std.crypto.secureZero(u8, std.mem.asBytes(&vless_context));
             try vless_inbound.handle(
                 self.io,
                 stream,
-                context.inbound.tag,
+                inbound.tag,
                 dispatch,
-                arena.allocator(),
+                arena,
                 &vless_context,
-                &context.guard,
+                guard,
             );
         },
     }
+}
+
+const H2StreamContext = struct {
+    instance: *Instance,
+    inbound: *BoundInbound,
+    stream: Stream,
+    guard: ConnectionGuard,
+};
+
+fn handleH2Connection(
+    self: *Instance,
+    context: *ConnContext,
+    server: *H2Server,
+) !void {
+    defer server.deinit();
+    // The connection guard now tracks stream activity for the idle deadline.
+    context.guard.markRelay();
+
+    const raw = server.accept() catch |err| switch (err) {
+        error.Canceled, error.Closed, error.ConnectionReset => return,
+        else => return err,
+    };
+    raw.setActivity(.{
+        .ctx = &context.guard,
+        .touch = touchGuard,
+    });
+    const stream_handle = raw.stream();
+    const stream_context = self.gpa.create(H2StreamContext) catch {
+        stream_handle.close(self.io);
+        return;
+    };
+    stream_context.* = .{
+        .instance = self,
+        .inbound = context.inbound,
+        .stream = stream_handle,
+        .guard = ConnectionGuard.init(
+            self.io,
+            &self.limits_registry,
+            &self.metrics,
+            stream_handle,
+            .{
+                .handshake_ns = @as(
+                    u64,
+                    self.limits.handshake_timeout_s,
+                ) * std.time.ns_per_s,
+                .idle_ns = @as(u64, self.limits.idle_timeout_s) *
+                    std.time.ns_per_s,
+                .uplink_only_ns = @as(u64, self.limits.uplink_only_s) *
+                    std.time.ns_per_s,
+                .downlink_only_ns = @as(u64, self.limits.downlink_only_s) *
+                    std.time.ns_per_s,
+            },
+        ),
+    };
+    if (!stream_context.guard.register()) {
+        self.gpa.destroy(stream_context);
+        stream_handle.close(self.io);
+        return;
+    }
+    h2StreamWrapper(stream_context) catch {};
+}
+
+fn touchGuard(ctx: *anyopaque) void {
+    const guard: *ConnectionGuard = @ptrCast(@alignCast(ctx));
+    guard.touch();
+}
+
+fn h2StreamWrapper(context: *H2StreamContext) std.Io.Cancelable!void {
+    handleH2Stream(context) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => std.log.scoped(.marmo).debug(
+            "h2 stream failed: {s}",
+            .{@errorName(err)},
+        ),
+    };
+}
+
+fn handleH2Stream(context: *H2StreamContext) !void {
+    const self = context.instance;
+    defer self.gpa.destroy(context);
+    defer {
+        context.guard.stop();
+        context.stream.close(self.io);
+    }
+
+    var arena = std.heap.ArenaAllocator.init(self.gpa);
+    defer arena.deinit();
+    try dispatchInbound(
+        self,
+        context.inbound,
+        context.stream,
+        self.dispatch(),
+        arena.allocator(),
+        &context.guard,
+    );
 }
 
 const CompiledOutbounds = struct {
@@ -732,14 +890,16 @@ const TlsTransport = struct {
     cleanup_ctx: ?*anyopaque = null,
 };
 
-fn compileTlsTransport(
+fn createTlsDialer(
     allocator: std.mem.Allocator,
     io: std.Io,
     gpa: std.mem.Allocator,
-    direct: *Direct,
+    base: Dialer,
     server: Endpoint,
     tls_config: Config.Tls,
-) InitError!TlsTransport {
+    default_alpn: ?[]const []const u8,
+    default_required_alpn: ?[]const u8,
+) InitError!*TlsDialer {
     const server_name = tls_config.sni orelse switch (server) {
         .domain => |domain| domain.name,
         .ip => null,
@@ -747,13 +907,15 @@ fn compileTlsTransport(
     const tls_dialer = try allocator.create(TlsDialer);
     tls_dialer.* = TlsDialer.init(
         gpa,
-        direct.dialer(),
+        base,
         server_name,
         tls_config.insecure,
         @as(u64, tls_config.handshake_timeout_s) * std.time.ns_per_s,
     );
-    tls_dialer.alpn_protocols = tls_config.alpn orelse &.{};
-    tls_dialer.required_alpn = tls_config.required_alpn;
+    tls_dialer.alpn_protocols = tls_config.alpn orelse
+        default_alpn orelse &.{};
+    tls_dialer.required_alpn = tls_config.required_alpn orelse
+        default_required_alpn;
     tls_dialer.allow_truncation_attacks =
         tls_config.allow_truncation_attacks;
     if (tls_config.client_certificate) |certificate_path| {
@@ -771,6 +933,27 @@ fn compileTlsTransport(
             client_credentials.certificate_chain;
         tls_dialer.client_private_key = client_credentials.private_key;
     }
+    return tls_dialer;
+}
+
+fn compileTlsTransport(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    direct: *Direct,
+    server: Endpoint,
+    tls_config: Config.Tls,
+) InitError!TlsTransport {
+    const tls_dialer = try createTlsDialer(
+        allocator,
+        io,
+        gpa,
+        direct.dialer(),
+        server,
+        tls_config,
+        null,
+        null,
+    );
     return .{
         .dialer = tls_dialer.asDialer(),
         .cleanup = cleanupTlsDialer,
@@ -820,6 +1003,144 @@ fn compileTrojan(
     };
 }
 
+const VlessTransport = struct {
+    dialer: Dialer,
+    tls: ?*TlsDialer = null,
+    ws: ?*WsDialer = null,
+    h2: ?*H2Dialer = null,
+
+    fn cleanup(ctx: *anyopaque) void {
+        const self: *VlessTransport = @ptrCast(@alignCast(ctx));
+        if (self.h2) |dialer| dialer.deinit();
+        if (self.ws) |dialer| dialer.deinit();
+        if (self.tls) |dialer| dialer.deinit();
+    }
+};
+
+fn compileVlessTransport(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    direct: *Direct,
+    server: Endpoint,
+    config: Config.Outbound,
+) InitError!TlsTransport {
+    const stream = config.transport orelse Config.StreamTransport{};
+    const stack = try allocator.create(VlessTransport);
+    stack.* = .{ .dialer = direct.dialer() };
+    var current = stack.dialer;
+
+    const default_alpn: ?[]const []const u8 = switch (stream.network) {
+        .tcp => null,
+        .ws => &.{"http/1.1"},
+        .h2 => &.{"h2"},
+    };
+    const default_required_alpn: ?[]const u8 = switch (stream.network) {
+        .tcp, .ws => null,
+        .h2 => "h2",
+    };
+    if (config.tls) |tls_config| {
+        const tls_dialer = try createTlsDialer(
+            allocator,
+            io,
+            gpa,
+            current,
+            server,
+            tls_config,
+            default_alpn,
+            default_required_alpn,
+        );
+        stack.tls = tls_dialer;
+        current = tls_dialer.asDialer();
+    }
+
+    switch (stream.network) {
+        .tcp => {},
+        .ws => {
+            const host = try transportHost(
+                allocator,
+                stream.host,
+                config.tls,
+                server,
+            );
+            const dialer = try allocator.create(WsDialer);
+            dialer.* = WsDialer.init(gpa, current, host, stream.path);
+            dialer.subprotocols = stream.subprotocols orelse &.{};
+            dialer.compression = stream.compression;
+            // The connection guard owns the handshake deadline for
+            // Instance-managed outbounds. Avoid a second sleeping task per
+            // connection; standalone adapters default to 10 seconds.
+            dialer.handshake_timeout_ns = 0;
+            stack.ws = dialer;
+            current = dialer.asDialer();
+        },
+        .h2 => {
+            const host = try transportHost(
+                allocator,
+                stream.host,
+                config.tls,
+                server,
+            );
+            const dialer = try allocator.create(H2Dialer);
+            dialer.* = H2Dialer.init(gpa, current, host, stream.path);
+            dialer.scheme = if (config.tls != null) "https" else "http";
+            // The connection guard owns the handshake deadline for
+            // Instance-managed outbounds. Avoid a second sleeping task per
+            // connection; standalone adapters default to 10 seconds.
+            dialer.handshake_timeout_ns = 0;
+            stack.h2 = dialer;
+            current = dialer.asDialer();
+        },
+    }
+
+    stack.dialer = current;
+    return .{
+        .dialer = current,
+        .cleanup = VlessTransport.cleanup,
+        .cleanup_ctx = stack,
+    };
+}
+
+fn transportHost(
+    allocator: std.mem.Allocator,
+    configured: ?[]const u8,
+    tls: ?Config.Tls,
+    server: Endpoint,
+) InitError![]const u8 {
+    if (configured) |host| return host;
+    if (tls) |tls_config| {
+        if (tls_config.sni) |sni| return sni;
+    }
+    return switch (server) {
+        .domain => |domain| domain.name,
+        .ip => endpointHost(allocator, server),
+    };
+}
+
+fn endpointHost(
+    allocator: std.mem.Allocator,
+    endpoint: Endpoint,
+) InitError![]const u8 {
+    var allocating: std.Io.Writer.Allocating = .init(allocator);
+    defer allocating.deinit();
+    switch (endpoint) {
+        .ip => |ip| ip.format(&allocating.writer) catch
+            return error.OutOfMemory,
+        .domain => |domain| return domain.name,
+    }
+    const text = allocating.writer.buffered();
+    const host = if (text.len != 0 and text[0] == '[') blk: {
+        const close = std.mem.indexOfScalar(u8, text, ']') orelse
+            return error.InvalidConfig;
+        break :blk text[0 .. close + 1];
+    } else blk: {
+        const colon = std.mem.lastIndexOfScalar(u8, text, ':') orelse
+            return error.InvalidConfig;
+        break :blk text[0..colon];
+    };
+    return allocator.dupe(u8, host) catch return error.OutOfMemory;
+}
+
 fn compileVless(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -833,32 +1154,24 @@ fn compileVless(
     const uuid = vless_protocol.parseUuid(uuid_text) catch
         return error.InvalidConfig;
 
-    var transport = direct.dialer();
-    var transport_cleanup: ?*const fn (ctx: *anyopaque) void = null;
-    var transport_cleanup_ctx: ?*anyopaque = null;
-    if (config.tls) |tls| {
-        const compiled = try compileTlsTransport(
-            allocator,
-            io,
-            gpa,
-            direct,
-            server,
-            tls,
-        );
-        transport = compiled.dialer;
-        transport_cleanup = compiled.cleanup;
-        transport_cleanup_ctx = compiled.cleanup_ctx;
-    }
+    const transport = try compileVlessTransport(
+        allocator,
+        io,
+        gpa,
+        direct,
+        server,
+        config,
+    );
 
     const vless = try allocator.create(Vless);
     vless.* = .{
         .gpa = gpa,
         .server = server,
         .uuid = uuid,
-        .transport = transport,
+        .transport = transport.dialer,
         .xudp = config.xudp,
-        .transport_cleanup = transport_cleanup,
-        .transport_cleanup_ctx = transport_cleanup_ctx,
+        .transport_cleanup = transport.cleanup,
+        .transport_cleanup_ctx = transport.cleanup_ctx,
     };
     return .{
         .tag = config.tag,
@@ -986,6 +1299,7 @@ fn compileInbounds(
             .protocol = config.protocol,
             .listen = endpoint,
             .ip = ip,
+            .transport = config.transport orelse .{},
         };
 
         switch (config.protocol) {
@@ -1034,13 +1348,19 @@ fn compileInbounds(
                 inbounds[index].vless_uuid = vless_protocol.parseUuid(uuid_text) catch
                     return error.InvalidConfig;
                 const tls = config.tls orelse return error.InvalidConfig;
-                inbounds[index].tls = try loadInboundTls(
+                var tls_options = try loadInboundTls(
                     allocator,
                     io,
                     tls,
                     index,
                     diagnostic,
                 );
+                if (config.transport) |transport| {
+                    if (transport.network == .h2 and tls.alpn == null) {
+                        tls_options.alpn_protocols = &.{"h2"};
+                    }
+                }
+                inbounds[index].tls = tls_options;
             },
             .http, .socks5 => {},
         }

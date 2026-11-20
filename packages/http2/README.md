@@ -95,8 +95,10 @@ API changes from 0.0.1:
 
 Not implemented: server push and PRIORITY effects, HTTP/1.1 upgrade/h2c,
 HTTP/2 WebSocket, connection pooling, HPACK encoder Huffman/dynamic-table
-insertion, and gRPC message framing (application-level). Root adapters and
-Config/Instance wiring are unchanged.
+insertion, and gRPC message framing (application-level). VLESS config can select
+the H2 transport (ADR-0016), but the root `Instance` currently serves one stream
+per H2 connection; the package multiplexer remains available to programmatic
+callers.
 
 `write` may wait for WINDOW_UPDATE. When it does, it pumps incoming frames
 itself, so a single-threaded embedder does not need a separate reader; DATA for

@@ -1444,6 +1444,147 @@ const TestTlsFiles = struct {
     }
 };
 
+fn vlessTransportLoop(kind: VlessTransportKind) !void {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var echo_bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var echo_server = try echo_bind.listen(io, .{ .reuse_address = true });
+    defer echo_server.deinit(io);
+    var echo_future = io.async(echoLoopOnce, .{ io, &echo_server });
+
+    var cert = try tls13.test_cert.generate(allocator, io);
+    defer cert.deinit(allocator);
+    var files = try TestTlsFiles.init(io, allocator, &cert);
+    defer files.deinit();
+
+    const transport: marmo.Config.StreamTransport = switch (kind) {
+        .ws => .{
+            .network = .ws,
+            .path = "/vless-ws",
+            .compression = true,
+            .subprotocols = &.{"marmo-test"},
+        },
+        .h2 => .{ .network = .h2, .path = "/vless-h2" },
+    };
+
+    var diagnostic: marmo.Diagnostic = .{};
+    const server_config: marmo.Config = .{
+        .inbounds = &.{
+            .{
+                .tag = "vless-in",
+                .protocol = .vless,
+                .listen = "127.0.0.1:0",
+                .uuid = vless_test_uuid_text,
+                .tls = .{
+                    .certificate = files.certificatePath(),
+                    .private_key = files.privateKeyPath(),
+                },
+                .transport = transport,
+            },
+        },
+        .route = .{ .final = "direct" },
+    };
+    var server_instance = marmo.Instance.init(
+        allocator,
+        io,
+        server_config,
+        &diagnostic,
+    ) catch |err| {
+        std.debug.print("vless {s} server init: {s}\n", .{
+            @tagName(kind),
+            diagnostic.message(),
+        });
+        return err;
+    };
+    defer server_instance.deinit();
+    try server_instance.start();
+
+    const vless_endpoint = server_instance.inboundEndpoint("vless-in") orelse
+        return error.TestUnexpectedResult;
+    var server_text_buffer: [32]u8 = undefined;
+    const server_text = try std.fmt.bufPrint(
+        &server_text_buffer,
+        "127.0.0.1:{d}",
+        .{vless_endpoint.port()},
+    );
+
+    const client_config: marmo.Config = .{
+        .inbounds = &.{
+            .{ .tag = "socks", .protocol = .socks5, .listen = "127.0.0.1:0" },
+        },
+        .outbounds = &.{
+            .{
+                .tag = "vless-out",
+                .protocol = .vless,
+                .server = server_text,
+                .uuid = vless_test_uuid_text,
+                .tls = .{ .sni = "localhost", .insecure = true },
+                .transport = transport,
+            },
+        },
+        .route = .{ .final = "vless-out" },
+    };
+    var client_instance = marmo.Instance.init(
+        allocator,
+        io,
+        client_config,
+        &diagnostic,
+    ) catch |err| {
+        std.debug.print("vless {s} client init: {s}\n", .{
+            @tagName(kind),
+            diagnostic.message(),
+        });
+        return err;
+    };
+    defer client_instance.deinit();
+    try client_instance.start();
+
+    const socks_endpoint = client_instance.inboundEndpoint("socks") orelse
+        return error.TestUnexpectedResult;
+    const socks_address = switch (socks_endpoint) {
+        .ip => |ip| ip,
+        .domain => return error.TestUnexpectedResult,
+    };
+    const client = try std.Io.net.IpAddress.connect(
+        &socks_address,
+        io,
+        .{ .mode = .stream },
+    );
+    defer client.close(io);
+
+    try socksNegotiate(io, client);
+    var request_buffer: [10]u8 = undefined;
+    const request = socksConnectRequest(
+        &request_buffer,
+        echo_server.socket.address.getPort(),
+    );
+    try tcpWrite(io, client, request);
+    var reply: [10]u8 = undefined;
+    try tcpReadExact(io, client, &reply);
+    try std.testing.expectEqual(@as(u8, 0), reply[1]);
+
+    try tcpWrite(io, client, "hello");
+    var echoed: [5]u8 = undefined;
+    try tcpReadExact(io, client, &echoed);
+    try std.testing.expectEqualStrings("hello", &echoed);
+
+    client_instance.stop();
+    server_instance.stop();
+    _ = echo_future.await(io);
+}
+
+const VlessTransportKind = enum { ws, h2 };
+
+test "VLESS over WebSocket proxies to a direct target" {
+    try vlessTransportLoop(.ws);
+}
+
+test "VLESS over HTTP/2 proxies to a direct target" {
+    try vlessTransportLoop(.h2);
+}
+
 fn vlessUdpLoop(use_xudp: bool) !void {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();

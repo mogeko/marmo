@@ -20,6 +20,9 @@ const Options = struct {
     sni: []const u8 = "localhost",
     insecure: bool = false,
     xudp: bool = false,
+    network: marmo.Config.StreamNetwork = .tcp,
+    path: []const u8 = "/",
+    host: ?[]const u8 = null,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -42,6 +45,11 @@ pub fn main(init: std.process.Init) !void {
                         .certificate = options.certificate,
                         .private_key = options.private_key,
                     },
+                    .transport = .{
+                        .network = options.network,
+                        .path = options.path,
+                        .host = options.host,
+                    },
                 },
             },
             .route = .{ .final = "direct" },
@@ -61,6 +69,11 @@ pub fn main(init: std.process.Init) !void {
                         .insecure = options.insecure,
                     },
                     .xudp = options.xudp,
+                    .transport = .{
+                        .network = options.network,
+                        .path = options.path,
+                        .host = options.host,
+                    },
                 },
             },
             .route = .{ .final = "vless-out" },
@@ -127,6 +140,21 @@ fn parseOptions(args: []const []const u8) !Options {
             index += 1;
             if (index >= args.len) return error.InvalidArguments;
             options.private_key = args[index];
+        } else if (std.mem.eql(u8, argument, "--transport")) {
+            index += 1;
+            if (index >= args.len) return error.InvalidArguments;
+            options.network = std.meta.stringToEnum(
+                marmo.Config.StreamNetwork,
+                args[index],
+            ) orelse return error.InvalidArguments;
+        } else if (std.mem.eql(u8, argument, "--path")) {
+            index += 1;
+            if (index >= args.len) return error.InvalidArguments;
+            options.path = args[index];
+        } else if (std.mem.eql(u8, argument, "--host")) {
+            index += 1;
+            if (index >= args.len) return error.InvalidArguments;
+            options.host = args[index];
         } else if (std.mem.eql(u8, argument, "--sni")) {
             index += 1;
             if (index >= args.len) return error.InvalidArguments;
@@ -149,6 +177,9 @@ fn usage() void {
         \\  --cert <path>      PEM/DER certificate chain for server mode
         \\  --key <path>       ECDSA P-256 private key for server mode
         \\  --sni <name>       TLS server name for client mode
+        \\  --transport <t>    tcp (default), ws, or h2
+        \\  --path <path>      WebSocket/HTTP-2 path (default /)
+        \\  --host <name>      WebSocket Host / HTTP-2 :authority
         \\  --insecure         skip CA verification for self-signed test certs
         \\  --xudp             use XUDP framing for client UDP
         \\
