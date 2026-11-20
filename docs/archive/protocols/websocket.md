@@ -1,5 +1,10 @@
 # WebSocket
 
+> **Archived: Zig era.** These are notes for the in-tree `packages/ws`
+> implementation, deleted under ADR-0018. The Rust target uses
+> `tokio-tungstenite`; see [`../../architecture.md`](../../architecture.md) §13
+> and the live index at [`../../protocols/README.md`](../../protocols/README.md).
+
 Sources consulted: [RFC 6455](https://www.rfc-editor.org/rfc/rfc6455) (The
 WebSocket Protocol) and [RFC 7692](https://www.rfc-editor.org/rfc/rfc7692)
 (Compression Extensions for WebSocket), plus Python `websockets` 17.4 and Node

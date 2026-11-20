@@ -1,5 +1,10 @@
 # TLS 1.3
 
+> **Archived: Zig era.** These are notes for the in-tree `packages/tls13`
+> implementation, deleted under ADR-0018. The Rust target uses `rustls`; see
+> [`../../architecture.md`](../../architecture.md) §13 and the live index at
+> [`../../protocols/README.md`](../../protocols/README.md).
+
 Sources consult: [RFC 8446](https://www.rfc-editor.org/rfc/rfc8446)
 (TLS 1.3), [RFC 8448](https://www.rfc-editor.org/rfc/rfc8448) (example
 handshake traces), [RFC 7301](https://www.rfc-editor.org/rfc/rfc7301) (ALPN),
@@ -84,7 +89,7 @@ traces and no private keys. Provenance and license are recorded in
 `tls_record_seal`, `tls_server_handshake`, `tls_server_handshake_mutated`,
 `tls_server_hello`, `tls_credentials`, `tls_key_schedule`, `tls_key_update`,
 and `tls_cert_path`. The short corpus smoke runs in `zig build test`; see
-`docs/security/audit.md`.
+`docs/archive/security-audit-zig.md`.
 
 ## Known gaps
 

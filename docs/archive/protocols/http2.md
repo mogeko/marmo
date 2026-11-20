@@ -1,5 +1,10 @@
 # HTTP/2
 
+> **Archived: Zig era.** These are notes for the in-tree `packages/http2`
+> implementation, deleted under ADR-0018. The Rust target uses `h2`; see
+> [`../../architecture.md`](../../architecture.md) §13 and the live index at
+> [`../../protocols/README.md`](../../protocols/README.md).
+
 Sources consult: [RFC 9113](https://www.rfc-editor.org/rfc/rfc9113) (HTTP/2),
 [RFC 7541](https://www.rfc-editor.org/rfc/rfc7541) (HPACK), RFC 8441 (extended
 CONNECT, not implemented). Implemented in `packages/http2` (ADR-0013); the root

@@ -7,9 +7,9 @@
 
 ## Context
 
-What forces are at play? Include constraints that are easy to forget (Zig
-version, `std` gaps, LGPL-2.1, std-only policy, platform support) and the
-concrete failure the decision prevents.
+What forces are at play? Include constraints that are easy to forget (language
+and toolchain, `std` gaps, license policy, dependency policy, platform
+support) and the concrete failure the decision prevents.
 
 ## Decision (recommended)
 

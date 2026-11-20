@@ -9,6 +9,11 @@ repository ships the library only: no CLI, daemon, or `app` layer.
 - Read `docs/architecture.md` and `docs/decisions/` before coding. A `Proposed`
   ADR is not approved: do not implement it. Use the `adr` skill to record a
   decision and wait for the user.
+- Migration freeze (2026-11-21): ADR-0017..ADR-0020 are accepted and
+  `docs/architecture.md` is the target Rust design. The architecture and
+  roadmap are in final review (G1). Until G1, do not add Zig features, refactor
+  the Zig tree, or start a Rust implementation. Security fixes and fixture
+  additions are the only Zig changes.
 - Accepted ADRs are immutable; supersede them with a new ADR instead of editing.
 - Keep `docs/architecture.md`, the ADR index, and this file in sync.
 - `Instance` is the composition root; do not add an application layer, CLI, or
@@ -39,8 +44,8 @@ repository ships the library only: no CLI, daemon, or `app` layer.
   `check`, `fuzz`, and `examples` steps.
 - The bounded fuzz harness lives in `tests/fuzz.zig`; synthetic corpus fixtures
   are under `tests/fixtures/`. The threat model, audit findings, and residual
-  risks are in `docs/security/audit.md`. TLS wire details are in
-  `docs/protocols/tls.md`.
+  risks are in `docs/security/audit.md`. The Zig-era TLS wire details are
+  archived at `docs/archive/protocols/tls.md`; the Rust target uses `rustls`.
 - `examples/shadowsocks2022/`, `examples/trojan/`, and `examples/vless/` are
   standalone: each has its own `build.zig` and `build.zig.zon` and is not part
   of the root build.
@@ -159,12 +164,13 @@ Adapted from TigerBeetle's
   timeouts and `std.Io`. Never use live third-party servers in tests.
 - `zig fmt` and `zig build test` before finishing. Run one file with
   `zig test src/net/endpoint.zig --test-filter <name>`.
-- Zero dependencies: no C, no third-party packages, no vendored crypto. No
-  optional transport backends; implement missing transports in-tree (ADR-0007).
+- Zero dependencies (Zig tree only; ADR-0007 is superseded for Rust by
+  ADR-0018): no C, no third-party packages, no vendored crypto. No optional
+  transport backends; implement missing transports in-tree.
 - std-first: when a Zig upgrade provides the primitive, switch to `std` and
   delete in-tree code.
-- LGPL-2.1: never copy GPL/AGPL/MPL code. Implement from specs and record sources
-  in `docs/protocols/<protocol>.md` (ADR-0009).
+- MIT OR Apache-2.0: never copy GPL/AGPL/MPL code. Implement from specs and
+  record sources in `docs/protocols/<protocol>.md` (ADR-0009).
 
 ### Security
 

@@ -33,7 +33,7 @@ and behavior may change between minor releases.
   [packages/tls13/CHANGELOG.md](packages/tls13/CHANGELOG.md),
   [packages/http2/CHANGELOG.md](packages/http2/CHANGELOG.md), and
   [packages/ws/CHANGELOG.md](packages/ws/CHANGELOG.md); audit history is in
-  [docs/security/audit.md](docs/security/audit.md).
+  [docs/archive/security-audit-zig.md](docs/archive/security-audit-zig.md).
 
 ### Added
 
@@ -75,6 +75,8 @@ and behavior may change between minor releases.
 
 ### Changed
 
+- The next release is dual-licensed MIT OR Apache-2.0 (ADR-0020); 0.0.2 and
+  earlier remain LGPL-2.1. The Rust migration is recorded in ADR-0017..0019.
 - The HTTP/2 and WebSocket adapters now use a running/done/fired handshake
   state, so a platform sleep that is not canceled promptly cannot abort a
   connection after a successful handshake. `Instance` disables the adapter
@@ -185,7 +187,7 @@ and behavior may change between minor releases.
   P-256 certificates. It has no client authentication, PSK, session tickets,
   ALPN selection, 0-RTT, or KeyUpdate. TLS handshakes are bounded by the root
   adapters' `handshake_timeout_s`; the package API itself is synchronous. It
-  has not been externally audited; see `docs/security/audit.md`.
+  has not been externally audited; see `docs/archive/security-audit-zig.md`.
 - The std-backed TLS client can negotiate TLS 1.2. A server-initiated TLS 1.3
   KeyUpdate is not synchronized with a concurrent write; this is documented and
   will be removed with the in-tree record layer.

@@ -25,4 +25,4 @@ zig build fuzz -Dfuzz-iterations=2000 -Dfuzz-seed=4660
 | `config/` | `valid.json`, `malformed.json` | JSON parser and validator smoke inputs |
 
 License: the fixtures are original works generated for this repository and are
-covered by the repository's LGPL-2.1 license.
+covered by the repository's MIT OR Apache-2.0 license (ADR-0020).

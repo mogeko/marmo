@@ -15,6 +15,14 @@ forward proxying, Shadowsocks 2022 TCP/UDP (AES-128/256-GCM),
 domain/IP-CIDR/port routing, relay, metrics, TLS ALPN, HTTP/2 and WebSocket
 transport packages, and global connection limits/timeouts (ADR-0015).
 
+> **Migration in design (2026-11-21).** ADR-0017..ADR-0020 are accepted: the
+> target is Rust + tokio, a five-crate workspace, `rustls`/`aws-lc-rs`, and the
+> MIT OR Apache-2.0 license. The Zig tree is frozen; implementation starts only
+> after the architecture and roadmap pass final review (G1). See
+> [docs/architecture.md](docs/architecture.md) for the target design and
+> [docs/rust-migration.md](docs/rust-migration.md) for the feasibility study
+> and roadmap.
+
 **Transport status:** plaintext TCP, TCP/TLS, TLS+WebSocket, and TLS+HTTP/2 are
 wired in for VLESS; the in-tree TLS 1.3 client/server is shared. TLS, HTTP/2,
 and WebSocket live in independent packages (ADR-0010, ADR-0013, ADR-0014). TLS supports X25519/P-256 ECDHE,
@@ -58,4 +66,6 @@ Package rules and the workspace contract are in
 
 ## License
 
-LGPL-2.1. See [LICENSE](LICENSE).
+MIT OR Apache-2.0, at your option (ADR-0020). See [LICENSE](LICENSE),
+[LICENSE-MIT](LICENSE-MIT), and [LICENSE-APACHE](LICENSE-APACHE). Releases
+before 2026-11-21, including 0.0.2, remain LGPL-2.1.
