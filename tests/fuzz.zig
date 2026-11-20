@@ -185,7 +185,7 @@ fn fuzzTlsCertPath(_: Context, smith: *std.testing.Smith) anyerror!void {
     const len = smith.slice(&input);
     var leaf: tls13.cert_path.Leaf = .{};
     _ = tls13.cert_path.verifyServerChain(&.{input[0..len]}, .{
-        .host = null,
+        .host = "localhost",
         .verify_chain = false,
         .now_sec = 0,
         .bundle = null,

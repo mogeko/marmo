@@ -56,7 +56,9 @@ pub const Registry = struct {
     }
 
     fn remove(self: *Registry, io: std.Io, guard: *Guard) void {
-        self.mutex.lock(io) catch return;
+        // Cancellation must not leave a pointer to a soon-to-be-freed guard
+        // in the registry; removal is a short, bounded critical section.
+        self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         for (self.entries) |*entry| {
             if (entry.* == guard) {
@@ -175,13 +177,13 @@ pub const Guard = struct {
     }
 
     pub fn clearPeer(self: *Guard) void {
-        self.peer_lock.lock(self.io) catch return;
+        self.peer_lock.lockUncancelable(self.io);
         defer self.peer_lock.unlock(self.io);
         self.peer_stream = null;
     }
 
     pub fn setPeer(self: *Guard, peer: Stream) void {
-        self.peer_lock.lock(self.io) catch return;
+        self.peer_lock.lockUncancelable(self.io);
         defer self.peer_lock.unlock(self.io);
         self.peer_stream = peer;
     }
@@ -214,14 +216,14 @@ pub const Guard = struct {
         self.abort_stream.shutdown(self.io, .send) catch {};
         self.abort_stream.shutdown(self.io, .recv) catch {};
 
-        var peer: ?Stream = null;
-        self.peer_lock.lock(self.io) catch return;
-        peer = self.peer_stream;
+        // Keep the peer lock across the abort. `stop`/`clearPeer` then cannot
+        // let the connection task free the adapter while it is being aborted.
+        // Adapters implement `.both` without a write lock or close frame.
+        self.peer_lock.lockUncancelable(self.io);
+        defer self.peer_lock.unlock(self.io);
+        const peer = self.peer_stream;
         self.peer_stream = null;
-        self.peer_lock.unlock(self.io);
         if (peer) |stream| {
-            // Use the abort path: it must not wait on a writer or emit a
-            // protocol-level close frame while the reaper holds its lock.
             stream.shutdown(self.io, .both) catch {};
         }
     }

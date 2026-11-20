@@ -7,6 +7,16 @@ and behavior may change between minor releases.
 
 ### Security
 
+- Fourth re-audit (2026-11-20): TLS now rejects non-canonical `[3]` extension
+  wrappers or validates their SAN payload, and rejects RSA moduli whose bit
+  length would trip the std PSS assertion. The ADR-0015 reaper holds the peer
+  lock across the non-blocking abort, and registry removal is uncancelable, so
+  a stopping connection cannot leave a dangling peer entry. HTTP/2 pumps flow
+  control only after the peer half-closes (avoiding DATA double-consumption),
+  stops sending WINDOW_UPDATE after END_STREAM, and rejects a second HEADERS
+  block. WebSocket reads accept standard-client single frames up to the 1 MiB
+  message limit, bound the number of frames processed per read, and fall back
+  to an inline handshake when no timer concurrency is available.
 - Third re-audit (2026-11-20): TLS now validates the full certificate shape
   (TBSCertificate fields, SAN/GeneralName bounds, BIT STRING lengths, RSA SPKI)
   before std parsing, and rejects RSA-PSS signatures whose length differs from

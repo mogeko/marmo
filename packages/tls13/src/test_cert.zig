@@ -32,6 +32,9 @@ pub const Params = struct {
     eku_server_auth: bool = false,
     /// Emits a zero-length SIGNATURE BIT STRING for parser hardening tests.
     empty_signature: bool = false,
+    /// Wrapper tag for the [3] extensions field. Non-0xa3 values exercise
+    /// std's low-five-bit tag comparison.
+    extensions_tag: u8 = 0xa3,
 };
 
 pub fn generate(
@@ -278,7 +281,7 @@ fn buildExtensions(gpa: std.mem.Allocator, params: Params) ![]u8 {
 
     const sequence = try tlv(gpa, 0x30, extensions.items);
     defer gpa.free(sequence);
-    return tlv(gpa, 0xa3, sequence);
+    return tlv(gpa, params.extensions_tag, sequence);
 }
 
 fn appendExtension(

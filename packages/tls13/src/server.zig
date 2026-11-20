@@ -1147,3 +1147,30 @@ test "zero-length signature BIT STRING is rejected" {
         }, &leaf),
     );
 }
+
+test "non-canonical extension wrapper must not bypass SAN validation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // std compares only the low five tag bits, so 0x83 still reaches its
+    // extension parser. The SAN payload below declares a dNSName longer than
+    // the enclosing GeneralNames sequence.
+    var cert = try test_cert.generateParams(allocator, io, .{
+        .extensions_tag = 0x83,
+        .san_der = &.{ 0x30, 0x03, 0x82, 0x05, 'a' },
+        .eku_server_auth = true,
+    });
+    defer cert.deinit(allocator);
+    var leaf: cert_path.Leaf = .{};
+    try std.testing.expectError(
+        error.CertificateRejected,
+        cert_path.verifyServerChain(&.{cert.der}, .{
+            .host = "localhost",
+            .verify_chain = false,
+            .now_sec = 0,
+            .bundle = null,
+        }, &leaf),
+    );
+}

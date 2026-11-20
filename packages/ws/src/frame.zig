@@ -2,7 +2,12 @@
 
 const std = @import("std");
 
+/// Largest frame the writer emits before fragmenting.
 pub const max_payload = 64 * 1024;
+/// Largest frame the reader accepts. Standard clients send messages up to
+/// their configured max_size as a single frame, so this matches the 1 MiB
+/// message limit instead of the write fragment size.
+pub const max_read_payload = 1024 * 1024;
 pub const max_mask_scratch = 4 * 1024;
 pub const max_control_payload = 125;
 pub const header_max = 14;
@@ -71,14 +76,14 @@ pub fn read(
         payload_len = std.mem.readInt(u64, &extended, .big);
         if (payload_len >> 63 != 0) return error.ProtocolViolation;
     }
-    if (payload_len > max_payload) return error.MessageTooBig;
+    if (payload_len > max_read_payload) return error.MessageTooBig;
     if (opcode >= opcode_close) {
         if (!fin or payload_len > max_control_payload) {
             return error.ProtocolViolation;
         }
     }
     const length: usize = @intCast(payload_len);
-    if (payload_buffer.len < length) return error.ProtocolViolation;
+    if (payload_buffer.len < length) return error.MessageTooBig;
 
     var mask: [4]u8 = .{ 0, 0, 0, 0 };
     if (masked) try readExact(input, &mask, false);

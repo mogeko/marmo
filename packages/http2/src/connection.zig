@@ -91,6 +91,7 @@ pub const Connection = struct {
     stream_aborted: std.atomic.Value(bool) = .init(false),
     canceled: std.atomic.Value(bool) = .init(false),
     local_closed: bool = false,
+    headers_seen: bool = false,
     response_headers_seen: bool = false,
 
     pub fn stream(self: *Connection) ?Stream {
@@ -211,6 +212,11 @@ pub const Connection = struct {
                 if (parsed.stream_id != self.stream_id) {
                     return error.ProtocolViolation;
                 }
+                // Trailers are not forwarded and the header storage holds the
+                // request/response block; a second HEADERS block would
+                // overwrite it (and could smuggle pseudo-headers).
+                if (self.headers_seen) return error.ProtocolViolation;
+                self.headers_seen = true;
                 const decoded = try self.readHeaderBlock(parsed);
                 if (self.role == .client and !self.response_headers_seen) {
                     const status = findHeader(decoded, ":status") orelse
@@ -281,14 +287,17 @@ pub const Connection = struct {
         @memcpy(self.pending[0..payload.len], payload);
         self.pending_len = payload.len;
         self.pending_offset = 0;
-        if (parsed.flags & frame.flag_end_stream != 0) {
+        const end_stream = parsed.flags & frame.flag_end_stream != 0;
+        if (end_stream) {
             self.remote_end_stream.store(true, .release);
         }
-        if (parsed.payload.len != 0) {
+        // No flow-control credit is needed once the peer has ended its side;
+        // the connection is about to become read-only. Writing an update here
+        // races a peer that has already closed its socket and would discard
+        // data that was just received.
+        if (parsed.payload.len != 0 and !end_stream) {
             try self.sendWindowUpdate(0, parsed.payload.len);
-            if (parsed.flags & frame.flag_end_stream == 0) {
-                try self.sendWindowUpdate(self.stream_id, parsed.payload.len);
-            }
+            try self.sendWindowUpdate(self.stream_id, parsed.payload.len);
         }
     }
 
@@ -466,7 +475,15 @@ pub const Connection = struct {
                     @as(i64, frame.max_frame_size),
                 );
             }
-            if (self.input_mutex.tryLock()) {
+            // The frame pump exists for the half-closed case: the read task
+            // has returned EOF and nobody else will process WINDOW_UPDATE.
+            // While the peer can still send DATA, the read task owns the
+            // input and must drain it; pumping here would consume a second
+            // DATA frame while one is already pending and abort the stream.
+            if (self.remote_end_stream.load(.acquire) and
+                self.pending_len == 0 and
+                self.input_mutex.tryLock())
+            {
                 defer self.input_mutex.unlock(self.io);
                 self.processFrame() catch |err| {
                     self.stream_aborted.store(true, .release);
@@ -1143,6 +1160,30 @@ test "padded DATA strips padding before delivery" {
         connection.handleFrame(.{
             .frame_type = frame.type_data,
             .flags = frame.flag_padded,
+            .stream_id = 1,
+            .payload = &payload,
+        }),
+    );
+}
+
+test "a second HEADERS block is rejected instead of overwriting the request" {
+    var input = std.Io.Reader.fixed(&.{});
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &output.writer,
+        .role = .server,
+        .stream_id = 1,
+        .headers_seen = true,
+    };
+    var payload: [0]u8 = .{};
+    try std.testing.expectError(
+        error.ProtocolViolation,
+        connection.handleFrame(.{
+            .frame_type = frame.type_headers,
+            .flags = frame.flag_end_stream,
             .stream_id = 1,
             .payload = &payload,
         }),

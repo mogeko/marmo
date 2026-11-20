@@ -242,8 +242,14 @@ fn runHandshake(
     };
     var buffer: [1]Handshake = undefined;
     var select: std.Io.Select(Handshake) = .init(self.io, &buffer);
-    select.concurrent(.timeout, HandshakeTimer.run, .{&timer}) catch {
+    select.concurrent(.timeout, HandshakeTimer.run, .{&timer}) catch |err| {
         drainHandshake(&select);
+        if (err == error.ConcurrencyUnavailable) {
+            // Single-threaded embedders cannot host a timer task. Run the
+            // handshake on this task and let the caller's guard bound it.
+            return handshake(self, options) catch |handshake_err|
+                mapHandshakeError(handshake_err);
+        }
         return error.HandshakeFailed;
     };
 

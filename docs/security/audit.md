@@ -377,3 +377,31 @@ handshake deadline (TLS-07/RA-05); protocol violations from the WS frame codec
 do not always send Close 1002; WS needs a handshake-level soak; H2 still uses a
 single stream per connection; TLS CN fallback and leaf keyUsage differ from
 OpenSSL policy; H2 1xx and strict token validation remain open.
+
+## 8. Fourth re-audit (2026-11-20)
+
+The fourth pass replayed the third-round P0/P1 fixes and fuzzed the new
+certificate-shape validator and transport abort paths. Fixed before this note:
+
+- TLS: non-canonical `[3]` wrappers (0x43/0x83/0xc3) are parsed for extension
+  validation because std compares only the low five tag bits; malformed SANs
+  can no longer reach `verifyHostName`. RSA moduli whose bit length is more
+  than six bits short of a byte are rejected before the std PSS assertion.
+- ADR-0015: the reaper holds `peer_lock` across the non-blocking `.both`
+  abort, so relay cleanup cannot free the adapter mid-abort; registry removal
+  and peer updates are uncancelable.
+- HTTP/2: the waiting writer only pumps frames after `END_STREAM` (a second
+  buffered DATA frame previously aborted the stream), no WINDOW_UPDATE is
+  sent after `END_STREAM`, and a second HEADERS block is rejected instead of
+  overwriting the request headers.
+- WebSocket: reads accept standard-client single frames up to the 1 MiB
+  message limit, empty/zero-length frame floods are bounded per read, and a
+  handshake falls back to inline execution when timer concurrency is
+  unavailable.
+
+Residual (P2/P3): outbound connect/DNS cannot be canceled by a handshake
+deadline; WS client handshakes still use one timer task; WS protocol
+violations from the frame codec do not always send Close 1002; WS `close` is
+not idempotent for callers that free the adapter; H2 control-frame writes
+share the data write lock (head-of-line blocking); H2 remains single-stream;
+TLS CN fallback, leaf keyUsage, and key-strength policy differ from OpenSSL.

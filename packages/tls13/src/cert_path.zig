@@ -628,7 +628,11 @@ fn parseExtensions(
         const field = elementAt(bytes, cursor) orelse
             return error.CertificateRejected;
         cursor = field.slice.end;
-        if (identifier(field) != 0xa3) continue;
+        // std compares only the low five tag bits when it recognizes the
+        // extensions wrapper, so non-canonical [3] encodings (0x43/0x83/0xc3)
+        // must still be parsed here or their SAN payload would escape
+        // validation while std happily reads it.
+        if (identifier(field) & 0x1f != 0x03) continue;
         if (found_extensions) return error.CertificateRejected;
         found_extensions = true;
         try parseExtensionList(bytes, field, kind, &extensions);

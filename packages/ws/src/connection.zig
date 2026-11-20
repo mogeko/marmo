@@ -13,6 +13,7 @@ pub const Error = error{
 };
 
 pub const max_message = 1024 * 1024;
+pub const max_frames_per_read = 4096;
 pub const max_controls_per_read = 1024;
 pub const max_fragments_per_message = 1024;
 
@@ -33,7 +34,7 @@ pub const Connection = struct {
     write_lock: std.Io.Mutex = .init,
     pending_len: usize = 0,
     pending_offset: usize = 0,
-    frame_payload: [frame.max_payload]u8 = undefined,
+    frame_payload: [frame.max_read_payload]u8 = undefined,
     mask_buffer: [frame.max_mask_scratch]u8 = undefined,
     in_message: bool = false,
     message_len: usize = 0,
@@ -49,7 +50,10 @@ pub const Connection = struct {
         if (self.eof) return 0;
 
         var controls: usize = 0;
+        var frames: usize = 0;
         while (true) {
+            frames += 1;
+            if (frames > max_frames_per_read) return error.ProtocolViolation;
             const parsed = frame.read(
                 self.input,
                 self.role,
@@ -763,4 +767,61 @@ test "writes over 64 KiB use continuation frames" {
     try std.testing.expectEqual(frame.opcode_continuation, second.opcode);
     try std.testing.expect(second.fin);
     try std.testing.expectEqual(@as(usize, 100_000 - frame.max_payload), second.payload.len);
+}
+
+test "a standard-client sized single frame is delivered" {
+    const payload_len = 100_000;
+    var encoded: [payload_len + frame.header_max]u8 = undefined;
+    encoded[0] = 0x82; // FIN | binary
+    encoded[1] = 0x80 | 127;
+    std.mem.writeInt(u64, encoded[2..10], payload_len, .big);
+    const mask = [_]u8{ 1, 2, 3, 4 };
+    @memcpy(encoded[10..14], &mask);
+    for (0..payload_len) |index| {
+        encoded[14 + index] = @as(u8, @intCast(index % 251)) ^ mask[index % 4];
+    }
+
+    var input = std.Io.Reader.fixed(&encoded);
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &output.writer,
+        .role = .server,
+    };
+    const buffer = try std.testing.allocator.alloc(u8, payload_len);
+    defer std.testing.allocator.free(buffer);
+    var buffers = [_][]u8{buffer};
+    const read_len = try connection.read(&buffers);
+    try std.testing.expectEqual(@as(usize, payload_len), read_len);
+    for (buffer, 0..) |byte, index| {
+        try std.testing.expectEqual(@as(u8, @intCast(index % 251)), byte);
+    }
+}
+
+test "empty frame floods are bounded per read" {
+    const frame_count = max_frames_per_read + 1;
+    const encoded = try std.testing.allocator.alloc(u8, frame_count * 2);
+    defer std.testing.allocator.free(encoded);
+    var index: usize = 0;
+    while (index < frame_count) : (index += 1) {
+        encoded[index * 2] = 0x82;
+        encoded[index * 2 + 1] = 0x80; // empty masked binary frame
+    }
+    var input = std.Io.Reader.fixed(encoded);
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &output.writer,
+        .role = .server,
+    };
+    var buffer: [16]u8 = undefined;
+    var buffers = [_][]u8{&buffer};
+    try std.testing.expectError(
+        error.ProtocolViolation,
+        connection.read(&buffers),
+    );
 }

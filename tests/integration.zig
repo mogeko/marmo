@@ -2171,6 +2171,9 @@ const H2AdapterContext = struct {
     listener: *std.Io.net.Server,
     cert: *tls13.test_cert.Certificate,
     error_code: ?anyerror = null,
+    /// Lets the half-closed server keep the socket open until the client has
+    /// consumed the response, avoiding a close-with-unread-data RST.
+    done: std.Io.Event = .unset,
 };
 
 fn h2AdapterServer(io: std.Io, context: *H2AdapterContext) void {
@@ -2594,6 +2597,7 @@ fn h2HalfClosedServerRun(io: std.Io, context: *H2AdapterContext) !void {
         error.NotConnected => {},
         else => return err,
     };
+    context.done.waitUncancelable(io);
 }
 
 test "HTTP/2 keeps reading flow control after the peer half-closes" {
@@ -2652,6 +2656,7 @@ test "HTTP/2 keeps reading flow control after the peer half-closes" {
     _ = try stream.write(io, &.{"request"});
     try stream.shutdown(io, .send);
 
+    defer context.done.set(io);
     var buffer: [16 * 1024]u8 = undefined;
     var total: usize = 0;
     while (total < 3 * 1024 * 1024) {
@@ -2661,6 +2666,7 @@ test "HTTP/2 keeps reading flow control after the peer half-closes" {
         total += read_len;
     }
     try std.testing.expectEqual(@as(usize, 3 * 1024 * 1024), total);
+    context.done.set(io);
     try server_future.await(io);
     if (context.error_code) |err| return err;
 }

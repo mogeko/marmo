@@ -830,6 +830,16 @@ fn verifyRsa(
     if (signature.len != components.modulus.len) {
         return error.HandshakeFailed;
     }
+    // The std PSS verifier derives the encoded-message length from the
+    // modulus bit length and asserts that it equals the byte length. Keys
+    // whose modulus is more than six bits short of a whole byte (for example
+    // 2041-bit) would abort, so reject them before reaching the assertion.
+    if (components.modulus.len == 0) return error.HandshakeFailed;
+    const leading_zeros = @as(usize, @clz(components.modulus[0]));
+    const modulus_bits = components.modulus.len * 8 - leading_zeros;
+    if (modulus_bits + 6 < components.modulus.len * 8) {
+        return error.HandshakeFailed;
+    }
     switch (signature.len) {
         inline 256, 384, 512 => |modulus_len| {
             const sig: *const [modulus_len]u8 = signature[0..modulus_len];
@@ -1134,6 +1144,36 @@ test "RSA-PSS signature length must match the certificate modulus" {
 
     var signature: [256]u8 = undefined;
     @memset(&signature, 1);
+    try std.testing.expectError(
+        error.HandshakeFailed,
+        verifyRsa(
+            handshake.signature_rsa_pss_sha256,
+            &signature,
+            "message",
+            .rsaEncryption,
+            key.items,
+        ),
+    );
+}
+
+test "RSA moduli with non-byte-aligned bit lengths are rejected" {
+    const allocator = std.testing.allocator;
+    var key: std.ArrayList(u8) = .empty;
+    defer key.deinit(allocator);
+    try key.append(allocator, 0x30);
+    try key.append(allocator, 0x81);
+    try key.append(allocator, 0x86);
+    try key.append(allocator, 0x02);
+    try key.append(allocator, 0x81);
+    try key.append(allocator, 0x80);
+    try key.append(allocator, 0x01);
+    try key.appendNTimes(allocator, 0x00, 126);
+    try key.append(allocator, 0x01);
+    try key.appendSlice(allocator, &.{ 0x02, 0x01, 0x03 });
+
+    var signature: [256]u8 = undefined;
+    @memset(&signature, 0);
+    signature[255] = 1;
     try std.testing.expectError(
         error.HandshakeFailed,
         verifyRsa(
