@@ -13,6 +13,7 @@ authors = ["Zheng Junyi"]
 [workspace.dependencies]
 marmo-net = { path = "crates/marmo-net" }
 marmo-transport = { path = "crates/marmo-transport" }
+base64 = "0.22"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_path_to_error = "0.1"
@@ -26,6 +27,7 @@ tokio = { version = "1.54", default-features = false, features = [
     "time",
 ] }
 tokio-util = { version = "0.7", features = ["rt"] }
+zeroize = "1.9"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

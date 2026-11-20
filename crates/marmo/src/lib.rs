@@ -10,6 +10,7 @@ mod config;
 mod direct;
 mod limits;
 mod supervisor;
+mod validate;
 // The engine is exercised by its tests until R2 wires it into `Instance`.
 #[allow(dead_code)]
 mod tcp_forward;

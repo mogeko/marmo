@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+base64.workspace = true
 marmo-net = { workspace = true, features = ["serde"] }
 marmo-transport.workspace = true
 serde.workspace = true
@@ -17,6 +18,7 @@ serde_path_to_error.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true
