@@ -9,6 +9,7 @@
 mod config;
 mod direct;
 mod limits;
+mod routing;
 mod supervisor;
 mod validate;
 // The engine is exercised by its tests until R2 wires it into `Instance`.
@@ -17,3 +18,4 @@ mod tcp_forward;
 
 pub use config::{Config, ConfigError};
 pub use limits::Limits;
+pub use routing::{Action, Metadata, OutboundId, RejectReason, Router, RoutingError};
