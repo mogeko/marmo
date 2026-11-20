@@ -9,8 +9,13 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+aes.workspace = true
+aes-gcm.workspace = true
+base64.workspace = true
+blake3.workspace = true
 marmo-net.workspace = true
 thiserror.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true
