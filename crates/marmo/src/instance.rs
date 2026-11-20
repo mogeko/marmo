@@ -359,6 +359,17 @@ pub(crate) struct Context {
 }
 
 impl Context {
+    pub(crate) fn udp_direct(&self, action: Action) -> bool {
+        match action {
+            Action::Direct => true,
+            Action::Route(id) => matches!(
+                self.outbounds.get(id.index() as usize),
+                Some(OutboundKind::Direct)
+            ),
+            Action::Reject(_) => false,
+        }
+    }
+
     pub(crate) async fn connect(&self, action: Action, target: &Endpoint) -> io::Result<TcpStream> {
         match action {
             Action::Direct => direct::connect(target).await,
