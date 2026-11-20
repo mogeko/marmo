@@ -53,10 +53,11 @@ handling, and configuration storage.
 ## 4. Constraints
 
 - **Language**: Rust, edition 2024. The MSRV is the lowest stable release that
-  satisfies the pinned dependency set; it starts at 1.85 and is recorded in
-  `Cargo.toml`. CI builds both the current stable and 1.85.0. Raising the MSRV
-  needs a commit message that names the dependency and the version that forced
-  it.
+  satisfies the pinned dependency set; it starts at 1.87 and is recorded in
+  `Cargo.toml`. CI builds both the current stable and 1.87.0. The MSRV rose
+  from 1.85 to 1.87 for `ctutils` >= 0.4.4 (RUSTSEC-2026-0385). Raising it
+  again needs a commit message that names the dependency and the version that
+  forced it.
 - **Runtime**: tokio is the only supported runtime. The embedder owns the
   runtime; the library takes a `tokio::runtime::Handle` and never builds one
   implicitly. Codecs and policy code are runtime-free, but the I/O layer is

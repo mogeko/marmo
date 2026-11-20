@@ -28,7 +28,7 @@ CI runs the first three on Linux, macOS, and Windows; the copyleft check and
 
 ## Rules
 
-- Edition 2024, MSRV 1.85 in `Cargo.toml`. CI tests 1.85.0 and the current
+- Edition 2024, MSRV 1.87 in `Cargo.toml`. CI tests 1.87.0 and the current
   stable; raise the MSRV only with a commit message that names the dependency
   that forced it.
 - `marmo-proto` and `marmo` are `#![forbid(unsafe_code)]`. `marmo-transport`
