@@ -19,6 +19,11 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use crate::BoxStream;
 
+/// Upper bound on ALPN protocols; mirrors config validation.
+const MAX_ALPN_PROTOCOLS: usize = 32;
+/// Upper bound on a certificate chain parsed from one config value.
+const MAX_CERTIFICATES: usize = 16;
+
 /// Whether the server requests and verifies client certificates.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ClientAuth {
@@ -167,6 +172,9 @@ impl TlsServer {
     }
 
     /// Completes the handshake and reports the selected ALPN protocol.
+    ///
+    /// The caller owns the handshake deadline; `Instance` applies the ADR-0015
+    /// reaper instead of a timer inside the adapter.
     pub async fn accept(&self, inner: BoxStream) -> Result<AcceptedTls, TlsError> {
         let stream = self.acceptor.clone().accept(inner).await?;
         let alpn = stream.get_ref().1.alpn_protocol().map(<[u8]>::to_vec);
@@ -266,6 +274,9 @@ fn client_verifier(
 }
 
 fn parse_alpn(protocols: &[String]) -> Result<Vec<Vec<u8>>, TlsError> {
+    if protocols.len() > MAX_ALPN_PROTOCOLS {
+        return Err(TlsError::AlpnName);
+    }
     protocols
         .iter()
         .map(|protocol| {
@@ -282,7 +293,7 @@ fn parse_certificates(input: &str) -> Result<Vec<CertificateDer<'static>>, TlsEr
         let certificates: Result<Vec<_>, _> =
             CertificateDer::pem_slice_iter(input.as_bytes()).collect();
         let certificates = certificates.map_err(|_| TlsError::Certificate)?;
-        if certificates.is_empty() {
+        if certificates.is_empty() || certificates.len() > MAX_CERTIFICATES {
             return Err(TlsError::Certificate);
         }
         Ok(certificates)
