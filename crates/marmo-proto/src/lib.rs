@@ -9,3 +9,6 @@ pub mod shadowsocks;
 
 /// SOCKS5 wire codec (RFC 1928).
 pub mod socks5;
+
+/// Trojan codec: password hashes, request headers, and UDP frames.
+pub mod trojan;
