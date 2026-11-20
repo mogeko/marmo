@@ -1,0 +1,56 @@
+//! Datagram outbounds: direct sockets and Shadowsocks 2022 framing.
+
+use std::io;
+use std::net::SocketAddr;
+
+use marmo_net::Endpoint;
+use tokio::net::UdpSocket;
+
+use crate::direct;
+use crate::shadowsocks::SsUdpClient;
+
+/// An established datagram path to one outbound.
+pub(crate) enum UdpOutbound {
+    /// A socket that sends to resolved targets directly.
+    Direct { socket: UdpSocket, ipv4: bool },
+    /// A Shadowsocks 2022 association with one server.
+    Shadowsocks(SsUdpClient),
+}
+
+impl UdpOutbound {
+    /// Binds a direct socket of the requested family.
+    pub(crate) async fn direct(ipv4: bool) -> io::Result<Self> {
+        let bind = if ipv4 {
+            SocketAddr::from(([0, 0, 0, 0], 0))
+        } else {
+            SocketAddr::from(([0_u16; 8], 0))
+        };
+        Ok(Self::Direct {
+            socket: UdpSocket::bind(bind).await?,
+            ipv4,
+        })
+    }
+
+    /// Sends one datagram to `target`.
+    pub(crate) async fn send_to(&mut self, target: &Endpoint, payload: &[u8]) -> io::Result<()> {
+        match self {
+            Self::Direct { socket, ipv4 } => {
+                let address = direct::resolve_udp(target, *ipv4).await?;
+                socket.send_to(payload, address).await?;
+                Ok(())
+            }
+            Self::Shadowsocks(client) => client.send_to(target, payload).await,
+        }
+    }
+
+    /// Receives one datagram, returning its length and source.
+    pub(crate) async fn recv_from(&mut self, buffer: &mut [u8]) -> io::Result<(usize, Endpoint)> {
+        match self {
+            Self::Direct { socket, .. } => {
+                let (length, source) = socket.recv_from(buffer).await?;
+                Ok((length, Endpoint::from(source)))
+            }
+            Self::Shadowsocks(client) => client.recv_from(buffer).await,
+        }
+    }
+}

@@ -20,6 +20,10 @@ use marmo_proto::shadowsocks::{
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
+mod udp;
+
+pub(crate) use udp::SsUdpClient;
+
 /// Length of the fixed header before encryption.
 const FIXED_HEADER: usize = 11;
 /// Length of the length field in front of every chunk payload.
@@ -492,13 +496,13 @@ pub(crate) fn credentials(
     Ok((method, Arc::new(key)))
 }
 
-fn random_bytes<const N: usize>() -> io::Result<[u8; N]> {
+pub(crate) fn random_bytes<const N: usize>() -> io::Result<[u8; N]> {
     let mut out = [0_u8; N];
     getrandom::fill(&mut out).map_err(|_| io::Error::other("random source unavailable"))?;
     Ok(out)
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
