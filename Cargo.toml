@@ -11,6 +11,7 @@ repository = "https://github.com/mogeko/marmo"
 authors = ["Zheng Junyi"]
 
 [workspace.dependencies]
+thiserror = "2.0"
 tokio = { version = "1.54", default-features = false, features = [
     "io-util",
     "macros",
