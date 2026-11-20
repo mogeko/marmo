@@ -11,6 +11,7 @@ authors.workspace = true
 [dependencies]
 base64.workspace = true
 marmo-net = { workspace = true, features = ["serde"] }
+marmo-proto.workspace = true
 marmo-transport.workspace = true
 serde.workspace = true
 serde_json.workspace = true

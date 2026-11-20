@@ -1,21 +1,24 @@
 //! Public facade for marmo.
 //!
-//! R1 provides the `Limits` policy and the internal TCP engine (admission,
-//! direct connect, relay, cancellation). The public `Instance`/`Config`
-//! lifecycle lands with the R2 configuration schema; see
-//! `docs/architecture.md` §14.
+//! `Config` is the strict v1 schema and `Instance` is the composition root:
+//! build, bind, serve, and shut down. R2d supports direct outbounds and the
+//! SOCKS5 CONNECT inbound; later phases add the remaining protocols.
 #![forbid(unsafe_code)]
 
 mod config;
 mod direct;
+mod inbound;
+mod instance;
 mod limits;
 mod routing;
 mod supervisor;
 mod validate;
-// The engine is exercised by its tests until R2 wires it into `Instance`.
-#[allow(dead_code)]
-mod tcp_forward;
 
 pub use config::{Config, ConfigError};
+pub use instance::{
+    BindError, BoundAddr, BoundInstance, BuildError, Instance, InstanceBuilder, InstanceHandle,
+    ServeError,
+};
 pub use limits::Limits;
+pub use marmo_net::{Cidr, Endpoint, Network};
 pub use routing::{Action, Metadata, OutboundId, RejectReason, Router, RoutingError};

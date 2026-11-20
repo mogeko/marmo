@@ -12,6 +12,7 @@ authors = ["Zheng Junyi"]
 
 [workspace.dependencies]
 marmo-net = { path = "crates/marmo-net" }
+marmo-proto = { path = "crates/marmo-proto" }
 marmo-transport = { path = "crates/marmo-transport" }
 base64 = "0.22"
 serde = { version = "1.0", features = ["derive"] }

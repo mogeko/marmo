@@ -74,6 +74,7 @@ version = "0.0.2"
 dependencies = [
  "base64",
  "marmo-net",
+ "marmo-proto",
  "marmo-transport",
  "serde",
  "serde_json",
