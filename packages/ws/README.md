@@ -113,9 +113,11 @@ allocator-free and bounded.
 
 The root package wraps this API in `src/transport/ws_{client,server,dialer}.zig`
 and composes it with TCP/TLS dialers. The adapter does not inspect TLS ALPN;
-when composing over TLS, set `TlsDialer.required_alpn = "http/1.1"` (or the
-configured protocol) explicitly. Compression, subprotocols, and close codes are
-not wired into `Config`/`Instance` yet; programmatic callers pass the options.
+`Instance` offers `http/1.1` by default for VLESS over TLS without requiring a
+selection. VLESS config wires path, Host, compression, and subprotocols through
+`transport` (ADR-0016); close codes and the full `DeflateOptions` surface remain
+programmatic options. The root adapter disables its handshake timer under
+`Instance` and relies on the ADR-0015 reaper.
 
 ## Tests
 

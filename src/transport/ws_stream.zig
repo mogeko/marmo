@@ -12,11 +12,23 @@ pub const default_handshake_timeout_ns = 10 * std.time.ns_per_s;
 pub const ClientOptions = struct {
     host: []const u8,
     path: []const u8 = "/",
+    /// Offered subprotocols, in preference order.
+    subprotocols: []const []const u8 = &.{},
+    /// Offer RFC 7692 permessage-deflate.
+    compression: bool = false,
+    /// Disable context takeover for messages this endpoint sends.
+    compression_no_context_takeover: bool = false,
     handshake_timeout_ns: u64 = default_handshake_timeout_ns,
 };
 
 pub const ServerOptions = struct {
     path: []const u8 = "/",
+    /// Accepted subprotocols, in server preference order.
+    subprotocols: []const []const u8 = &.{},
+    /// Accept RFC 7692 permessage-deflate offers.
+    compression: bool = false,
+    /// Disable context takeover for messages this endpoint sends.
+    compression_no_context_takeover: bool = false,
     /// Zero disables the per-connection timer. Inbound servers must instead
     /// enforce ADR-0015 handshake deadlines with the connection reaper; each
     /// enabled timer costs one sleeping task on `Io.Threaded`.
@@ -34,11 +46,13 @@ const Handshake = union(enum) {
     timeout: std.Io.Cancelable!void,
 };
 
+const HandshakeState = enum(u8) { running, done, fired };
+
 const HandshakeTimer = struct {
     io: std.Io,
     inner: Stream,
     timeout_ns: u64,
-    fired: std.atomic.Value(bool) = .init(false),
+    state: std.atomic.Value(HandshakeState) = .init(.running),
 
     fn run(self: *HandshakeTimer) std.Io.Cancelable!void {
         try std.Io.sleep(
@@ -46,10 +60,27 @@ const HandshakeTimer = struct {
             .{ .nanoseconds = @intCast(self.timeout_ns) },
             .awake,
         );
-        self.fired.store(true, .release);
+        // A completed handshake must not be aborted by a timer that the
+        // platform's sleep implementation did not cancel promptly.
+        if (self.state.cmpxchgStrong(
+            .running,
+            .fired,
+            .acq_rel,
+            .acquire,
+        )) |_| return;
         // The handshake runs on the calling task; aborting the transport is
         // the only portable way to unblock its pending read.
         self.inner.shutdown(self.io, .both) catch {};
+    }
+
+    fn finish(self: *HandshakeTimer) bool {
+        if (self.state.cmpxchgStrong(
+            .running,
+            .done,
+            .acq_rel,
+            .acquire,
+        )) |actual| return actual == .fired;
+        return false;
     }
 };
 
@@ -118,6 +149,14 @@ pub const WsStream = struct {
 
     pub fn stream(self: *WsStream) Stream {
         return .{ .ctx = self, .vtable = &vtable };
+    }
+
+    pub fn selectedSubprotocol(self: *const WsStream) ?[]const u8 {
+        return self.connection.selectedSubprotocol();
+    }
+
+    pub fn compressionEnabled(self: *const WsStream) bool {
+        return self.connection.compressionEnabled();
     }
 
     fn read(ctx: *anyopaque, io: std.Io, buffers: [][]u8) Stream.ReadError!usize {
@@ -258,8 +297,9 @@ fn runHandshake(
     };
 
     const result = handshake(self, options);
+    const timed_out = timer.finish();
     drainHandshake(&select);
-    if (timer.fired.load(.acquire)) return error.TimedOut;
+    if (timed_out) return error.TimedOut;
     result catch |err| return mapHandshakeError(err);
 }
 
@@ -270,14 +310,29 @@ fn handshake(self: *WsStream, options: HandshakeOptions) anyerror!void {
             &self.socket_reader.interface,
             &self.socket_writer.interface,
             &self.connection,
-            .{ .host = client_options.host, .path = client_options.path },
+            .{
+                .host = client_options.host,
+                .path = client_options.path,
+                .subprotocols = client_options.subprotocols,
+                .deflate = .{
+                    .enabled = client_options.compression,
+                    .no_context_takeover = client_options.compression_no_context_takeover,
+                },
+            },
         ),
         .server => |server_options| return ws.serverHandshake(
             self.io,
             &self.socket_reader.interface,
             &self.socket_writer.interface,
             &self.connection,
-            .{ .path = server_options.path },
+            .{
+                .path = server_options.path,
+                .subprotocols = server_options.subprotocols,
+                .deflate = .{
+                    .enabled = server_options.compression,
+                    .no_context_takeover = server_options.compression_no_context_takeover,
+                },
+            },
         ),
     }
 }

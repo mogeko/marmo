@@ -5,7 +5,9 @@ active TCP health probes, followed by VLESS outbound/inbound over TLS (TCP,
 simple UoT, and XUDP), a TLS 1.3 server package, and standard Trojan
 inbound/outbound over TLS (TCP and UDP, with optional routed fallback). TLS now
 negotiates ALPN, and HTTP/2 and WebSocket are std-only first-party packages
-consumed through `Stream` adapters. SS2022
+consumed through `Stream` adapters. VLESS can run over TCP, TLS, WebSocket, or
+HTTP/2; the transport is selected by a strict `transport` config object
+(ADR-0016). SS2022
 TCP/UDP interop was verified locally against shadowsocks-rust 1.25.0 in both
 directions; the interop harness is not part of the repository. Protocol and
 Phase 2 gaps are tracked in `docs/protocols/` and §11.
@@ -417,7 +419,7 @@ for counters and a mutex only around node-set replacement (config reload).
 | HTTP proxy | TCP | yes | no | yes | yes | 1 | CONNECT + forward implemented |
 | Shadowsocks | TCP/UDP | yes | yes | yes | yes | 1 | 2022 TCP + UDP implemented |
 | Trojan | TLS | yes | yes | yes | yes | 2 | standard TCP/UDP; optional routed fallback (ADR-0011) |
-| VLESS | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | TCP/UDP (simple + XUDP) inbound/outbound over TLS done; WS/H2 pending |
+| VLESS | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | TCP/UDP (simple + XUDP) over TCP/TLS/WS/H2; Instance H2 uses one stream per connection; gRPC pending |
 | VMess | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | legacy CFB not planned; gRPC in phase 3 |
 | TUIC | QUIC | yes | yes | yes | yes | 3 | in-tree QUIC |
 | Hysteria2 | QUIC + TLS | yes | yes | yes | yes | 3 | Salamander, Brutal CC |
@@ -435,9 +437,11 @@ Phasing:
   cache/DoH. Implemented: selectors, TCP health probes, VLESS outbound and
   inbound over TLS (TCP, simple UoT, and XUDP), Trojan inbound and outbound
   over TLS (TCP and UDP, optional routed fallback), and the TLS 1.3 server
-  package, ALPN, and the HTTP/2 and WebSocket transport packages. Protocol-level
-  VLESS/VMess WS/H2 configuration is still pending. `http_head`, jitter,
-  backoff, and the remaining items are next.
+  package, ALPN, and the HTTP/2 and WebSocket transport packages. VLESS now
+  accepts `transport: {network: tcp|ws|h2}` with TLS ALPN defaults and
+  WebSocket compression/subprotocols (ADR-0016); VMess is not implemented.
+  Root-level HTTP/2 multiplexing/pooling, `http_head`, jitter, backoff, and the
+  remaining items are next.
 - **Phase 3**: in-tree QUIC, TUIC, Hysteria2, gRPC transport.
 - **Phase 4**: optional TUN/transparent proxying, Windows, transport hardening
   and external audit.
@@ -476,11 +480,14 @@ provides the same primitive, deleting the in-tree version.
   credentials are PEM/DER files loaded by `src/transport/tls_credentials.zig`.
 - **WebSocket**: in-tree in `packages/ws`; bounded RFC 6455 opening handshake,
   masking, continuation, ping/pong, close, permessage-deflate, and subprotocol
-  negotiation. `src/transport/ws_*.zig` expose `Stream` and a dialer.
+  negotiation. `src/transport/ws_*.zig` expose `Stream` and a dialer. VLESS
+  wiring exposes path, Host, compression, and subprotocols through `transport`.
 - **HTTP/2**: in-tree in `packages/http2`, limited to transport needs: framing,
   HPACK (including Huffman decode), SETTINGS, flow control, GOAWAY, 1xx and
   trailers. Bounded 16-stream multiplexing; `src/transport/h2_*.zig` expose
-  `Stream` and a dialer.
+  `Stream` and a dialer. The HTTP/2 server adapter can accept multiple streams,
+  but `Instance` currently serves one VLESS stream per H2 connection; root
+  pooling/multiplexing is a follow-up.
 - **gRPC**: Phase 3, built on the HTTP/2 package.
 - **QUIC**: in-tree, Phase 3; QUIC v1, stream multiplexing, datagrams, and
   pluggable congestion control (NewReno, Brutal). No 0-RTT in v1.
@@ -521,6 +528,9 @@ try instance.stop();
 - Global `limits` (`max_connections`, handshake/idle/half-close timeouts) are
   validated before startup; the runtime enforces them with one reaper per
   `Instance` and an atomic connection counter.
+- VLESS inbounds/outbounds accept an optional strict `transport` object
+  (`network: tcp|ws|h2`, path, host, WS compression/subprotocols); other
+  protocols reject it (ADR-0016).
   Parsing is a library API, not an application layer; `Config` can also be built
   directly and goes through the same validator.
 - Secrets are never logged; `Debug` output redacts passwords, UUIDs, and keys.
@@ -628,3 +638,4 @@ Module boundaries are enforced by review, not by the compiler; do not import
 | [0013](decisions/0013-http2-package.md) | HTTP/2 transport package | Accepted |
 | [0014](decisions/0014-websocket-package.md) | WebSocket transport package | Accepted |
 | [0015](decisions/0015-connection-limits-and-timeouts.md) | Connection limits and idle timeouts | Accepted |
+| [0016](decisions/0016-protocol-transport-wiring.md) | Protocol transport composition wiring | Accepted |

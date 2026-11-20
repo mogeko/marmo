@@ -64,6 +64,31 @@ curl --socks5-hostname 127.0.0.1:11080 http://example.com/
 hostname matching against the certificate remains enabled. For a trusted
 certificate, omit `--insecure` and set `--sni` to the certificate name.
 
+## WebSocket or HTTP/2
+
+The root library supports `transport.network = "ws"` and `"h2"` (ADR-0016).
+Pass the same values to both sides:
+
+```sh
+# server
+zig build run -- server --listen 127.0.0.1:14433 \
+  --uuid 00112233-4455-6677-8899-aabbccddeeff \
+  --cert cert.pem --key key.pem \
+  --transport ws --path /vless --host localhost
+
+# client
+zig build run -- client --listen 127.0.0.1:11080 \
+  --server 127.0.0.1:14433 \
+  --uuid 00112233-4455-6677-8899-aabbccddeeff \
+  --sni localhost --insecure \
+  --transport ws --path /vless --host localhost
+```
+
+Use `--transport h2` for HTTP/2; it requires TLS and automatically selects
+ALPN `h2`. The example does not expose WebSocket compression or subprotocol
+options; those are available through `Config.StreamTransport`. `Instance`
+currently serves one VLESS stream per HTTP/2 connection.
+
 Both modes block until the process is interrupted. The library does not install
 signal handlers; the example process is terminated with Ctrl-C.
 

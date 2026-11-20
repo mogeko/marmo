@@ -37,6 +37,15 @@ and behavior may change between minor releases.
 
 ### Added
 
+- VLESS stream transports (ADR-0016): `transport: { network: tcp|ws|h2,
+  path, host, compression, subprotocols }` on inbounds and outbounds.
+  WebSocket uses RFC 6455 path/Host, optional permessage-deflate, and
+  subprotocols; HTTP/2 uses a POST stream with ALPN `h2` and a configured
+  path/Host. TLS ALPN defaults are transport-aware, and non-VLESS protocols
+  reject the object.
+- Loopback integration coverage for VLESS over WebSocket (compressed and with
+  a subprotocol) and VLESS over HTTP/2, plus config validation tests for the
+  new transport object.
 - TLS 1.3 transport (ADR-0012): ALPN, mTLS with `none`/`optional`/`required`
   policy, `TLS_AES_128_GCM_SHA256`/`TLS_AES_256_GCM_SHA384`/
   `TLS_CHACHA20_POLY1305_SHA256`, X25519 and P-256 ECDHE, and KeyUpdate. The
@@ -66,6 +75,10 @@ and behavior may change between minor releases.
 
 ### Changed
 
+- The HTTP/2 and WebSocket adapters now use a running/done/fired handshake
+  state, so a platform sleep that is not canceled promptly cannot abort a
+  connection after a successful handshake. `Instance` disables the adapter
+  timers and lets the ADR-0015 reaper own the deadline.
 - The TLS client is now the in-tree TLS 1.3 implementation. TLS 1.2-only
   servers are rejected; a missing `close_notify` is a truncation error unless
   `allow_truncation_attacks` is enabled. Client and server negotiate three
@@ -93,26 +106,29 @@ and behavior may change between minor releases.
   because both supported key shares are offered. Certificate policy still
   falls back to CN and does not check leaf `keyUsage`. See
   [packages/tls13/CHANGELOG.md](packages/tls13/CHANGELOG.md).
-- HTTP/2: not wired into `Config`/`Instance`; `H2Stream`/`H2Dialer` are
-  programmatic adapters only. The package supports 16 concurrent streams and
-  accepts 1xx/trailers, but cannot send 1xx; no server push/PRIORITY, h2c
-  upgrade, HTTP/2 WebSocket, or gRPC message framing; HPACK encoding has no
+- HTTP/2: VLESS can select `transport.network = "h2"`, but `Instance` serves
+  one VLESS stream per H2 connection; the package's 16-stream multiplexer and
+  connection pooling are not yet used by the root library. The package accepts
+  1xx/trailers but cannot send 1xx; no server push/PRIORITY, h2c upgrade,
+  HTTP/2 WebSocket, or gRPC message framing; HPACK encoding has no
   Huffman/dynamic-table insertion. The 8 KiB stream receive window is a
   throughput trade-off. See
   [packages/http2/CHANGELOG.md](packages/http2/CHANGELOG.md).
-- WebSocket: not wired into `Config`/`Instance`; `WsStream`/`WsDialer` are
-  programmatic adapters only. No Origin/auth handling, redirects/proxy auth,
-  true half-close, or HTTP/2 WebSocket. A connection reserves 1 MiB before the
-  handshake and compression state when negotiated. See
-  [packages/ws/CHANGELOG.md](packages/ws/CHANGELOG.md).
-- VLESS/VMess over WebSocket or HTTP/2 is not implemented; only TCP/TLS
-  transports are configurable. QUIC, gRPC, TUIC, and Hysteria2 remain Phase 3.
+- WebSocket: VLESS wires `path`, `host`, `compression`, and `subprotocols`
+  through `transport`; the full `DeflateOptions`/close-code surface is
+  package-only. No arbitrary WS headers, early data (`?ed=`), heartbeat,
+  Origin/auth handling, redirects/proxy auth, true half-close, or HTTP/2
+  WebSocket. A connection reserves 1 MiB before the handshake and compression
+  state when negotiated. See [packages/ws/CHANGELOG.md](packages/ws/CHANGELOG.md).
+- VMess is not implemented. VLESS over WebSocket/HTTP/2 does not support
+  early data, h2c, HTTP/2 multiplexing at the `Instance` layer, or gRPC. QUIC,
+  TUIC, and Hysteria2 remain Phase 3.
 - The library remains not production-ready, has no external cryptographic or
   transport audit, and its public API is unstable.
 
 ### Tests
 
-- 267 tests: 61 root unit, 4 public API, 30 integration, 48 tls13, 44 http2,
+- 271 tests: 63 root unit, 4 public API, 32 integration, 48 tls13, 44 http2,
   66 ws, and 14 fuzz corpus tests, passing in Debug and ReleaseSafe.
 - Local interoperability checks pass for Shadowsocks 2022 (AES-128/256,
   TCP/UDP), VLESS (TCP, simple UoT, XUDP, TCP+UDP) and Trojan (TCP/UDP), in

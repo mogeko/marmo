@@ -7,23 +7,24 @@ protocols, rule-based routing, and latency-aware node selection.
 
 **Status:** Phase 1 MVP implemented; Phase 2 has started with outbound selectors
 (manual, round-robin, random, fallback, least-latency), active TCP health
-probes, VLESS outbound and inbound over TLS (TCP/UDP, simple UoT and XUDP),
-Trojan inbound and outbound over TLS (TCP/UDP, optional routed fallback), and a
-TLS 1.3 server. Includes strict JSON config, direct TCP/UDP and HTTP
+probes, VLESS outbound and inbound over TCP/TLS/WebSocket/HTTP/2 (TCP/UDP,
+simple UoT and XUDP), Trojan inbound and outbound over TLS (TCP/UDP, optional
+routed fallback), and a TLS 1.3 server. Includes strict JSON config, direct TCP/UDP and HTTP
 CONNECT outbounds, SOCKS5 inbound (CONNECT + UDP ASSOCIATE), HTTP CONNECT and
 forward proxying, Shadowsocks 2022 TCP/UDP (AES-128/256-GCM),
 domain/IP-CIDR/port routing, relay, metrics, TLS ALPN, HTTP/2 and WebSocket
 transport packages, and global connection limits/timeouts (ADR-0015).
 
-**Transport status:** plaintext TCP, TCP/TLS, and the in-tree TLS 1.3
-client/server are wired in. TLS, HTTP/2, and WebSocket live in independent
-packages (ADR-0010, ADR-0013, ADR-0014). TLS supports X25519/P-256 ECDHE,
+**Transport status:** plaintext TCP, TCP/TLS, TLS+WebSocket, and TLS+HTTP/2 are
+wired in for VLESS; the in-tree TLS 1.3 client/server is shared. TLS, HTTP/2,
+and WebSocket live in independent packages (ADR-0010, ADR-0013, ADR-0014). TLS supports X25519/P-256 ECDHE,
 AES-128-GCM/AES-256-GCM/ChaCha20-Poly1305, ALPN, mTLS, KeyUpdate, and
 ECDSA/Ed25519/RSA server certificates. The
 HTTP/2 transport multiplexes up to 16 streams per connection and exposes
 1xx/trailers for gRPC-style callers; WebSocket implements RFC 6455 with
-permessage-deflate and subprotocol negotiation. QUIC and gRPC are not
-implemented (ADR-0007).
+permessage-deflate and subprotocol negotiation. VLESS selects its L7 transport
+with `transport.network` (ADR-0016); `Instance` currently serves one VLESS
+stream per HTTP/2 connection. QUIC and gRPC are not implemented (ADR-0007).
 
 - [Architecture](docs/architecture.md)
 - [Architecture decisions](docs/decisions/)

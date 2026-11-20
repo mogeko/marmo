@@ -3,17 +3,22 @@
 Source: the VLESS protocol as documented by XTLS/Xray-core and V2Fly
 (<https://xtls.github.io/en/config/protocols/vless.html>,
 <https://github.com/v2fly/v2ray-core/blob/master/common/protocol/headers.go>),
-retrieved 2026-11-19. TLS record details come from RFC 8446. The client uses
-`std.crypto.tls.Client`; the server is the in-tree TLS 1.3 implementation in
-`packages/tls13`.
+retrieved 2026-11-19. TLS record details come from RFC 8446. Both TLS roles
+use the in-tree TLS 1.3 implementation in `packages/tls13`; WebSocket and
+HTTP/2 use the first-party packages from ADR-0013 and ADR-0014.
 
 ## Implemented
 
 - VLESS outbound and inbound; TCP command `1`, simple UDP command `2`, and
   Xray-compatible XUDP command `3`.
-- Outbound transport is optional TLS 1.2/1.3 via `std.crypto.tls.Client`.
-- Inbound transport is mandatory TLS 1.3 via `packages/tls13`; the accepted
-  TCP stream is wrapped before the VLESS header is parsed.
+- Outbound transport is TCP, optional TLS 1.3, WebSocket, or HTTP/2, selected
+  by `transport.network` (ADR-0016). Inbound transport is mandatory TLS 1.3,
+  optionally wrapped by WebSocket or HTTP/2; the accepted stream is wrapped
+  before the VLESS header is parsed.
+- WebSocket transport uses `path` and `host`, and optionally
+  `permessage-deflate` (`compression`) and subprotocols (`subprotocols`).
+  HTTP/2 uses a POST stream with `:authority` from `host`, `:path` from `path`,
+  and requires ALPN `h2` (defaulted when `tls.alpn` is absent).
 - Inbound UUID authentication uses a constant-time comparison, then routes and
   connects to the selected outbound. The empty response header is sent only
   after the outbound connection is established.
@@ -30,7 +35,13 @@ retrieved 2026-11-19. TLS record details come from RFC 8446. The client uses
   - outbound `xudp` is optional and defaults to `false`;
   - inbound/outbound TLS `handshake_timeout_s` defaults to 10 and must be
     positive;
-  - `uuid` and `tls` are rejected on other outbound/inbound protocols.
+  - `uuid` and `tls` are rejected on other outbound/inbound protocols;
+  - `transport.network` is `tcp`, `ws`, or `h2`; `ws`/`h2` reject an invalid
+    path/host, `compression`/`subprotocols` are WS-only, and `h2` requires TLS
+    with an ALPN list containing `h2`; a configured WS ALPN list must contain
+    `http/1.1`.
+  - The inbound enforces the configured path but not the configured `host`;
+    host checking is outbound-only for now.
 - Request header: version `0`, 16-byte UUID, zero addon length, command `1`
   (TCP) or `2` (UDP), big-endian port, address type (`1` IPv4, `2` domain,
   `3` IPv6), address. Command `3` (Mux/XUDP) omits the address on the wire and
@@ -58,8 +69,8 @@ retrieved 2026-11-19. TLS record details come from RFC 8446. The client uses
     connection.
   - `tls.insecure = true` skips CA-chain verification. When a server name is
     available (from `tls.sni` or the server domain), the hostname is still
-    verified because `std.crypto.tls.Client` couples SNI and host verification;
-    use a trusted certificate for full SNI behavior.
+    verified by the in-tree client; use a trusted certificate for full SNI
+    behavior.
   - Client secrets are zeroized when the TLS stream is closed.
   - A missing `close_notify` is treated as EOF: proxied byte streams have no
     application length framing that could detect truncation.
@@ -95,7 +106,8 @@ GlobalID/cone NAT and binds the stream to the first New frame's target.
       "tls": {
         "certificate": "server-cert.pem",
         "private_key": "server-key.pem"
-      }
+      },
+      "transport": { "network": "ws", "path": "/vless" }
     }
   ],
   "outbounds": [
@@ -105,6 +117,7 @@ GlobalID/cone NAT and binds the stream to the first New frame's target.
       "server": "example.com:443",
       "uuid": "00112233-4455-6677-8899-aabbccddeeff",
       "tls": { "sni": "cdn.example.com" },
+      "transport": { "network": "ws", "path": "/vless", "host": "cdn.example.com" },
       "xudp": true
     }
   ],
@@ -136,17 +149,20 @@ The inbound always requires TLS; plaintext VLESS inbound is not supported.
   closed.
 - No request addons are generated; response addons are skipped. No
   `flow`/XTLS Vision.
-- No WebSocket, HTTP/2, or gRPC transport; only TCP and TLS.
+- WebSocket/HTTP/2 are configured only through the VLESS `transport` object;
+  there are no arbitrary WS headers, early-data (`?ed=`), heartbeat, h2c, or
+  HTTP/2 WebSocket options. `Instance` serves one VLESS stream per H2
+  connection even though the package supports multiple streams; root-level
+  HTTP/2 multiplexing/pooling is a follow-up. gRPC is not implemented.
 - One request per stream and no multiplexing (Mux.Cool).
 - No custom CA file or pinning yet for the outbound; verification uses the host
   bundle or `insecure`.
-- Certificate verification and SNI cannot be configured independently because
-  of the `std.crypto.tls.Client` API.
+- Certificate verification and SNI still share the configured `tls.sni`; no
+  custom CA file or pinning is exposed by the root config.
 - Concurrent TLS writes and `shutdown(.send)` are serialized. A relay abort
   (`shutdown(.both)`) closes the transport without sending `close_notify` so it
-  cannot race with a writer. A server-initiated TLS 1.3 `KeyUpdate` handled by
-  the read path is not synchronized with a concurrent write; the in-tree TLS
-  record layer planned with the server will own this state and remove the gap.
+  cannot race with a writer. TLS 1.3 `KeyUpdate` is handled by the in-tree
+  record layer, with disjoint read/write key state.
 - No anti-probing or replay behavior beyond what TLS provides.
 
 ## Tests

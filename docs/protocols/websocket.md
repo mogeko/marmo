@@ -64,8 +64,14 @@ WebSocket Protocol) and [RFC 7692](https://www.rfc-editor.org/rfc/rfc7692)
 
 ## Known gaps
 
-- Compression, subprotocols, and close codes are not wired into
-  `Config`/`Instance`; they are package options only.
+- VLESS wires `path`, `host`, `compression`, and `subprotocols` through its
+  `transport` object (ADR-0016). The inbound enforces `path` but not `host`;
+  Host checking is outbound-only for now. Close codes and the full
+  `DeflateOptions` surface remain package-only. Trojan-Go WebSocket is not
+  implemented.
+- The adapter's handshake timer now uses a running/done/fired state so a late
+  timer cannot abort a completed connection; `Instance` disables the timer and
+  lets the ADR-0015 reaper own the deadline.
 - No redirects, HTTP proxy authentication, Origin checks, or HTTP/2 WebSocket
   (RFC 8441).
 - The encoder is intentionally simple: fixed Huffman only and one hash entry
