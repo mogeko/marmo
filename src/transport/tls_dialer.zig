@@ -44,6 +44,9 @@ pub const TlsDialer = struct {
 
     pub fn deinit(self: *TlsDialer) void {
         self.ca.deinit();
+        if (self.client_private_key) |*key| {
+            std.crypto.secureZero(u8, std.mem.asBytes(key));
+        }
     }
 
     fn connect(
