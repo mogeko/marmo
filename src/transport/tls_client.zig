@@ -5,6 +5,7 @@ const tls13 = @import("tls13");
 const Endpoint = @import("../net/endpoint.zig").Endpoint;
 const Stream = @import("stream.zig").Stream;
 const writeSlices = @import("write.zig").writeSlices;
+const Guard = @import("lifetime.zig").Guard;
 
 pub const socket_buffer_len = tls13.min_buffer_len;
 const plain_buffer_len = 4096;
@@ -16,6 +17,12 @@ pub const Options = struct {
     /// `server_name` is present.
     insecure: bool,
     ca: ?*tls13.Ca = null,
+    /// ALPN protocols in preference order.
+    alpn_protocols: []const []const u8 = &.{},
+    /// Require this negotiated ALPN protocol.
+    required_alpn: ?[]const u8 = null,
+    /// Treat a missing close_notify as EOF instead of a truncation error.
+    allow_truncation_attacks: bool = false,
     /// Bounded handshake duration. Zero disables the timeout.
     handshake_timeout_ns: u64 = 10 * std.time.ns_per_s,
 };
@@ -37,6 +44,7 @@ pub const TlsClientStream = struct {
     io: std.Io,
     inner: Stream,
     closed: std.atomic.Value(bool) = .init(false),
+    guard: Guard = .{},
     write_lock: std.Io.Mutex = .init,
     socket_reader: SocketReader,
     socket_writer: SocketWriter,
@@ -59,6 +67,7 @@ pub const TlsClientStream = struct {
         self.io = io;
         self.inner = inner;
         self.closed = .init(false);
+        self.guard = .{};
         self.write_lock = .init;
         self.socket_reader = SocketReader.init(inner, io, &self.socket_read_buffer);
         self.socket_writer = SocketWriter.init(inner, io, &self.socket_write_buffer);
@@ -66,15 +75,25 @@ pub const TlsClientStream = struct {
         if (options.handshake_timeout_ns == 0) {
             self.client = clientHandshake(self, options) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
-                error.HandshakeFailed => return error.HandshakeFailed,
+                error.Closed, error.Truncated, error.HandshakeFailed => return error.HandshakeFailed,
             };
             return self;
         }
 
         var buffer: [2]ClientHandshake = undefined;
         var select: std.Io.Select(ClientHandshake) = .init(io, &buffer);
-        select.concurrent(.client, clientHandshake, .{ self, options }) catch {
+        select.concurrent(.client, clientHandshake, .{ self, options }) catch |err| {
             drainClientHandshake(&select);
+            if (err == error.ConcurrencyUnavailable) {
+                // Single-threaded embedders cannot host timer tasks; run the
+                // handshake inline and let the caller's guard bound it.
+                self.client = clientHandshake(self, options) catch |handshake_err|
+                    switch (handshake_err) {
+                        error.Canceled => return error.Canceled,
+                        else => return error.HandshakeFailed,
+                    };
+                return self;
+            }
             return error.HandshakeFailed;
         };
         select.concurrent(.timeout, handshakeTimeout, .{
@@ -96,7 +115,7 @@ pub const TlsClientStream = struct {
                 drainClientHandshake(&select);
                 self.client = client_result catch |err| switch (err) {
                     error.Canceled => return error.Canceled,
-                    error.HandshakeFailed => return error.HandshakeFailed,
+                    error.Closed, error.Truncated, error.HandshakeFailed => return error.HandshakeFailed,
                 };
                 return self;
             },
@@ -122,10 +141,17 @@ pub const TlsClientStream = struct {
                 .server_name = options.server_name,
                 .verify = !options.insecure,
                 .ca = options.ca,
+                .alpn_protocols = options.alpn_protocols,
+                .required_alpn = options.required_alpn,
+                .allow_truncation_attacks = options.allow_truncation_attacks,
                 .read_buffer = &self.plain_read_buffer,
                 .write_buffer = &self.plain_write_buffer,
             },
         );
+    }
+
+    pub fn negotiatedProtocol(self: *const TlsClientStream) ?[]const u8 {
+        return self.client.negotiatedProtocol();
     }
 
     fn drainClientHandshake(select: *std.Io.Select(ClientHandshake)) void {
@@ -149,8 +175,15 @@ pub const TlsClientStream = struct {
     fn read(ctx: *anyopaque, io: std.Io, buffers: [][]u8) Stream.ReadError!usize {
         _ = io;
         const self: *TlsClientStream = @ptrCast(@alignCast(ctx));
-        return tls13.readSome(self.client.reader(), buffers) catch
+        self.guard.enter();
+        defer self.guard.leave(self.io);
+        if (self.closed.load(.acquire)) return error.Canceled;
+        const read_len = tls13.readSome(self.client.reader(), buffers) catch
             return self.readFailure();
+        if (read_len == 0 and !self.client.eof()) {
+            return error.ConnectionReset;
+        }
+        return read_len;
     }
 
     fn write(
@@ -159,6 +192,9 @@ pub const TlsClientStream = struct {
         buffers: []const []const u8,
     ) Stream.WriteError!usize {
         const self: *TlsClientStream = @ptrCast(@alignCast(ctx));
+        self.guard.enter();
+        defer self.guard.leave(io);
+        if (self.closed.load(.acquire)) return error.Canceled;
         var total: usize = 0;
         for (buffers) |buffer| total += buffer.len;
 
@@ -179,6 +215,9 @@ pub const TlsClientStream = struct {
         how: Stream.ShutdownHow,
     ) Stream.ShutdownError!void {
         const self: *TlsClientStream = @ptrCast(@alignCast(ctx));
+        self.guard.enter();
+        defer self.guard.leave(io);
+        if (self.closed.load(.acquire)) return error.Canceled;
         switch (how) {
             .recv => return self.inner.shutdown(io, .recv),
             .send => {
@@ -199,6 +238,7 @@ pub const TlsClientStream = struct {
         const self: *TlsClientStream = @ptrCast(@alignCast(ctx));
         if (self.closed.swap(true, .acq_rel)) return;
         self.inner.close(io);
+        self.guard.waitIdle(io);
         self.client.deinit();
         std.crypto.secureZero(u8, &self.plain_read_buffer);
         std.crypto.secureZero(u8, &self.plain_write_buffer);
@@ -218,7 +258,20 @@ pub const TlsClientStream = struct {
     }
 
     fn readFailure(self: *TlsClientStream) Stream.ReadError {
-        return self.socket_reader.err orelse error.ProtocolViolation;
+        if (self.socket_reader.err) |inner| switch (inner) {
+            error.Canceled => return error.Canceled,
+            error.ConnectionReset => return error.ConnectionReset,
+            else => {},
+        };
+        const err = self.client.readError() orelse {
+            return self.socket_reader.err orelse error.ProtocolViolation;
+        };
+        return switch (err) {
+            error.Canceled => error.Canceled,
+            error.Closed => error.Unexpected,
+            error.Truncated => error.ConnectionReset,
+            error.HandshakeFailed => error.ProtocolViolation,
+        };
     }
 
     fn writeFailure(self: *TlsClientStream) Stream.WriteError {
@@ -343,3 +396,14 @@ const SocketWriter = struct {
         }
     }
 };
+
+test "TLS truncation maps to ConnectionReset" {
+    var client: tls13.Client = undefined;
+    client.read_error = error.Truncated;
+    var stream: TlsClientStream = undefined;
+    stream.client = client;
+    try std.testing.expectEqual(
+        error.ConnectionReset,
+        stream.readFailure(),
+    );
+}

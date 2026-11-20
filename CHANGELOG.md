@@ -3,10 +3,52 @@
 All notable changes to marmo are recorded here. The project is pre-1.0; APIs
 and behavior may change between minor releases.
 
+> **Scope:** this file records embedder-visible changes to the root `marmo`
+> library (`src/`, `Instance`, config, adapters, examples). The first-party
+> packages under `packages/` are independently consumable and keep their own
+> changelogs; root entries mention package changes only when they affect the
+> root API, defaults, or integration.
+
 ## Unreleased
+
+> Version not bumped yet. When releasing, replace "Unreleased" with the
+> version and date, update `build.zig.zon` and the README status, and keep
+> the known limitations below in the release notes.
+
+### Security
+
+- Global connection limits/timeouts (ADR-0015): 1024 TCP connections, 10 s
+  handshake deadline, 300 s idle timeout, and 1 s half-close grace, enforced by
+  one reaper per `Instance` over a bounded guard registry. Metrics expose
+  rejected connections, handshake timeouts, and idle timeouts; UDP is excluded
+  from `max_connections`.
+- Relay teardown clears the peer reference, aborts with the non-blocking
+  `.both` path, and removes the guard before closing the stream, so a timeout
+  cannot leave a dangling peer or stall the reaper on a writer lock.
+- TLS, HTTP/2, and WebSocket received seven hardening rounds. Root-visible
+  effects: stricter certificate validation (malformed DER, SAN, legacy OIDs,
+  v1/unique-ID, RSA-PSS, expired anchors), HTTP/2 half-close/flow-control and
+  padding/trailer handling, and WebSocket 1 MiB reads, continuation writes,
+  Close 1009, and a bounded frame budget. Package details are in
+  [packages/tls13/CHANGELOG.md](packages/tls13/CHANGELOG.md),
+  [packages/http2/CHANGELOG.md](packages/http2/CHANGELOG.md), and
+  [packages/ws/CHANGELOG.md](packages/ws/CHANGELOG.md); audit history is in
+  [docs/security/audit.md](docs/security/audit.md).
 
 ### Added
 
+- TLS ALPN negotiation on both sides (ADR-0012). The TLS client is now the
+  in-tree TLS 1.3 implementation, replacing `std.crypto.tls.Client`, so it can
+  send the ALPN extension. It verifies ECDSA, Ed25519, and RSA server
+  certificates through the system CA bundle.
+- First-party `packages/http2`: HTTP/2 framing, HPACK with Huffman decoding,
+  SETTINGS, flow control, and a one-stream client/server transport
+  (ADR-0013). Root adapters expose `H2Stream` and `H2Dialer`.
+- First-party `packages/ws`: RFC 6455 client/server opening handshake, masked
+  framing, continuation, ping/pong, and close (ADR-0014). Root adapters expose
+  `WsStream` and `WsDialer`.
+- Loopback integration coverage for WebSocket over TLS and HTTP/2 over TLS,
+  including ALPN assertions.
 - Trojan inbound and outbound over TLS: TCP `CONNECT`, UDP `ASSOCIATE` with
   per-packet destinations, SHA-224 password authentication, and an optional
   explicit `fallback` endpoint routed through the router (ADR-0011).
@@ -18,12 +60,49 @@ and behavior may change between minor releases.
 - Local interop checks against self-hosted Xray-core 26.11.9 and trojan-gfw
   1.16.0 cover TCP and UDP in both directions; the harness is not committed.
 
-### Fixed
+### Changed
 
-- The TLS client reader now waits for a complete record instead of reporting a
-  partial record as EOF. The bug lost split replies and was found during
-  trojan-gfw UDP interop; `packages/tls13/src/reader.zig` has a regression
-  test.
+- The TLS client is now the in-tree TLS 1.3 implementation. TLS 1.2-only
+  servers are rejected; a missing `close_notify` is a truncation error unless
+  `allow_truncation_attacks` is enabled. ALPN is available to both client and
+  server.
+- The global `limits` policy is enforced by default: 1024 TCP connections,
+  10 s handshake deadline, 300 s idle timeout, and 1 s uplink/downlink grace.
+  UDP is omitted from `max_connections`.
+- The WebSocket server adapter defaults to no internal handshake timer so the
+  ADR-0015 reaper owns the deadline. Standalone users must set
+  `handshake_timeout_ns` explicitly.
+- WebSocket reads accept standard-client single frames up to 1 MiB; writes
+  still fragment at 64 KiB.
+
+### Known limitations
+
+- TLS: no client authentication, PSK, session tickets, 0-RTT, KeyUpdate,
+  TLS 1.2, or CRL/OCSP, and only X25519 + AES-128-GCM. Certificate policy
+  still falls back to CN and does not check leaf `keyUsage`. See
+  [packages/tls13/CHANGELOG.md](packages/tls13/CHANGELOG.md).
+- HTTP/2: one stream per connection and not wired into `Config`/`Instance`;
+  `H2Stream`/`H2Dialer` are programmatic adapters only. No multiplexing,
+  gRPC, 1xx/trailers, CONNECT, server push, or graceful GOAWAY. See
+  [packages/http2/CHANGELOG.md](packages/http2/CHANGELOG.md).
+- WebSocket: not wired into `Config`/`Instance`; `WsStream`/`WsDialer` are
+  programmatic adapters only. No compression, subprotocol negotiation,
+  Origin/auth handling, true half-close, or HTTP/2 WebSocket. A connection
+  reserves 1 MiB before the handshake. See
+  [packages/ws/CHANGELOG.md](packages/ws/CHANGELOG.md).
+- VLESS/VMess over WebSocket or HTTP/2 is not implemented; only TCP/TLS
+  transports are configurable. QUIC, gRPC, TUIC, and Hysteria2 remain Phase 3.
+- The library remains not production-ready, has no external cryptographic or
+  transport audit, and its public API is unstable.
+
+### Tests
+
+- 183 tests: 60 root unit, 4 public API, 28 integration, 34 tls13, 23 http2,
+  22 ws, and 12 fuzz corpus tests, passing in Debug and ReleaseSafe.
+- Local interoperability checks pass for Shadowsocks 2022 (AES-128/256,
+  TCP/UDP), VLESS (TCP, simple UoT, XUDP, TCP+UDP) and Trojan (TCP/UDP), in
+  both directions against shadowsocks-rust 1.25.0 and Xray-core 26.11.9.
+  The harness is not committed and is not part of CI.
 
 ## 0.0.2 - 2026-11-19
 

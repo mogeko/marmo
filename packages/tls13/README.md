@@ -3,10 +3,10 @@
 TLS for marmo, isolated as a package. It depends only on `std`; it does not
 import marmo's `Stream`, `Dialer`, `Endpoint`, routing, or config types.
 
-The package targets TLS 1.3. The initial client backend delegates to
-`std.crypto.tls.Client`, which can negotiate TLS 1.2 when a server does not
-offer 1.3. The server is an in-tree TLS 1.3 implementation. The in-tree client
-will replace the std backend without changing the API below.
+The package targets TLS 1.3. Both client and server are in-tree on
+`std.crypto`, and ALPN is negotiated on both sides. The client replaced the
+`std.crypto.tls.Client` backend because that backend builds a fixed
+ClientHello and cannot send the ALPN extension.
 
 ## API contract
 
@@ -21,6 +21,7 @@ pub const Options = struct {
     server_name: ?[]const u8,
     verify: bool = true,
     ca: ?*Ca = null,
+    alpn_protocols: []const []const u8 = &.{},
     read_buffer: []u8,
     write_buffer: []u8,
     allow_truncation_attacks: bool = true,
@@ -32,9 +33,10 @@ pub const Client = struct {
         input: *std.Io.Reader,
         output: *std.Io.Writer,
         options: Options,
-    ) error{ Canceled, HandshakeFailed }!Client;
+    ) error{ Canceled, Closed, HandshakeFailed }!Client;
     pub fn reader(self: *Client) *std.Io.Reader;
     pub fn writer(self: *Client) *std.Io.Writer;
+    pub fn negotiatedProtocol(self: *const Client) ?[]const u8;
     pub fn end(self: *Client) std.Io.Writer.Error!void;
     pub fn eof(self: Client) bool;
     pub fn deinit(self: *Client) void;
@@ -43,6 +45,7 @@ pub const Client = struct {
 pub const ServerOptions = struct {
     certificate_chain: []const []const u8,
     private_key: std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair,
+    alpn_protocols: []const []const u8 = &.{},
     read_buffer: []u8,
     write_buffer: []u8,
 };
@@ -58,6 +61,7 @@ pub const Server = struct {
     pub fn reader(self: *Server) *std.Io.Reader;
     pub fn writer(self: *Server) *std.Io.Writer;
     pub fn serverName(self: *const Server) ?[]const u8;
+    pub fn negotiatedProtocol(self: *const Server) ?[]const u8;
     pub fn readError(self: *const Server) ?Error;
     pub fn writeError(self: *const Server) ?Error;
     pub fn flush(self: *Server) Error!void;
@@ -79,7 +83,8 @@ pub const min_buffer_len: usize;
 `input.buffer.len` and `output.buffer.len` must be at least
 `min_buffer_len` on the client; plaintext `read_buffer` and `write_buffer`
 must be non-empty (4 KiB is a reasonable default). `Client.init` performs the
-handshake, including lazy CA loading and certificate verification.
+handshake, including lazy CA loading, certificate verification, and ALPN
+selection.
 `Client.deinit` zeroizes the session state but does not touch caller-owned
 buffers.
 
@@ -118,8 +123,10 @@ The server is TLS 1.3 only:
 - `TLS_AES_128_GCM_SHA256` only.
 - ECDSA P-256/SHA-256 server certificates; the leaf certificate's public key
   must match `private_key`.
-- No client authentication, PSK, session tickets, ALPN selection, 0-RTT, or
-  KeyUpdate. Post-handshake handshake messages are rejected.
+- No client authentication, PSK, session tickets, 0-RTT, or KeyUpdate.
+  ALPN is supported: the server selects the first configured protocol the
+  client offered, and a non-empty server list with no overlap fails the
+  handshake. Post-handshake handshake messages are rejected.
 - A middlebox-compatibility `change_cipher_spec` is sent after `ServerHello`.
   Incoming dummy CCS records are ignored only while the handshake is still in
   progress; a post-handshake CCS is a protocol error (RFC 8446 §5).
@@ -127,6 +134,30 @@ The server is TLS 1.3 only:
   certificate chains up to 16 KiB after encoding.
 - One task may read while another writes, but writes must be serialized by the
   caller; the root adapters use a per-connection write mutex.
+
+## Client scope
+
+The client is TLS 1.3 only:
+
+- X25519, `TLS_AES_128_GCM_SHA256`, and server certificates using ECDSA
+  P-256/P-384, Ed25519, or RSA with PKCS#1 v1.5/PSS signatures.
+- Certificate-chain verification against the system CA bundle, including
+  issuer `basicConstraints CA:TRUE`, `keyUsage keyCertSign`, `pathLenConstraint`,
+  DNS name constraints, and leaf EKU; host-name verification through
+  `server_name` is independent of chain verification, so `verify = false`
+  still pins the host when a name is present.
+- ALPN is offered from `Options.alpn_protocols`; a server selection that was
+  not offered fails the handshake. `required_alpn` makes a specific selection
+  mandatory. `negotiatedProtocol()` returns the result.
+- Post-handshake `NewSessionTicket` is ignored; `KeyUpdate` is rejected
+  because this session does not implement key updates. Post-handshake alerts
+  must be encrypted; a plaintext alert is a protocol error.
+- A missing `close_notify` is a truncation error unless
+  `allow_truncation_attacks` is set; the root adapters default to strict
+  handling and map truncation to `ConnectionReset`.
+- No client authentication, PSK, tickets, or 0-RTT. Supported versions and
+  known extensions are parsed strictly; duplicate known extensions fail the
+  handshake.
 
 ## Replacement
 
@@ -151,8 +182,8 @@ cd packages/tls13
 zig build test
 ```
 
-The package tests cover handshake failure mapping, option validation, and a
-full TLS 1.3 client/server exchange over loopback TCP with a runtime-generated
-self-signed ECDSA certificate. No private key is committed. The server was also
-checked locally against `openssl s_client` (handshake, echo, and close); that
-harness is not committed.
+The package tests cover handshake failure mapping, option validation, ALPN
+selection (including no overlap), and a full TLS 1.3 client/server exchange over
+loopback TCP with a runtime-generated self-signed ECDSA certificate. No private
+key is committed. The server was also checked locally against `openssl s_client`
+(handshake, echo, and close); that harness is not committed.

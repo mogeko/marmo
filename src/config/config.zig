@@ -10,6 +10,7 @@ const vless = @import("../protocol/vless.zig");
 
 pub const Config = struct {
     version: u8 = 1,
+    limits: Limits = .{},
     inbounds: []const Inbound = &.{},
     outbounds: []const Outbound = &.{},
     route: Route = .{},
@@ -19,6 +20,19 @@ pub const Config = struct {
     pub fn parseJson(gpa: std.mem.Allocator, text: []const u8) ParseError!Parsed {
         return fromJson(gpa, text);
     }
+
+    pub const Limits = struct {
+        /// Maximum accepted TCP streams owned by this Instance; 0 rejects all.
+        max_connections: u32 = 1024,
+        /// Absolute deadline from accept through protocol handshake.
+        handshake_timeout_s: u16 = 10,
+        /// Activity-based relay/UDP idle timeout; 0 disables it.
+        idle_timeout_s: u32 = 300,
+        /// Absolute grace after the client uplink closes; 0 closes immediately.
+        uplink_only_s: u32 = 1,
+        /// Absolute grace after the remote downlink closes; 0 closes immediately.
+        downlink_only_s: u32 = 1,
+    };
 
     pub const Inbound = struct {
         tag: []const u8,
@@ -39,6 +53,8 @@ pub const Config = struct {
         certificate: []const u8,
         /// PEM or DER ECDSA P-256 private key file.
         private_key: []const u8,
+        /// ALPN protocols in server preference order.
+        alpn: ?[]const []const u8 = null,
         handshake_timeout_s: u16 = 10,
     };
 
@@ -61,6 +77,12 @@ pub const Config = struct {
     pub const Tls = struct {
         sni: ?[]const u8 = null,
         insecure: bool = false,
+        /// ALPN protocols in client preference order.
+        alpn: ?[]const []const u8 = null,
+        /// Require the server to select this protocol.
+        required_alpn: ?[]const u8 = null,
+        /// Treat a missing close_notify as EOF instead of ConnectionReset.
+        allow_truncation_attacks: bool = false,
         handshake_timeout_s: u16 = 10,
     };
 
@@ -127,9 +149,36 @@ pub fn validate(config: Config, diagnostic: *Diagnostic) ValidationError!void {
         return error.InvalidConfig;
     }
 
+    try validateLimits(config.limits, diagnostic);
     try validateInbounds(config.inbounds, diagnostic);
     try validateOutbounds(config.outbounds, diagnostic);
     try validateRoute(config.route, config.outbounds, diagnostic);
+}
+
+fn validateLimits(
+    limits: Config.Limits,
+    diagnostic: *Diagnostic,
+) ValidationError!void {
+    if (limits.max_connections > 65535) {
+        diagnostic.set("limits.max_connections: must be at most 65535", .{});
+        return error.InvalidConfig;
+    }
+    if (limits.handshake_timeout_s == 0 or limits.handshake_timeout_s > 600) {
+        diagnostic.set("limits.handshake_timeout_s: must be 1..600", .{});
+        return error.InvalidConfig;
+    }
+    if (limits.idle_timeout_s > 86400) {
+        diagnostic.set("limits.idle_timeout_s: must be at most 86400", .{});
+        return error.InvalidConfig;
+    }
+    if (limits.uplink_only_s > 86400) {
+        diagnostic.set("limits.uplink_only_s: must be at most 86400", .{});
+        return error.InvalidConfig;
+    }
+    if (limits.downlink_only_s > 86400) {
+        diagnostic.set("limits.downlink_only_s: must be at most 86400", .{});
+        return error.InvalidConfig;
+    }
 }
 
 fn validateInbounds(
@@ -258,6 +307,13 @@ fn validateVlessInbound(
         );
         return error.InvalidConfig;
     }
+    var alpn_path_buffer: [64]u8 = undefined;
+    const alpn_path = std.fmt.bufPrint(
+        &alpn_path_buffer,
+        "inbounds[{d}].tls",
+        .{index},
+    ) catch return error.InvalidConfig;
+    try validateAlpn(tls.alpn, null, alpn_path, diagnostic);
 }
 
 fn validateTrojanInbound(
@@ -473,6 +529,18 @@ fn validateOutboundTls(
         );
         return error.InvalidConfig;
     }
+    var alpn_path_buffer: [64]u8 = undefined;
+    const alpn_path = std.fmt.bufPrint(
+        &alpn_path_buffer,
+        "outbounds[{d}].tls",
+        .{index},
+    ) catch return error.InvalidConfig;
+    try validateAlpn(
+        tls_config.alpn,
+        tls_config.required_alpn,
+        alpn_path,
+        diagnostic,
+    );
 }
 
 fn validateTrojan(
@@ -632,6 +700,54 @@ fn validateSelector(
                 node_index,
                 node_tag,
             });
+            return error.InvalidConfig;
+        }
+    }
+}
+
+fn validateAlpn(
+    protocols: ?[]const []const u8,
+    required: ?[]const u8,
+    base: []const u8,
+    diagnostic: *Diagnostic,
+) ValidationError!void {
+    const list = protocols orelse &.{};
+    if (list.len == 0 and required != null) {
+        diagnostic.set("{s}.required_alpn: requires alpn protocols", .{base});
+        return error.InvalidConfig;
+    }
+    var seen: [32][]const u8 = undefined;
+    if (list.len > seen.len) {
+        diagnostic.set("{s}.alpn: too many protocols", .{base});
+        return error.InvalidConfig;
+    }
+    for (list, 0..) |protocol, list_index| {
+        if (protocol.len == 0 or protocol.len > 255) {
+            diagnostic.set("{s}.alpn[{d}]: invalid protocol name", .{
+                base,
+                list_index,
+            });
+            return error.InvalidConfig;
+        }
+        for (seen[0..list_index]) |previous| {
+            if (std.mem.eql(u8, previous, protocol)) {
+                diagnostic.set("{s}.alpn[{d}]: duplicate '{s}'", .{
+                    base,
+                    list_index,
+                    protocol,
+                });
+                return error.InvalidConfig;
+            }
+        }
+        seen[list_index] = protocol;
+    }
+    if (required) |needed| {
+        var found = false;
+        for (list) |protocol| {
+            if (std.mem.eql(u8, protocol, needed)) found = true;
+        }
+        if (!found) {
+            diagnostic.set("{s}.required_alpn: not present in alpn", .{base});
             return error.InvalidConfig;
         }
     }
@@ -1072,5 +1188,121 @@ test "config validates Trojan credentials, TLS, and fallback" {
     try std.testing.expectEqualStrings(
         "inbounds[0].fallback: invalid endpoint 'not-an-endpoint'",
         diagnostic.message(),
+    );
+}
+
+test "TLS ALPN config validates names and required selection" {
+    var diagnostic: Diagnostic = .{};
+    var valid = try fromJson(std.testing.allocator,
+        \\{
+        \\  "inbounds": [
+        \\    { "tag": "vless", "protocol": "vless", "listen": "127.0.0.1:443",
+        \\      "uuid": "00112233-4455-6677-8899-aabbccddeeff",
+        \\      "tls": { "certificate": "cert.pem", "private_key": "key.pem",
+        \\               "alpn": ["h2", "http/1.1"] } }
+        \\  ],
+        \\  "outbounds": [
+        \\    { "tag": "proxy", "protocol": "trojan",
+        \\      "server": "example.com:443", "password": "secret",
+        \\      "tls": { "sni": "example.com", "alpn": ["h2"],
+        \\               "required_alpn": "h2" } }
+        \\  ],
+        \\  "route": { "final": "proxy" }
+        \\}
+    );
+    defer valid.deinit();
+    try validate(valid.inner.value, &diagnostic);
+
+    var bad_required = try fromJson(std.testing.allocator,
+        \\{
+        \\  "outbounds": [
+        \\    { "tag": "proxy", "protocol": "trojan",
+        \\      "server": "example.com:443", "password": "secret",
+        \\      "tls": { "sni": "example.com", "alpn": ["http/1.1"],
+        \\               "required_alpn": "h2" } }
+        \\  ],
+        \\  "route": { "final": "proxy" }
+        \\}
+    );
+    defer bad_required.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(bad_required.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "outbounds[0].tls.required_alpn: not present in alpn",
+        diagnostic.message(),
+    );
+
+    var duplicate = try fromJson(std.testing.allocator,
+        \\{
+        \\  "inbounds": [
+        \\    { "tag": "vless", "protocol": "vless", "listen": "127.0.0.1:443",
+        \\      "uuid": "00112233-4455-6677-8899-aabbccddeeff",
+        \\      "tls": { "certificate": "cert.pem", "private_key": "key.pem",
+        \\               "alpn": ["h2", "h2"] } }
+        \\  ]
+        \\}
+    );
+    defer duplicate.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(duplicate.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "inbounds[0].tls.alpn[1]: duplicate 'h2'",
+        diagnostic.message(),
+    );
+}
+
+test "limits config validates bounds" {
+    var diagnostic: Diagnostic = .{};
+    var valid = try fromJson(std.testing.allocator,
+        \\{
+        \\  "limits": {
+        \\    "max_connections": 0,
+        \\    "handshake_timeout_s": 1,
+        \\    "idle_timeout_s": 86400,
+        \\    "uplink_only_s": 0,
+        \\    "downlink_only_s": 0
+        \\  }
+        \\}
+    );
+    defer valid.deinit();
+    try validate(valid.inner.value, &diagnostic);
+
+    var bad_handshake = try fromJson(std.testing.allocator,
+        \\{ "limits": { "handshake_timeout_s": 0 } }
+    );
+    defer bad_handshake.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(bad_handshake.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "limits.handshake_timeout_s: must be 1..600",
+        diagnostic.message(),
+    );
+
+    var bad_max = try fromJson(std.testing.allocator,
+        \\{ "limits": { "max_connections": 65536 } }
+    );
+    defer bad_max.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(bad_max.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "limits.max_connections: must be at most 65535",
+        diagnostic.message(),
+    );
+
+    var bad_idle = try fromJson(std.testing.allocator,
+        \\{ "limits": { "idle_timeout_s": 86401 } }
+    );
+    defer bad_idle.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(bad_idle.inner.value, &diagnostic),
     );
 }

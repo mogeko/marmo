@@ -12,13 +12,15 @@ Trojan inbound and outbound over TLS (TCP/UDP, optional routed fallback), and a
 TLS 1.3 server. Includes strict JSON config, direct TCP/UDP and HTTP
 CONNECT outbounds, SOCKS5 inbound (CONNECT + UDP ASSOCIATE), HTTP CONNECT and
 forward proxying, Shadowsocks 2022 TCP/UDP (AES-128/256-GCM),
-domain/IP-CIDR/port routing, relay, and metrics.
+domain/IP-CIDR/port routing, relay, metrics, TLS ALPN, HTTP/2 and WebSocket
+transport packages, and global connection limits/timeouts (ADR-0015).
 
-**Transport status:** plaintext TCP, the TLS client, and an in-tree TLS 1.3
-server are wired in. The TLS code lives in the independent
-[`packages/tls13`](packages/tls13/) package (ADR-0010); the server supports
-X25519, AES-128-GCM/SHA-256, and ECDSA P-256 certificates. QUIC, HTTP/2,
-WebSocket, and gRPC are not implemented (ADR-0007).
+**Transport status:** plaintext TCP, TCP/TLS, and the in-tree TLS 1.3
+client/server are wired in. TLS, HTTP/2, and WebSocket live in independent
+packages (ADR-0010, ADR-0013, ADR-0014). TLS supports X25519,
+AES-128-GCM/SHA-256, ALPN, and ECDSA/Ed25519/RSA server certificates. The
+HTTP/2 transport is one stream per connection; WebSocket implements RFC 6455
+without extensions. QUIC and gRPC are not implemented (ADR-0007).
 
 - [Architecture](docs/architecture.md)
 - [Architecture decisions](docs/decisions/)

@@ -233,8 +233,9 @@ fn keyFromScalar(scalar: []const u8) LoadError!Ecdsa.KeyPair {
     var bytes: [Ecdsa.SecretKey.encoded_length]u8 = @splat(0);
     @memcpy(bytes[bytes.len - scalar.len ..], scalar);
     defer std.crypto.secureZero(u8, &bytes);
-    const secret = Ecdsa.SecretKey.fromBytes(bytes) catch
+    var secret = Ecdsa.SecretKey.fromBytes(bytes) catch
         return error.InvalidCredentials;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&secret));
     return Ecdsa.KeyPair.fromSecretKey(secret) catch
         return error.InvalidCredentials;
 }

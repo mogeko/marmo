@@ -4,6 +4,7 @@ const std = @import("std");
 const Dispatch = @import("../core/dispatch.zig").Dispatch;
 const Metrics = @import("../core/metrics.zig").Metrics;
 const relay = @import("../core/relay.zig");
+const Guard = @import("../core/connection_guard.zig").Guard;
 const Endpoint = @import("../net/endpoint.zig").Endpoint;
 const trojan = @import("../protocol/trojan.zig");
 const Action = @import("../routing/router.zig").Action;
@@ -25,6 +26,7 @@ const UdpContext = struct {
     stream: Stream,
     outbound: PacketConn,
     metrics: *Metrics,
+    guard: ?*Guard,
 };
 
 pub fn handle(
@@ -34,6 +36,7 @@ pub fn handle(
     dispatch: Dispatch,
     arena: std.mem.Allocator,
     context: *const Context,
+    guard: ?*Guard,
 ) !void {
     var prefix: [trojan.auth_prefix_len]u8 = undefined;
     defer std.crypto.secureZero(u8, &prefix);
@@ -55,6 +58,7 @@ pub fn handle(
             dispatch,
             context.fallback,
             prefix[0..auth.len],
+            guard,
         );
     }
 
@@ -76,12 +80,14 @@ pub fn handle(
             inbound_tag,
             dispatch,
             target,
+            guard,
         ),
         trojan.command_udp_associate => try handleUdp(
             io,
             stream,
             inbound_tag,
             dispatch,
+            guard,
         ),
         else => return error.ProtocolViolation,
     }
@@ -94,6 +100,7 @@ fn handleFallback(
     dispatch: Dispatch,
     fallback: ?Endpoint,
     prefix: []const u8,
+    guard: ?*Guard,
 ) !void {
     if (prefix.len == 0) return;
     const target = fallback orelse return;
@@ -125,7 +132,7 @@ fn handleFallback(
     defer remote.close(io);
 
     try writeAll(io, remote, prefix);
-    try relay.relay(io, stream, remote, dispatch.metrics());
+    try relay.relayWithGuard(io, stream, remote, dispatch.metrics(), guard);
 }
 
 fn handleTcp(
@@ -134,6 +141,7 @@ fn handleTcp(
     inbound_tag: []const u8,
     dispatch: Dispatch,
     target: Endpoint,
+    guard: ?*Guard,
 ) !void {
     const metadata: Metadata = .{
         .network = .tcp,
@@ -155,7 +163,7 @@ fn handleTcp(
 
     const remote = try dispatch.connect(io, tag, target);
     defer remote.close(io);
-    try relay.relay(io, stream, remote, dispatch.metrics());
+    try relay.relayWithGuard(io, stream, remote, dispatch.metrics(), guard);
 }
 
 const UdpSession = struct {
@@ -170,7 +178,9 @@ fn handleUdp(
     stream: Stream,
     inbound_tag: []const u8,
     dispatch: Dispatch,
+    guard: ?*Guard,
 ) !void {
+    if (guard) |value| value.markRelay();
     var buffer: [trojan.max_udp_payload]u8 = undefined;
     var domain_buffer: [trojan.max_domain_len]u8 = undefined;
     var session: UdpSession = .{};
@@ -192,6 +202,7 @@ fn handleUdp(
             else => return error.ProtocolViolation,
         };
         if (packet.data_len == 0) continue;
+        if (guard) |value| value.touch();
 
         const metadata: Metadata = .{
             .network = .udp,
@@ -211,7 +222,7 @@ fn handleUdp(
         };
 
         if (session.outbound == null) {
-            try openUdp(io, stream, dispatch, packet.endpoint, tag, &session);
+            try openUdp(io, stream, dispatch, packet.endpoint, tag, &session, guard);
         } else if (!std.mem.eql(u8, tag, session.tag)) {
             continue;
         }
@@ -234,6 +245,7 @@ fn openUdp(
     target: Endpoint,
     tag: []const u8,
     session: *UdpSession,
+    guard: ?*Guard,
 ) !void {
     const connection = dispatch.connect_packet(io, tag, target) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
@@ -246,6 +258,7 @@ fn openUdp(
         .stream = stream,
         .outbound = connection,
         .metrics = dispatch.metrics(),
+        .guard = guard,
     };
     session.reply_future = io.concurrent(udpReply, .{&session.context}) catch {
         return error.ConcurrencyUnavailable;
@@ -280,6 +293,7 @@ fn udpReply(context: *UdpContext) void {
             buffer[0..message.data_len],
         ) catch return;
         context.metrics.addToClient(message.data_len);
+        if (context.guard) |value| value.touch();
     }
 }
 
@@ -441,6 +455,7 @@ test "fallback routes authentication failures through Dispatch" {
         fake.dispatch(),
         fallback,
         "GET /",
+        null,
     );
     try std.testing.expect(fake.connect_called);
 }
@@ -457,6 +472,7 @@ test "fallback reject closes without connecting" {
         fake.dispatch(),
         fallback,
         "GET /",
+        null,
     );
     try std.testing.expect(!fake.connect_called);
 }
@@ -484,6 +500,7 @@ test "valid authentication with a malformed request does not fall back" {
             fake.dispatch(),
             std.testing.allocator,
             &context,
+            null,
         ),
     );
     try std.testing.expect(!fake.connect_called);

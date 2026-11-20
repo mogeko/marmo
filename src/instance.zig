@@ -6,6 +6,9 @@ const Config = config_module.Config;
 const Diagnostic = @import("core/diagnostic.zig").Diagnostic;
 const Dispatch = @import("core/dispatch.zig").Dispatch;
 const Metrics = @import("core/metrics.zig").Metrics;
+const connection_guard = @import("core/connection_guard.zig");
+const ConnectionGuard = connection_guard.Guard;
+const LimitsRegistry = connection_guard.Registry;
 const Endpoint = @import("net/endpoint.zig").Endpoint;
 const Direct = @import("outbound/direct.zig").Direct;
 const HttpConnect = @import("outbound/http_connect.zig").HttpConnect;
@@ -72,6 +75,7 @@ const ConnContext = struct {
     instance: *Instance,
     stream: Stream,
     inbound: *BoundInbound,
+    guard: ConnectionGuard,
 };
 
 pub const Instance = struct {
@@ -86,6 +90,9 @@ pub const Instance = struct {
     group: std.Io.Group = .init,
     spawn_mutex: std.Io.Mutex = .init,
     stop_event: std.Io.Event = .unset,
+    limits: Config.Limits,
+    limits_registry: LimitsRegistry,
+    active_connections: std.atomic.Value(u32) = .init(0),
     running: bool = false,
     stopping: bool = false,
 
@@ -139,6 +146,11 @@ pub const Instance = struct {
             .selectors = compiled.selectors,
             .inbounds = inbounds,
             .rules = rules,
+            .limits = config.limits,
+            .limits_registry = try LimitsRegistry.init(
+                allocator,
+                config.limits.max_connections,
+            ),
             .metrics = .{},
         };
     }
@@ -176,6 +188,14 @@ pub const Instance = struct {
         }
 
         self.running = true;
+        self.spawnTask(limitsLoopWrapper, .{self}) catch |err| {
+            self.stopping = true;
+            self.group.cancel(self.io);
+            self.closeServers();
+            self.shutdownUdpServers();
+            self.running = false;
+            return err;
+        };
         for (self.inbounds) |*inbound| {
             self.spawnTask(acceptLoopWrapper, .{ self, inbound }) catch |err| {
                 self.stopping = true;
@@ -329,6 +349,7 @@ pub const Instance = struct {
             socket,
             self.dispatch(),
             inbound.tag,
+            self.limits.idle_timeout_s,
         ) catch {
             socket.close(self.io);
             return error.OutOfMemory;
@@ -361,31 +382,106 @@ pub const Instance = struct {
     }
 
     fn acceptConnection(self: *Instance, inbound: *BoundInbound, accepted: std.Io.net.Stream) void {
+        if (!self.reserveConnection()) {
+            accepted.close(self.io);
+            self.metrics.connectionRejected();
+            std.log.scoped(.marmo).debug("connection rejected by limit", .{});
+            return;
+        }
+
         const remote: Endpoint = .{ .ip = accepted.socket.address };
         const tcp = TcpStream.create(self.gpa, accepted, inbound.listen, remote) catch {
+            self.releaseConnection();
             accepted.close(self.io);
             return;
         };
         const stream = tcp.stream();
 
         const context = self.gpa.create(ConnContext) catch {
+            self.releaseConnection();
             stream.close(self.io);
             return;
         };
-        context.* = .{ .instance = self, .stream = stream, .inbound = inbound };
+        context.* = .{
+            .instance = self,
+            .stream = stream,
+            .inbound = inbound,
+            .guard = ConnectionGuard.init(
+                self.io,
+                &self.limits_registry,
+                &self.metrics,
+                stream,
+                .{
+                    .handshake_ns = @as(
+                        u64,
+                        self.limits.handshake_timeout_s,
+                    ) * std.time.ns_per_s,
+                    .idle_ns = @as(u64, self.limits.idle_timeout_s) *
+                        std.time.ns_per_s,
+                    .uplink_only_ns = @as(u64, self.limits.uplink_only_s) *
+                        std.time.ns_per_s,
+                    .downlink_only_ns = @as(u64, self.limits.downlink_only_s) *
+                        std.time.ns_per_s,
+                },
+            ),
+        };
+        if (!context.guard.register()) {
+            self.metrics.connectionRejected();
+            self.releaseConnection();
+            stream.close(self.io);
+            self.gpa.destroy(context);
+            return;
+        }
 
         self.metrics.connectionOpened();
         self.spawnTask(connectionWrapper, .{context}) catch |err| {
+            context.guard.stop();
             self.metrics.connectionClosed();
+            self.releaseConnection();
             stream.close(self.io);
             self.gpa.destroy(context);
             std.log.scoped(.marmo).warn("spawn failed: {s}", .{@errorName(err)});
         };
     }
+
+    fn reserveConnection(self: *Instance) bool {
+        const maximum = self.limits.max_connections;
+        if (maximum == 0) return false;
+        var current = self.active_connections.load(.acquire);
+        while (current < maximum) {
+            if (self.active_connections.cmpxchgWeak(
+                current,
+                current + 1,
+                .acq_rel,
+                .acquire,
+            )) |actual| {
+                current = actual;
+                continue;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    fn releaseConnection(self: *Instance) void {
+        const previous = self.active_connections.fetchSub(1, .acq_rel);
+        std.debug.assert(previous > 0);
+    }
 };
 
 fn acceptLoopWrapper(self: *Instance, inbound: *BoundInbound) std.Io.Cancelable!void {
     self.acceptLoop(inbound);
+}
+
+fn limitsLoopWrapper(self: *Instance) std.Io.Cancelable!void {
+    while (true) {
+        try std.Io.sleep(
+            self.io,
+            .{ .nanoseconds = 250 * std.time.ns_per_ms },
+            .awake,
+        );
+        self.limits_registry.scan(self.io, connection_guard.nowNs(self.io));
+    }
 }
 
 fn healthLoopWrapper(io: std.Io, selector: *Selector) std.Io.Cancelable!void {
@@ -403,8 +499,13 @@ fn handleConnection(context: *ConnContext) !void {
     const self = context.instance;
     defer self.gpa.destroy(context);
     defer self.metrics.connectionClosed();
+    defer self.releaseConnection();
 
     var stream = context.stream;
+    defer {
+        context.guard.stop();
+        stream.close(self.io);
+    }
     if (context.inbound.tls) |tls_options| {
         var options = tls_options;
         defer std.crypto.secureZero(u8, std.mem.asBytes(&options.private_key));
@@ -413,13 +514,9 @@ fn handleConnection(context: *ConnContext) !void {
             self.gpa,
             stream,
             options,
-        ) catch |err| {
-            stream.close(self.io);
-            return err;
-        };
+        ) catch |err| return err;
         stream = tls.stream();
     }
-    defer stream.close(self.io);
 
     var arena = std.heap.ArenaAllocator.init(self.gpa);
     defer arena.deinit();
@@ -432,6 +529,7 @@ fn handleConnection(context: *ConnContext) !void {
             context.inbound.tag,
             dispatch,
             arena.allocator(),
+            &context.guard,
         ),
         .http => try http_inbound.handle(
             self.io,
@@ -439,6 +537,7 @@ fn handleConnection(context: *ConnContext) !void {
             context.inbound.tag,
             dispatch,
             arena.allocator(),
+            &context.guard,
         ),
         .shadowsocks => try ss_inbound.handle(
             self.io,
@@ -447,6 +546,7 @@ fn handleConnection(context: *ConnContext) !void {
             context.inbound.tag,
             dispatch,
             context.inbound.shadowsocks orelse return error.InvalidConfig,
+            &context.guard,
         ),
         .trojan => {
             var trojan_context = context.inbound.trojan orelse
@@ -459,6 +559,7 @@ fn handleConnection(context: *ConnContext) !void {
                 dispatch,
                 arena.allocator(),
                 &trojan_context,
+                &context.guard,
             );
         },
         .vless => {
@@ -474,6 +575,7 @@ fn handleConnection(context: *ConnContext) !void {
                 dispatch,
                 arena.allocator(),
                 &vless_context,
+                &context.guard,
             );
         },
     }
@@ -642,6 +744,10 @@ fn compileTlsTransport(
         tls_config.insecure,
         @as(u64, tls_config.handshake_timeout_s) * std.time.ns_per_s,
     );
+    tls_dialer.alpn_protocols = tls_config.alpn orelse &.{};
+    tls_dialer.required_alpn = tls_config.required_alpn;
+    tls_dialer.allow_truncation_attacks =
+        tls_config.allow_truncation_attacks;
     return .{
         .dialer = tls_dialer.asDialer(),
         .cleanup = cleanupTlsDialer,
@@ -805,6 +911,7 @@ fn loadInboundTls(
             return error.InvalidConfig;
         },
     };
+    options.alpn_protocols = tls.alpn orelse &.{};
     options.handshake_timeout_ns =
         @as(u64, tls.handshake_timeout_s) * std.time.ns_per_s;
     return options;

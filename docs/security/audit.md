@@ -1,7 +1,7 @@
 # Security audit
 
-- Date: 2026-11-19
-- Base revision: `339db44` ("Bound TLS handshakes with a configurable timeout")
+- Date: 2026-11-20
+- Base revision: post-Trojan plus ALPN/HTTP2/WS transport work
 - Status: internal review plus bounded in-tree fuzzing; no external audit.
 - Scope owners: repository maintainers.
 
@@ -43,8 +43,7 @@ Adversaries considered:
 
 Out of scope: a compromised embedder process, OS/kernel bugs, physical access,
 side-channel and micro-architectural attacks, traffic analysis, and protocols
-not implemented in this revision (QUIC, HTTP/2, WebSocket, VMess, TUIC,
-Hysteria2).
+not implemented in this revision (QUIC, VMess, TUIC, Hysteria2).
 
 ## 3. Findings
 
@@ -67,12 +66,19 @@ exhaustion; Low = local/robustness/spec issue with limited impact.
 | F-10 | Low | Fixed | Config | JSON parsing had no document-size limit. |
 | F-11 | Low | Fixed | Endpoints | Domain hosts accepted raw control characters. |
 | F-12 | Low | Fixed | HTTP CONNECT outbound | A valid response head exactly 8192 bytes long was rejected. |
-| F-13 | Medium | Open | Inbounds | No connect/handshake idle timeout for SOCKS5/HTTP and no maximum connection count. Requires a config/architecture decision (ADR). |
-| F-14 | Medium | Open | Relay | No idle-timeout enforcement after relay start; a silent peer can hold a relay pair open indefinitely. Requires a config/architecture decision (ADR). |
-| F-15 | Low | Open | TLS | KeyUpdate/client auth/PSK/tickets/ALPN are not implemented; post-handshake handling is unit-tested but not end-to-end fuzzed. |
+| F-13 | Medium | Fixed | Inbounds | No connect/handshake idle timeout for SOCKS5/HTTP and no maximum connection count. ADR-0015 adds `max_connections` and an absolute handshake deadline from accept. |
+| F-14 | Medium | Fixed | Relay | No idle-timeout enforcement after relay start. ADR-0015 adds idle and half-close timers enforced by a per-Instance reaper. |
+| F-15 | Low | Open | TLS | KeyUpdate/client auth/PSK/tickets are not implemented (ALPN is implemented). Post-handshake KeyUpdate/alert/truncation paths have regression tests but no end-to-end authenticated-stream fuzz target. |
 | F-16 | Low | Open | General | No external audit, no side-channel review, and no long-running soak/fuzz campaign. |
-| F-17 | Low | Open | Trojan | The authentication-prefix read and UDP association have no protocol-level idle timeout; a TLS peer that stalls can hold a connection. Same class as F-13. |
+| F-17 | Low | Fixed | Trojan | The authentication-prefix read is covered by the handshake deadline; UDP association traffic resets the idle deadline. |
 | F-18 | Low | Fixed | TLS client | A partial TLS record could be reported as EOF, losing the final application data when a peer split a record or closed immediately after sending it. Found during trojan-gfw UDP interop; added a regression test. |
+| F-19 | Low | Open | WS/H2 | The WebSocket and HTTP/2 parsers are new: no external audit, and HTTP/2 supports one active stream per connection. Bounded parser fuzz targets exist. |
+| F-20 | Low | Open | WS/H2 | H2 flow-control stalls are not soak-tested under a peer that stops reading; H2 still carries a large fixed per-connection header workspace. |
+| F-21 | Critical | Fixed | TLS client | Certificate paths did not check issuer `basicConstraints CA:TRUE` / `keyUsage keyCertSign`, so a CA:FALSE leaf could act as an intermediate and MITM the connection. |
+| F-22 | Medium | Fixed | TLS client | Post-handshake plaintext alerts were accepted, `close_notify` truncation was indistinguishable from clean EOF, `allow_truncation_attacks` was dead, and `insecure` also skipped host-name verification. |
+| F-23 | High | Fixed | HTTP/2 | Server rejected client `ENABLE_PUSH`, treated peer `END_STREAM` as a full close, used a 16-entry HPACK table cap, accepted cross-stream HEADERS, mapped RST/GOAWAY to clean EOF, and allowed empty CONTINUATION floods. |
+| F-24 | Medium | Fixed | WebSocket | `readHead` discarded bytes after the HTTP terminator (losing a coalesced first frame), and close state was checked outside the write lock. |
+| F-25 | High | Fixed | Adapters | `close()` freed adapter state while reads/writes might still be in flight. In-flight guards now make close wait for operations to drain. |
 
 ### F-01 HTTP request-line injection (High, fixed)
 
@@ -225,12 +231,16 @@ under the testing allocator, which reports leaks.
   decoders do not allocate. The fuzz harness uses fixed buffers and bounded
   per-iteration caches.
 - **Caps**: handshake message 16 KiB, TLS record 16 KiB + 256, HTTP head 8 KiB,
-  XUDP meta 512, VLESS domain 255, Trojan request 320 and authentication prefix
-  58, Trojan UDP frame 65535, SS2022 payload 65535, SS UDP sessions 128,
-  config 4 MiB.
-- **Slow peers**: TLS handshakes have a configurable timeout (default 10 s).
-  SOCKS5/HTTP handshakes, Trojan authentication-prefix reads, Trojan UDP
-  associations, and relay idle time are not bounded yet (F-13/F-14/F-17).
+  WS handshake 8 KiB, WS read frame 1 MiB (writes fragment at 64 KiB),
+  H2 frame 16 KiB, H2 header block 64 KiB,
+  H2 dynamic table 4 KiB, XUDP meta 512, VLESS domain 255, Trojan request 320
+  and authentication prefix 58, Trojan UDP frame 65535, SS2022 payload 65535,
+  SS UDP sessions 128, config 4 MiB.
+- **Slow peers**: TLS and WS client handshakes default to 10 s; the WS server
+  adapter defaults to no internal timer and relies on the ADR-0015 reaper.
+  H2 handshakes use the same configurable timeout. SOCKS5/HTTP handshakes, Trojan
+  authentication-prefix reads, Trojan UDP associations, and relay idle time
+  are not bounded yet (F-13/F-14/F-17).
 - **Trojan fallback**: unauthenticated traffic is replayed to a configured,
   routed TCP endpoint (ADR-0011). Only the consumed prefix is buffered; the
   operator is responsible for the fallback service and for keeping the route
@@ -242,6 +252,39 @@ under the testing allocator, which reports leaks.
   but not stress-tested under cancellation.
 - **Oracles**: handle failures return a generic protocol error or a SOCKS5/HTTP
   status code; no payload or credential is reflected.
+
+### H. WebSocket and HTTP/2 transports
+
+Remediation (2026-11-20): TLS now enforces issuer CA/keyUsage/pathLen/name
+constraints, rejects plaintext post-handshake alerts and unannounced truncation,
+parses known extensions strictly, and zeroizes secret copies; H2 accepts client
+`ENABLE_PUSH`, keeps the peer half-close separate from local writes, uses a
+byte-budgeted HPACK table, scopes HEADERS to the active stream, reports
+RST/truncating GOAWAY as resets, caps CONTINUATION frames, serializes writers,
+validates request headers/paths, and validates settings/window arithmetic; WS
+preserves coalesced first frames, serializes close state, validates close
+codes/UTF-8, rejects strict-handshake violations, bounds messages/control
+frames, and uses a small masking scratch; all stream adapters wait for
+in-flight operations before freeing on `close`.
+
+
+- WebSocket handshake parsing is capped at 8 KiB; the request line, required
+  upgrade headers, version, path, and `Sec-WebSocket-Key` are validated, and
+  `Sec-WebSocket-Accept` is compared in constant time. Reads accept a single
+  frame up to the 1 MiB message limit, writes fragment at 64 KiB, control
+  frames are capped at 125 bytes and must not be fragmented, client frames
+  must be masked, and server frames must be unmasked. Text frames are
+  accepted without UTF-8 validation because the transport is byte-oriented.
+- HTTP/2 caps frames at 16 KiB, header blocks at 64 KiB, the HPACK dynamic
+  table at 4 KiB, and each header name/value at 256/4096 bytes. Integer and
+  Huffman decoding are bounded; SETTINGS values are range-checked; only one
+  active stream is accepted. Flow control is replenished per DATA frame, and a
+  writer waits for WINDOW_UPDATE.
+- Fuzzed: WS frame parsing, WS HTTP head parsing, H2 frame parsing, and HPACK
+  decoding. Loopback integration covers WS and H2 over TLS with ALPN.
+- Residual: no external audit; no WS extensions/compression; no H2
+  multiplexing, server push, or PRIORITY effects; a peer that stops reading
+  can stall an H2 writer.
 
 ### G. Licensing and interop
 
@@ -285,3 +328,162 @@ unbounded built-in fuzzer; it is opt-in and not part of CI.
 5. **Side channels**: timing behavior of routing and TLS alert handling was not
    measured. Secret comparisons use constant-time helpers, but this is not a
    complete side-channel analysis.
+
+
+## 6. Second re-audit (2026-11-20)
+
+A second strict pass compared the packages with OpenSSL 4.1, curl/nghttp2,
+Python `h2`/`hpack`, and Python `websockets`. Fixed before this note:
+
+- TLS: DER boundary prevalidation before std certificate parsing; negative
+  pathLen; trust-anchor and IP name constraints; intermediate CA EKU;
+  `allow_truncation_attacks` in outbound config.
+- HTTP/2: server preface SETTINGS order; HEADERS before client ACK; local
+  `END_STREAM` no longer closes the TCP write side; legal server
+  `ENABLE_PUSH=0`; truncation to `ConnectionReset`; optional request path and
+  pseudo-header syntax; response `:status` validation; max header list
+  advertised; HPACK size-update placement.
+- WebSocket: continuation opcodes for writes over 64 KiB; close 1009 for an
+  oversized frame; control-frame keepalive limit; strict close handling.
+- ADR-0015: independent idle/grace deadlines, zero grace immediate, and peer
+  stream abort on timeout.
+
+Residual: TLS RA-05 (outbound connect/DNS cannot yet be canceled by the
+handshake deadline), WebSocket handshake timeout still uses a per-connection
+sleep task, single WS frames remain capped at 64 KiB, and H2 remains limited to
+one stream per connection. These are tracked for the next hardening pass.
+
+## 7. Third re-audit (2026-11-20)
+
+The third pass replayed the second-round findings and added end-to-end probes
+against OpenSSL 4.1, curl/nghttp2, Python `h2`/`hpack`, and Python
+`websockets`. Fixed before this note:
+
+- TLS: the DER prevalidator now mirrors the std parser's accesses — certificate
+  and TBSCertificate field order/types, Name/RDN/ATV bounds, validity times,
+  SPKI and RSA public-key shape, non-empty BIT STRINGs (including the
+  signature), extension wrappers, and SAN `GeneralNames`. Malformed SANs and
+  zero-length signature BIT STRINGs are rejected before `std` can index past
+  the end. RSA-PSS CertificateVerify lengths must equal the modulus.
+- ADR-0015: the reaper aborts the peer with `.both` (no write lock and no
+  protocol close frame) and `Guard.stop`/relay exit clear the peer reference,
+  closing the dangling-peer window. HTTP/2 `.both` cancels waiters.
+- HTTP/2: a blocked writer pumps frames while waiting for window credit, so
+  `WINDOW_UPDATE` is still processed after the peer half-closes; the reader
+  task can be gone. DATA padding is stripped and validated.
+- WebSocket: the handshake uses a single timer task that aborts the transport
+  instead of spawning two tasks, and `ServerOptions` defaults to no internal
+  timer so inbound servers rely on the ADR-0015 reaper.
+
+Residual (P2/P3): outbound connect/DNS still cannot be canceled by a
+handshake deadline (TLS-07/RA-05); protocol violations from the WS frame codec
+do not always send Close 1002; WS needs a handshake-level soak; H2 still uses a
+single stream per connection; TLS CN fallback and leaf keyUsage differ from
+OpenSSL policy; H2 1xx and strict token validation remain open.
+
+## 8. Fourth re-audit (2026-11-20)
+
+The fourth pass replayed the third-round P0/P1 fixes and fuzzed the new
+certificate-shape validator and transport abort paths. Fixed before this note:
+
+- TLS: non-canonical `[3]` wrappers (0x43/0x83/0xc3) are parsed for extension
+  validation because std compares only the low five tag bits; malformed SANs
+  can no longer reach `verifyHostName`. RSA moduli whose bit length is more
+  than six bits short of a byte are rejected before the std PSS assertion.
+- ADR-0015: the reaper holds `peer_lock` across the non-blocking `.both`
+  abort, so relay cleanup cannot free the adapter mid-abort; registry removal
+  and peer updates are uncancelable.
+- HTTP/2: the waiting writer only pumps frames after `END_STREAM` (a second
+  buffered DATA frame previously aborted the stream), no WINDOW_UPDATE is
+  sent after `END_STREAM`, and a second HEADERS block is rejected instead of
+  overwriting the request headers.
+- WebSocket: reads accept standard-client single frames up to the 1 MiB
+  message limit, empty/zero-length frame floods are bounded per read, and a
+  handshake falls back to inline execution when timer concurrency is
+  unavailable.
+
+Residual (P2/P3): outbound connect/DNS cannot be canceled by a handshake
+deadline; WS client handshakes still use one timer task; WS protocol
+violations from the frame codec do not always send Close 1002; WS `close` is
+not idempotent for callers that free the adapter; H2 control-frame writes
+share the data write lock (head-of-line blocking); H2 remains single-stream;
+TLS CN fallback, leaf keyUsage, and key-strength policy differ from OpenSSL.
+
+## 9. Fifth re-audit (2026-11-20)
+
+The fifth pass re-ran the fourth-round PoCs against OpenSSL 4.1, curl/nghttp2,
+Python `h2`/`hpack`, Python `websockets`, and Node/undici, and added
+structured certificate mutation (79k ReleaseSafe cases) plus stateful H2/HPACK
+fuzzing. Fixed before this note:
+
+- TLS: certificates with extensions must be v3, and issuer/subject unique
+  identifiers are rejected. Previously a v1 certificate (or a uniqueID before
+  the extensions wrapper) made std ignore the SAN and fall back to CN while
+  this module still validated the SAN. Fixed.
+- HTTP/2: a failed WINDOW_UPDATE write no longer discards the DATA frame that
+  was already copied; delivery continues and the next read reports the
+  transport error. The server's `acceptStream` marks the first HEADERS block,
+  so trailer HEADERS cannot overwrite request headers.
+- WebSocket: the empty-frame regression test now uses valid masked frames, and
+  the handshake-failure path zeroizes the socket buffers.
+
+Residual (P2/P3): WS client handshakes still use one timer task and the
+single-threaded fallback drops the configured timeout; a WebSocket connection
+reserves 1 MiB for large frames before the handshake; `Io.Threaded` runs about
+two worker threads per relay; outbound connect/DNS cannot be canceled by a
+handshake deadline; TLS still falls back to CN when no SAN is present and does
+not check leaf keyUsage; H2 remains single-stream and shares one write lock
+between data and control frames. The global reaper design is recorded as an
+amendment inside ADR-0015 rather than a superseding ADR; this is a governance
+gap, not a runtime issue.
+
+## 10. Sixth re-audit (2026-11-20)
+
+The sixth pass replayed the fifth-round fixes and audited the certificate
+extension aliases used by Zig std. Fixed before this note:
+
+- TLS: the legacy subjectAltName OID `2.5.29.7` is rejected. std still maps it
+  to the SAN field and parses it without bounds, while OpenSSL ignores it, so
+  a malformed legacy SAN could panic the client before chain validation or
+  authorize a host OpenSSL would reject.
+- ADR-0015: the reaper aborts `abort_stream` with `.both` rather than `.send`.
+  `.send` on a wrapped TLS/WS/H2 stream can wait on a writer that a
+  backpressured peer is holding, which previously froze the global scan,
+  `stop`, and the accept loop. In-tree `Instance` passes the raw TCP stream,
+  where both calls are non-blocking; `.both` makes the contract independent of
+  the embedder's choice.
+- TLS adapters fall back to an inline handshake when the Io implementation
+  cannot provide timer concurrency.
+
+Residual (P2/P3): a `TcpStream`/H2 close still releases the file descriptor
+before waiting for in-flight reads, so a racing read can observe EBADF in
+Debug; WS client handshakes still use one timer task and the single-threaded
+fallback drops the configured timeout; a WS connection reserves 1 MiB before
+the handshake; outbound connect/DNS cannot be canceled by a handshake deadline;
+TLS still falls back to CN when no SAN is present and does not check leaf
+keyUsage; H2 remains single-stream and shares one write lock between data and
+control frames.
+
+## 11. Seventh re-audit (2026-11-20)
+
+The seventh pass replayed the sixth-round fixes and checked every OID alias
+that Zig std maps for certificate fields. Fixed before this note:
+
+- TLS: trust-anchor validity is checked (`not_before`/`not_after`) before the
+  anchor is accepted. `Bundle.verify` checks the subject's validity but not
+  the anchor's, so an expired root such as a retired cross-sign could still
+  anchor a chain.
+- WebSocket: a fragmented message that exceeds 1 MiB (or the fragment count)
+  now sends Close 1009 before failing, matching the documented message limit;
+  the empty-frame regression test appends a valid data frame so removing the
+  bound changes the result instead of ending at EOF.
+
+Residual (P2/P3): the WS adapter reserves about 1 MiB per connection before
+the handshake (not reachable through an in-tree inbound yet); WS frame
+protocol violations still do not all send Close 1002 and text UTF-8 is not
+validated; `close` releases the file descriptor before waiting for in-flight
+I/O; the single-threaded WS fallback drops the configured handshake timeout;
+the WS client handshake still uses one timer task; outbound connect/DNS cannot
+be canceled by a handshake deadline; TLS still falls back to CN when no SAN is
+present and does not check leaf keyUsage; H2 remains single-stream and shares
+one write lock between data and control frames.

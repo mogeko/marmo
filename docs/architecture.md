@@ -3,7 +3,9 @@
 Status: Phase 1 MVP implemented; Phase 2 started with outbound selectors and
 active TCP health probes, followed by VLESS outbound/inbound over TLS (TCP,
 simple UoT, and XUDP), a TLS 1.3 server package, and standard Trojan
-inbound/outbound over TLS (TCP and UDP, with optional routed fallback). SS2022
+inbound/outbound over TLS (TCP and UDP, with optional routed fallback). TLS now
+negotiates ALPN, and HTTP/2 and WebSocket are std-only first-party packages
+consumed through `Stream` adapters. SS2022
 TCP/UDP interop was verified locally against shadowsocks-rust 1.25.0 in both
 directions; the interop harness is not part of the repository. Protocol and
 Phase 2 gaps are tracked in `docs/protocols/` and §11.
@@ -57,16 +59,19 @@ handling, and configuration storage.
 - **No own event loop**: the library takes `io: std.Io` and never creates
   threads, an event loop, or a global allocator. The embedder owns the runtime.
 - **std gaps that must be filled in-tree** (ADR-0007):
-  - TLS: client from `std.crypto.tls.Client`; the TLS 1.3 server is in-tree in
-    `packages/tls13` (X25519, AES-128-GCM/SHA-256, ECDSA P-256).
-  - QUIC, HTTP/2, and a WebSocket client: none; implemented in-tree.
+  - TLS: the client and TLS 1.3 server are in-tree in `packages/tls13`
+    (X25519, AES-128-GCM/SHA-256, ALPN, ECDSA/Ed25519/RSA server
+    certificates).
+  - HTTP/2 and WebSocket: in-tree in `packages/http2` and `packages/ws`.
+  - QUIC: none; implemented in-tree.
   - DNS: system resolver via `IpAddress.resolve`, no DoH/DoT client.
 - **No external transport backends**: no C toolchain and no optional backend
   selected by a build flag. Missing transports are implemented in this
   repository (ADR-0007), so a config that needs one is rejected until it lands.
 - **std-first**: `std` is the preferred implementation. An in-tree transport is
   a stopgap; when a pinned Zig upgrade provides the same primitive, switch to
-  `std`, delete the in-tree code, and keep the interop and fuzz coverage.
+  `std`, delete the in-tree code, and keep the interop and fuzz coverage. The
+  TLS client is in-tree because `std.crypto.tls.Client` cannot send ALPN.
 - **License**: LGPL-2.1. Protocol code must be written from specifications;
   GPL/AGPL/MPL implementations must not be ported (see ADR-0009).
 - **Pinned toolchain**: Zig 0.17.x. `std.Io` is still evolving, so the
@@ -295,7 +300,10 @@ and returns `error.Malformed` rather than panicking.
    streams are closed and metrics are recorded once.
 
 Handshake (protocol auth) and connect timeouts share a `connect_timeout`;
-`idle_timeout` applies only after the relay starts.
+`idle_timeout` applies only after the relay starts. ADR-0015 adds a global
+`limits` policy: `max_connections`, `handshake_timeout_s`, `idle_timeout_s`,
+`uplink_only_s`, and `downlink_only_s`. A single per-`Instance` reaper scans a
+bounded guard registry every 250 ms.
 
 ### 9.2 UDP
 
@@ -313,6 +321,8 @@ Handshake (protocol auth) and connect timeouts share a `connect_timeout`;
 
 UDP sessions are the unit of limits: `max_udp_sessions`, per-session queue
 depth, and idle timeout. No unbounded per-packet allocation is allowed.
+ADR-0015 keeps UDP session caps out of `max_connections` and applies the
+configured idle timeout per datagram.
 
 Trojan and SOCKS5 UDP associations are per-stream rather than table entries.
 Each datagram is routed independently; the first accepted datagram selects the
@@ -425,7 +435,9 @@ Phasing:
   cache/DoH. Implemented: selectors, TCP health probes, VLESS outbound and
   inbound over TLS (TCP, simple UoT, and XUDP), Trojan inbound and outbound
   over TLS (TCP and UDP, optional routed fallback), and the TLS 1.3 server
-  package. `http_head`, jitter, backoff, and the remaining items are next.
+  package, ALPN, and the HTTP/2 and WebSocket transport packages. Protocol-level
+  VLESS/VMess WS/H2 configuration is still pending. `http_head`, jitter,
+  backoff, and the remaining items are next.
 - **Phase 3**: in-tree QUIC, TUIC, Hysteria2, gRPC transport.
 - **Phase 4**: optional TUN/transparent proxying, Windows, transport hardening
   and external audit.
@@ -454,17 +466,20 @@ implemented in this repository, but in-tree code is always second choice:
 re-check every transport on each Zig upgrade and migrate to `std` as soon as it
 provides the same primitive, deleting the in-tree version.
 
-- **TLS client**: `std.crypto.tls.Client` inside `packages/tls13`, adapted to
-  the public `Stream` interface in `src/transport/tls_client.zig` and composed
-  as a transport dialer in `src/transport/tls_dialer.zig`.
-- **TLS 1.3 server**: in-tree in `packages/tls13` on `std.crypto`; X25519,
-  AES-128-GCM/SHA-256, ECDSA P-256 certificates, caller-provided chain and key.
-  No client auth, PSK, tickets, ALPN selection, KeyUpdate, or 0-RTT.
-  `src/transport/tls_server.zig` is the thin `Stream` adapter. `Instance`
-  wraps accepted TCP streams for the VLESS and Trojan inbounds; credentials
-  are PEM/DER files loaded by `src/transport/tls_credentials.zig`.
-- **WebSocket / HTTP/2 / gRPC**: in-tree, Phase 2/3; HTTP/2 is limited to
-  transport needs (framing, HPACK, SETTINGS, GOAWAY).
+- **TLS 1.3 client and server**: in-tree in `packages/tls13` on `std.crypto`;
+  X25519, AES-128-GCM/SHA-256, ALPN, and caller-provided server certificates
+  (ECDSA P-256/P-384, Ed25519, or RSA). The client verifies chains through the
+  system CA bundle. No client auth, PSK, tickets, KeyUpdate, or 0-RTT.
+  `src/transport/tls_{client,server,dialer}.zig` are thin `Stream` adapters.
+  `Instance` wraps accepted TCP streams for the VLESS and Trojan inbounds;
+  credentials are PEM/DER files loaded by `src/transport/tls_credentials.zig`.
+- **WebSocket**: in-tree in `packages/ws`; bounded RFC 6455 opening handshake,
+  masking, continuation, ping/pong, and close. `src/transport/ws_*.zig`
+  expose `Stream` and a dialer. No extensions or compression.
+- **HTTP/2**: in-tree in `packages/http2`, limited to transport needs: framing,
+  HPACK (including Huffman decode), SETTINGS, flow control, GOAWAY. One active
+  stream per connection; `src/transport/h2_*.zig` expose `Stream` and a dialer.
+- **gRPC**: Phase 3, built on the HTTP/2 package.
 - **QUIC**: in-tree, Phase 3; QUIC v1, stream multiplexing, datagrams, and
   pluggable congestion control (NewReno, Brutal). No 0-RTT in v1.
 - **Config validation** rejects a transport or protocol that is not implemented
@@ -501,6 +516,9 @@ try instance.stop();
 - `stop` is idempotent, cancel-safe, and bounded by a configurable grace period.
 - Config is JSON parsed with `std.json` in strict mode (unknown fields are
   errors) and validated with path-aware diagnostics (`inbounds[0].port`).
+- Global `limits` (`max_connections`, handshake/idle/half-close timeouts) are
+  validated before startup; the runtime enforces them with one reaper per
+  `Instance` and an atomic connection counter.
   Parsing is a library API, not an application layer; `Config` can also be built
   directly and goes through the same validator.
 - Secrets are never logged; `Debug` output redacts passwords, UUIDs, and keys.
@@ -529,6 +547,9 @@ src/dns/                  resolver, cache
 src/instance.zig          public facade: config, wiring, metrics
 src/config/               schema, JSON, validation
 examples/shadowsocks2022/ standalone SS2022 example
+packages/tls13/           in-tree TLS 1.3 client/server and ALPN
+packages/http2/           in-tree HTTP/2 transport subset
+packages/ws/              in-tree WebSocket transport
 docs/
   architecture.md
   decisions/
@@ -601,3 +622,7 @@ Module boundaries are enforced by review, not by the compiler; do not import
 | [0009](decisions/0009-licensing-and-interop.md) | Licensing and interop hygiene | Accepted |
 | [0010](decisions/0010-tls-module-package.md) | TLS module as a replaceable package | Accepted |
 | [0011](decisions/0011-trojan-inbound-fallback.md) | Trojan inbound fallback | Accepted |
+| [0012](decisions/0012-tls-alpn.md) | TLS ALPN negotiation | Accepted |
+| [0013](decisions/0013-http2-package.md) | HTTP/2 transport package | Accepted |
+| [0014](decisions/0014-websocket-package.md) | WebSocket transport package | Accepted |
+| [0015](decisions/0015-connection-limits-and-timeouts.md) | Connection limits and idle timeouts | Accepted |

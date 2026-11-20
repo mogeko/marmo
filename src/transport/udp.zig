@@ -3,6 +3,7 @@
 const std = @import("std");
 const Endpoint = @import("../net/endpoint.zig").Endpoint;
 const PacketConn = @import("packet.zig").PacketConn;
+const Guard = @import("lifetime.zig").Guard;
 
 pub const max_datagram_size: usize = 65507;
 
@@ -10,6 +11,7 @@ pub const UdpPacketConn = struct {
     gpa: std.mem.Allocator,
     socket: std.Io.net.Socket,
     closed: std.atomic.Value(bool) = .init(false),
+    guard: Guard = .{},
 
     pub fn create(gpa: std.mem.Allocator, socket: std.Io.net.Socket) !*UdpPacketConn {
         const self = try gpa.create(UdpPacketConn);
@@ -28,6 +30,9 @@ pub const UdpPacketConn = struct {
         data: []const u8,
     ) PacketConn.SendError!void {
         const self: *UdpPacketConn = @ptrCast(@alignCast(ctx));
+        self.guard.enter();
+        defer self.guard.leave(io);
+        if (self.closed.load(.acquire)) return error.Canceled;
         const address = destination.resolve(io) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             error.ResolveFailed => return error.Unexpected,
@@ -45,6 +50,9 @@ pub const UdpPacketConn = struct {
         buffer: []u8,
     ) PacketConn.ReceiveError!PacketConn.Received {
         const self: *UdpPacketConn = @ptrCast(@alignCast(ctx));
+        self.guard.enter();
+        defer self.guard.leave(io);
+        if (self.closed.load(.acquire)) return error.Canceled;
         const message = self.socket.receive(io, buffer) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => return error.Unexpected,
@@ -65,6 +73,7 @@ pub const UdpPacketConn = struct {
         const self: *UdpPacketConn = @ptrCast(@alignCast(ctx));
         if (self.closed.swap(true, .acq_rel)) return;
         self.socket.close(io);
+        self.guard.waitIdle(io);
         self.gpa.destroy(self);
     }
 

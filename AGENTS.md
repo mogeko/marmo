@@ -20,15 +20,19 @@ repository ships the library only: no CLI, daemon, or `app` layer.
   manual, round-robin, random, fallback, and least-latency, plus active TCP
   health probes, VLESS outbound and inbound over TLS (TCP, simple UoT, and
   XUDP), Trojan inbound and outbound over TLS (TCP/UDP, optional routed
-  fallback per ADR-0011), and a TLS 1.3 server. `http_head`, jitter, and
-  exponential backoff remain, along with VMess, other TLS inbounds, WS/H2,
-  sniffing, rule sets, process rules, and DNS cache/DoH.
-- `packages/tls13/` is a first-party package (ADR-0010) with its own build;
-  the root depends on it by path. It has no marmo imports. Root adapters live
-  in `src/transport/tls_{client,dialer,server}.zig`; inbound credentials are
-  loaded by `src/transport/tls_credentials.zig`, `src/inbound/vless.zig`
-  handles the protocol, and `src/outbound/vless_udp.zig` implements UDP
-  framing. Package rules are in
+  fallback per ADR-0011), a TLS 1.3 client/server with ALPN (ADR-0012), and
+  HTTP/2 and WebSocket transport packages (ADR-0013, ADR-0014). `http_head`,
+  jitter, and exponential backoff remain, along with VMess, other TLS
+  inbounds, protocol-level WS/H2 wiring, sniffing, rule sets, process rules,
+  and DNS cache/DoH.
+- `packages/tls13/`, `packages/http2/`, and `packages/ws/` are first-party
+  packages (ADR-0010, ADR-0013, ADR-0014) with their own builds; the root
+  depends on them by path. They have no marmo imports. Root adapters live in
+  `src/transport/tls_{client,dialer,server}.zig`, `src/transport/ws_{stream,
+  dialer}.zig`, and `src/transport/h2_{stream,dialer}.zig`; inbound
+  credentials are loaded by `src/transport/tls_credentials.zig`,
+  `src/inbound/vless.zig` handles the protocol, and
+  `src/outbound/vless_udp.zig` implements UDP framing. Package rules are in
   `packages/README.md`; root `build.zig` aggregates package tests and exposes
   `check`, `fuzz`, and `examples` steps.
 - The bounded fuzz harness lives in `tests/fuzz.zig`; synthetic corpus fixtures
@@ -38,7 +42,11 @@ repository ships the library only: no CLI, daemon, or `app` layer.
 - `examples/shadowsocks2022/`, `examples/trojan/`, and `examples/vless/` are
   standalone: each has its own `build.zig` and `build.zig.zon` and is not part
   of the root build.
-- ADR-0001–0011 are accepted; new architecture decisions need a new ADR.
+- ADR-0001–0015 are accepted. ADR-0015 connection limits/timeouts are
+  implemented with a global `limits` policy and one reaper per `Instance`.
+  The reaper aborts peers with the non-blocking `.both` path, and the WS
+  server adapter leaves handshake deadlines to that reaper by default.
+  New architecture decisions need a new ADR.
 - Snell is deferred and WireGuard is out of scope (ADR-0002).
 
 ## Toolchain gotchas (verified Zig 0.17.1)
@@ -47,10 +55,10 @@ repository ships the library only: no CLI, daemon, or `app` layer.
   loop, and never use `async`/`await` keywords.
 - `Io.Evented` exists only on aarch64/x86_64/riscv64 (io_uring, kqueue,
   Dispatch); everything else uses `Io.Threaded`.
-- `std` has a TLS **client** only. The TLS 1.3 server is in-tree in
-  `packages/tls13`; QUIC, HTTP/2, and a WebSocket client are still missing.
-  ADR-0007 requires implementing missing transports in-tree; there are no
-  optional backends.
+- `std` has a TLS **client** only, and it cannot send ALPN. The TLS 1.3
+  client and server are in-tree in `packages/tls13`; HTTP/2 and WebSocket are
+  in-tree packages. QUIC is still missing. ADR-0007 requires implementing
+  missing transports in-tree; there are no optional backends.
 - Every allocating API takes an explicit allocator; no globals or thread-locals.
 
 ## Zig style
@@ -177,10 +185,11 @@ Adapted from TigerBeetle's
 ## Commands and tests
 
 - `zig build test` runs the root unit, public API, and integration tests, the
-  package tests, and the deterministic fuzz corpus smoke (95 today: 51 root
-  unit, 4 public API, 21 integration, 8 tls13, 11 fuzz). `zig build check` adds
-  the formatting check, and `zig build examples` builds all examples. CI runs
-  `zig build check` and `zig build test -Doptimize=ReleaseSafe`.
+  package tests, and the deterministic fuzz corpus smoke (183 today: 60 root
+  unit, 4 public API, 28 integration, 34 tls13, 23 http2, 22 ws, 12 fuzz).
+  `zig build check` adds the formatting check, and `zig build examples` builds
+  all examples. CI runs `zig build check` and
+  `zig build test -Doptimize=ReleaseSafe`.
 - `zig build fuzz` runs the bounded harness with a fixed seed and 1024 inputs
   per target. `-Dfuzz-seed=<decimal>` and `-Dfuzz-iterations=<count>` change
   those values; long runs stay opt-in.

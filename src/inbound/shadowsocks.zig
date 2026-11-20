@@ -3,6 +3,7 @@
 const std = @import("std");
 const Dispatch = @import("../core/dispatch.zig").Dispatch;
 const relay = @import("../core/relay.zig");
+const Guard = @import("../core/connection_guard.zig").Guard;
 const s2022 = @import("../protocol/shadowsocks2022.zig");
 const Metadata = @import("../routing/metadata.zig").Metadata;
 const Stream = @import("../transport/stream.zig").Stream;
@@ -34,6 +35,7 @@ pub fn handle(
     inbound_tag: []const u8,
     dispatch: Dispatch,
     context: *Context,
+    guard: ?*Guard,
 ) !void {
     var plaintext: [s2022.max_payload]u8 = undefined;
     const request = s2022.readClientRequest(
@@ -82,5 +84,11 @@ pub fn handle(
     );
     defer server_stream.destroy(io);
 
-    try relay.relay(io, server_stream.stream(), remote, dispatch.metrics());
+    try relay.relayWithGuard(
+        io,
+        server_stream.stream(),
+        remote,
+        dispatch.metrics(),
+        guard,
+    );
 }

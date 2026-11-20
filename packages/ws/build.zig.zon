@@ -1,0 +1,15 @@
+.{
+    .name = .ws,
+    .version = "0.0.1",
+    .fingerprint = 0xe8abdd481aee3144,
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSE",
+        "README.md",
+        "CHANGELOG.md",
+    },
+}

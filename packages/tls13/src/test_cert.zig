@@ -17,45 +17,115 @@ pub const Certificate = struct {
     }
 };
 
+pub const Params = struct {
+    common_name: []const u8 = "localhost",
+    issuer_name: ?[]const u8 = null,
+    issuer_key: ?Ecdsa.KeyPair = null,
+    san: ?[]const u8 = "localhost",
+    /// Overrides the encoded SAN extension value verbatim. Used to exercise
+    /// malformed inner structures that std's host-name verifier would parse.
+    san_der: ?[]const u8 = null,
+    ca: bool = false,
+    path_len: ?u16 = null,
+    include_basic_constraints: bool = false,
+    include_key_usage: bool = false,
+    eku_server_auth: bool = false,
+    /// Emits a zero-length SIGNATURE BIT STRING for parser hardening tests.
+    empty_signature: bool = false,
+    /// Wrapper tag for the [3] extensions field. Non-0xa3 values exercise
+    /// std's low-five-bit tag comparison.
+    extensions_tag: u8 = 0xa3,
+    /// OID used for the SAN extension. The legacy 2.5.29.7 alias exercises
+    /// std's duplicate SAN mapping.
+    san_oid: []const u8 = &.{ 0x55, 0x1d, 0x11 },
+    /// Uses a validity window that has already expired (1990-2000).
+    expired: bool = false,
+    /// Omits the explicit version field, producing a v1 certificate.
+    omit_version: bool = false,
+    /// Emits an issuerUniqueID [1] before the extensions field.
+    unique_id: bool = false,
+};
+
 pub fn generate(
     gpa: std.mem.Allocator,
     io: std.Io,
+) !Certificate {
+    return generateParams(gpa, io, .{});
+}
+
+pub fn generateCa(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    common_name: []const u8,
+) !Certificate {
+    return generateParams(gpa, io, .{
+        .common_name = common_name,
+        .san = null,
+        .ca = true,
+        .include_basic_constraints = true,
+        .include_key_usage = true,
+    });
+}
+
+pub fn generateParams(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    params: Params,
 ) !Certificate {
     const key_pair = Ecdsa.KeyPair.generate(io);
 
     const sig_alg = try buildSignatureAlgorithm(gpa);
     defer gpa.free(sig_alg);
-    const name = try buildName(gpa);
-    defer gpa.free(name);
-    const validity = try buildValidity(gpa);
+    const subject_name = try buildName(gpa, params.common_name);
+    defer gpa.free(subject_name);
+    var issuer_owned = false;
+    const issuer_name = if (params.issuer_name) |name| blk: {
+        issuer_owned = true;
+        break :blk try buildName(gpa, name);
+    } else subject_name;
+    defer if (issuer_owned) gpa.free(issuer_name);
+    const validity = try buildValidity(gpa, params.expired);
     defer gpa.free(validity);
     const spki = try buildSpki(gpa, key_pair);
     defer gpa.free(spki);
-    const extensions = try buildExtensions(gpa);
+    const extensions = try buildExtensions(gpa, params);
     defer gpa.free(extensions);
 
     const version_inner = try tlv(gpa, 0x02, &.{2});
     defer gpa.free(version_inner);
-    const version = try tlv(gpa, 0xa0, version_inner);
+    const version = if (params.omit_version)
+        try gpa.dupe(u8, &.{})
+    else
+        try tlv(gpa, 0xa0, version_inner);
     defer gpa.free(version);
     const serial = try tlv(gpa, 0x02, &.{1});
     defer gpa.free(serial);
 
+    const unique_id = if (params.unique_id)
+        try tlv(gpa, 0x81, &.{0})
+    else
+        try gpa.dupe(u8, &.{});
+    defer gpa.free(unique_id);
     const tbs_content = try concat(gpa, &.{
         version,
         serial,
         sig_alg,
-        name,
+        issuer_name,
         validity,
-        name,
+        subject_name,
         spki,
+        unique_id,
         extensions,
     });
     defer gpa.free(tbs_content);
     const tbs = try tlv(gpa, 0x30, tbs_content);
     defer gpa.free(tbs);
 
-    const signature_value = try buildSignatureValue(gpa, key_pair, tbs);
+    const signing_key = params.issuer_key orelse key_pair;
+    const signature_value = if (params.empty_signature)
+        try tlv(gpa, 0x03, &.{})
+    else
+        try buildSignatureValue(gpa, signing_key, tbs);
     defer gpa.free(signature_value);
 
     const certificate_content = try concat(gpa, &.{
@@ -79,10 +149,10 @@ fn buildSignatureAlgorithm(gpa: std.mem.Allocator) ![]u8 {
     return tlv(gpa, 0x30, oid);
 }
 
-fn buildName(gpa: std.mem.Allocator) ![]u8 {
+fn buildName(gpa: std.mem.Allocator, common_name: []const u8) ![]u8 {
     const cn_oid = try tlv(gpa, 0x06, &.{ 0x55, 0x04, 0x03 });
     defer gpa.free(cn_oid);
-    const cn_value = try tlv(gpa, 0x0c, "localhost");
+    const cn_value = try tlv(gpa, 0x0c, common_name);
     defer gpa.free(cn_value);
     const atv = try concat(gpa, &.{ cn_oid, cn_value });
     defer gpa.free(atv);
@@ -93,10 +163,16 @@ fn buildName(gpa: std.mem.Allocator) ![]u8 {
     return tlv(gpa, 0x30, rdn);
 }
 
-fn buildValidity(gpa: std.mem.Allocator) ![]u8 {
-    const not_before = try tlv(gpa, 0x17, "260101000000Z");
+fn buildValidity(gpa: std.mem.Allocator, expired: bool) ![]u8 {
+    const not_before = try tlv(gpa, 0x17, if (expired)
+        "900101000000Z"
+    else
+        "260101000000Z");
     defer gpa.free(not_before);
-    const not_after = try tlv(gpa, 0x17, "360101000000Z");
+    const not_after = try tlv(gpa, 0x17, if (expired)
+        "000101000000Z"
+    else
+        "360101000000Z");
     defer gpa.free(not_after);
     const content = try concat(gpa, &.{ not_before, not_after });
     defer gpa.free(content);
@@ -136,22 +212,123 @@ fn buildSpki(
     return tlv(gpa, 0x30, content);
 }
 
-fn buildExtensions(gpa: std.mem.Allocator) ![]u8 {
-    const san_oid = try tlv(gpa, 0x06, &.{ 0x55, 0x1d, 0x11 });
-    defer gpa.free(san_oid);
-    const dns_name = try tlv(gpa, 0x82, "localhost");
-    defer gpa.free(dns_name);
-    const general_names = try tlv(gpa, 0x30, dns_name);
-    defer gpa.free(general_names);
-    const extn_value = try tlv(gpa, 0x04, general_names);
-    defer gpa.free(extn_value);
-    const extension_content = try concat(gpa, &.{ san_oid, extn_value });
-    defer gpa.free(extension_content);
-    const extension = try tlv(gpa, 0x30, extension_content);
+fn buildExtensions(gpa: std.mem.Allocator, params: Params) ![]u8 {
+    var extensions: std.ArrayList(u8) = .empty;
+    defer extensions.deinit(gpa);
+
+    if (params.san_der) |value| {
+        try appendExtension(
+            gpa,
+            &extensions,
+            params.san_oid,
+            false,
+            value,
+        );
+    } else if (params.san) |san| {
+        const dns_name = try tlv(gpa, 0x82, san);
+        defer gpa.free(dns_name);
+        const general_names = try tlv(gpa, 0x30, dns_name);
+        defer gpa.free(general_names);
+        try appendExtension(
+            gpa,
+            &extensions,
+            params.san_oid,
+            false,
+            general_names,
+        );
+    }
+    if (params.include_basic_constraints) {
+        var basic_content: [8]u8 = undefined;
+        var basic_len: usize = 0;
+        if (params.ca) {
+            basic_content[0] = 0x01;
+            basic_content[1] = 0x01;
+            basic_content[2] = 0xff;
+            basic_len = 3;
+            if (params.path_len) |limit| {
+                if (limit <= 0x7f) {
+                    basic_content[3] = 0x02;
+                    basic_content[4] = 0x01;
+                    basic_content[5] = @intCast(limit);
+                    basic_len = 6;
+                } else {
+                    basic_content[3] = 0x02;
+                    basic_content[4] = 0x02;
+                    basic_content[5] = @intCast(limit >> 8);
+                    basic_content[6] = @intCast(limit & 0xff);
+                    basic_len = 7;
+                }
+            }
+        }
+        const value = try tlv(gpa, 0x30, basic_content[0..basic_len]);
+        defer gpa.free(value);
+        try appendExtension(
+            gpa,
+            &extensions,
+            &.{ 0x55, 0x1d, 0x13 },
+            true,
+            value,
+        );
+    }
+    if (params.include_key_usage) {
+        const key_usage = if (params.ca)
+            [_]u8{ 0x02, 0x84 }
+        else
+            [_]u8{ 0x07, 0x80 };
+        const bit_string = try tlv(gpa, 0x03, &key_usage);
+        defer gpa.free(bit_string);
+        try appendExtension(
+            gpa,
+            &extensions,
+            &.{ 0x55, 0x1d, 0x0f },
+            true,
+            bit_string,
+        );
+    }
+    if (params.eku_server_auth) {
+        const server_auth = try tlv(
+            gpa,
+            0x06,
+            &.{ 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01 },
+        );
+        defer gpa.free(server_auth);
+        const value = try tlv(gpa, 0x30, server_auth);
+        defer gpa.free(value);
+        try appendExtension(
+            gpa,
+            &extensions,
+            &.{ 0x55, 0x1d, 0x25 },
+            false,
+            value,
+        );
+    }
+
+    const sequence = try tlv(gpa, 0x30, extensions.items);
+    defer gpa.free(sequence);
+    return tlv(gpa, params.extensions_tag, sequence);
+}
+
+fn appendExtension(
+    gpa: std.mem.Allocator,
+    extensions: *std.ArrayList(u8),
+    oid: []const u8,
+    critical: bool,
+    value: []const u8,
+) !void {
+    const oid_tlv = try tlv(gpa, 0x06, oid);
+    defer gpa.free(oid_tlv);
+    const value_tlv = try tlv(gpa, 0x04, value);
+    defer gpa.free(value_tlv);
+    const critical_tlv = if (critical)
+        try tlv(gpa, 0x01, &.{0xff})
+    else
+        try gpa.dupe(u8, &.{});
+    defer gpa.free(critical_tlv);
+    const content = try concat(gpa, &.{ oid_tlv, critical_tlv, value_tlv });
+    defer gpa.free(content);
+    const extension = try tlv(gpa, 0x30, content);
     defer gpa.free(extension);
-    const extensions_content = try tlv(gpa, 0x30, extension);
-    defer gpa.free(extensions_content);
-    return tlv(gpa, 0xa3, extensions_content);
+    try extensions.appendSlice(gpa, extension);
 }
 
 fn buildSignatureValue(
@@ -298,4 +475,26 @@ fn pemEncode(
     try list.appendSlice(gpa, label);
     try list.appendSlice(gpa, "-----\n");
     return list.toOwnedSlice(gpa);
+}
+
+/// Adds a self-signed DER certificate to a test bundle without touching the
+/// filesystem. Used by certificate-path regression tests.
+pub fn addTrustedDer(
+    bundle: *std.crypto.Certificate.Bundle,
+    gpa: std.mem.Allocator,
+    der: []const u8,
+    now_sec: i64,
+) !void {
+    const certificate: std.crypto.Certificate = .{
+        .buffer = der,
+        .index = 0,
+    };
+    const parsed = try certificate.parse();
+    try parsed.verify(parsed, now_sec);
+    const start: u32 = @intCast(bundle.bytes.items.len);
+    try bundle.bytes.appendSlice(gpa, der);
+    try bundle.map.putContext(gpa, .{
+        .start = start + parsed.subject_slice.start,
+        .end = start + parsed.subject_slice.end,
+    }, start, .{ .cb = bundle });
 }

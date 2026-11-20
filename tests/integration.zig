@@ -1147,7 +1147,7 @@ test "TLS 1.3 adapters exchange application data" {
     }
     try std.testing.expectEqualStrings("hello", &response);
 
-    stream.shutdown(io, .both) catch |err| switch (err) {
+    stream.shutdown(io, .send) catch |err| switch (err) {
         error.NotConnected => {},
         else => return err,
     };
@@ -2034,4 +2034,656 @@ test "Trojan fallback receives an unauthenticated HTTP probe" {
     };
     instance.stop();
     _ = fallback_future.await(io);
+}
+
+const WsAdapterContext = struct {
+    listener: *std.Io.net.Server,
+    cert: *tls13.test_cert.Certificate,
+    alpn: []const u8,
+    error_code: ?anyerror = null,
+};
+
+fn wsAdapterServer(io: std.Io, context: *WsAdapterContext) void {
+    wsAdapterServerRun(io, context) catch |err| {
+        context.error_code = err;
+    };
+}
+
+fn wsAdapterServerRun(io: std.Io, context: *WsAdapterContext) !void {
+    const accepted = try context.listener.accept(io);
+    const remote: marmo.Endpoint = .{ .ip = accepted.socket.address };
+    const local: marmo.Endpoint = .{ .ip = context.listener.socket.address };
+    const tcp = try marmo.TcpStream.create(allocator, accepted, local, remote);
+
+    const tls = marmo.TlsServerStream.create(
+        io,
+        allocator,
+        tcp.stream(),
+        .{
+            .certificate_chain = &.{context.cert.der},
+            .private_key = context.cert.key_pair,
+            .alpn_protocols = &.{context.alpn},
+        },
+    ) catch |err| {
+        tcp.stream().close(io);
+        return err;
+    };
+    if (!std.mem.eql(
+        u8,
+        tls.negotiatedProtocol() orelse "",
+        context.alpn,
+    )) return error.TestUnexpectedResult;
+
+    const ws = marmo.WsStream.createServer(
+        io,
+        allocator,
+        tls.stream(),
+        .{ .path = "/ws" },
+    ) catch |err| {
+        tls.stream().close(io);
+        return err;
+    };
+    const stream = ws.stream();
+    defer stream.close(io);
+
+    var buffer: [128]u8 = undefined;
+    while (true) {
+        var buffers = [_][]u8{&buffer};
+        const read_len = try stream.read(io, &buffers);
+        if (read_len == 0) break;
+        _ = try stream.write(io, &.{buffer[0..read_len]});
+    }
+}
+
+test "WebSocket over TLS echoes and negotiates ALPN" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var cert = try tls13.test_cert.generate(allocator, io);
+    defer cert.deinit(allocator);
+
+    var bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var listener = try bind.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+
+    var context: WsAdapterContext = .{
+        .listener = &listener,
+        .cert = &cert,
+        .alpn = "http/1.1",
+    };
+    var server_future = io.async(wsAdapterServer, .{ io, &context });
+
+    var address: std.Io.net.IpAddress = .{
+        .ip4 = .loopback(listener.socket.address.getPort()),
+    };
+    const accepted = try std.Io.net.IpAddress.connect(
+        &address,
+        io,
+        .{ .mode = .stream },
+    );
+    const remote: marmo.Endpoint = .{ .ip = accepted.socket.address };
+    const tcp = try marmo.TcpStream.create(allocator, accepted, remote, remote);
+    const tls = marmo.TlsClientStream.create(
+        io,
+        allocator,
+        tcp.stream(),
+        .{
+            .server_name = "localhost",
+            .insecure = true,
+            .alpn_protocols = &.{"http/1.1"},
+        },
+    ) catch |err| {
+        tcp.stream().close(io);
+        return err;
+    };
+    try std.testing.expectEqualStrings(
+        "http/1.1",
+        tls.negotiatedProtocol() orelse "",
+    );
+
+    const ws = marmo.WsStream.createClient(
+        io,
+        allocator,
+        tls.stream(),
+        .{ .host = "localhost", .path = "/ws" },
+    ) catch |err| {
+        tls.stream().close(io);
+        return err;
+    };
+    const stream = ws.stream();
+    defer stream.close(io);
+
+    _ = try stream.write(io, &.{"hello over ws"});
+    var response: [13]u8 = undefined;
+    try streamReadExact(io, stream, &response);
+    try std.testing.expectEqualStrings("hello over ws", &response);
+
+    stream.shutdown(io, .send) catch |err| switch (err) {
+        error.NotConnected => {},
+        else => return err,
+    };
+    _ = server_future.await(io);
+    if (context.error_code) |err| return err;
+}
+
+const H2AdapterContext = struct {
+    listener: *std.Io.net.Server,
+    cert: *tls13.test_cert.Certificate,
+    error_code: ?anyerror = null,
+    /// Lets the half-closed server keep the socket open until the client has
+    /// consumed the response, avoiding a close-with-unread-data RST.
+    done: std.Io.Event = .unset,
+};
+
+fn h2AdapterServer(io: std.Io, context: *H2AdapterContext) void {
+    h2AdapterServerRun(io, context) catch |err| {
+        context.error_code = err;
+    };
+}
+
+fn h2AdapterServerRun(io: std.Io, context: *H2AdapterContext) !void {
+    const accepted = try context.listener.accept(io);
+    const remote: marmo.Endpoint = .{ .ip = accepted.socket.address };
+    const local: marmo.Endpoint = .{ .ip = context.listener.socket.address };
+    const tcp = try marmo.TcpStream.create(allocator, accepted, local, remote);
+
+    const tls = marmo.TlsServerStream.create(
+        io,
+        allocator,
+        tcp.stream(),
+        .{
+            .certificate_chain = &.{context.cert.der},
+            .private_key = context.cert.key_pair,
+            .alpn_protocols = &.{"h2"},
+        },
+    ) catch |err| {
+        tcp.stream().close(io);
+        return err;
+    };
+    if (!std.mem.eql(u8, tls.negotiatedProtocol() orelse "", "h2")) {
+        return error.TestUnexpectedResult;
+    }
+
+    const h2 = marmo.H2Stream.createServer(
+        io,
+        allocator,
+        tls.stream(),
+        .{},
+    ) catch |err| {
+        tls.stream().close(io);
+        return err;
+    };
+    const stream = h2.stream();
+    defer stream.close(io);
+
+    var buffer: [128]u8 = undefined;
+    while (true) {
+        var buffers = [_][]u8{&buffer};
+        const read_len = try stream.read(io, &buffers);
+        if (read_len == 0) break;
+        _ = try stream.write(io, &.{buffer[0..read_len]});
+    }
+}
+
+test "HTTP/2 over TLS echoes and negotiates ALPN" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var cert = try tls13.test_cert.generate(allocator, io);
+    defer cert.deinit(allocator);
+
+    var bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var listener = try bind.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+
+    var context: H2AdapterContext = .{
+        .listener = &listener,
+        .cert = &cert,
+    };
+    var server_future = io.async(h2AdapterServer, .{ io, &context });
+
+    var address: std.Io.net.IpAddress = .{
+        .ip4 = .loopback(listener.socket.address.getPort()),
+    };
+    const accepted = try std.Io.net.IpAddress.connect(
+        &address,
+        io,
+        .{ .mode = .stream },
+    );
+    const remote: marmo.Endpoint = .{ .ip = accepted.socket.address };
+    const tcp = try marmo.TcpStream.create(allocator, accepted, remote, remote);
+    const tls = marmo.TlsClientStream.create(
+        io,
+        allocator,
+        tcp.stream(),
+        .{
+            .server_name = "localhost",
+            .insecure = true,
+            .alpn_protocols = &.{"h2"},
+        },
+    ) catch |err| {
+        tcp.stream().close(io);
+        return err;
+    };
+    try std.testing.expectEqualStrings(
+        "h2",
+        tls.negotiatedProtocol() orelse "",
+    );
+
+    const h2 = marmo.H2Stream.createClient(
+        io,
+        allocator,
+        tls.stream(),
+        .{ .host = "localhost", .path = "/" },
+    ) catch |err| {
+        tls.stream().close(io);
+        return err;
+    };
+    const stream = h2.stream();
+    defer stream.close(io);
+
+    _ = try stream.write(io, &.{"hello over h2"});
+    var response: [13]u8 = undefined;
+    try streamReadExact(io, stream, &response);
+    try std.testing.expectEqualStrings("hello over h2", &response);
+
+    stream.shutdown(io, .send) catch |err| switch (err) {
+        error.NotConnected => {},
+        else => return err,
+    };
+    _ = server_future.await(io);
+    if (context.error_code) |err| return err;
+}
+
+const HoldContext = struct {
+    listener: *std.Io.net.Server,
+    release: std.Io.Event = .unset,
+    error_code: ?anyerror = null,
+};
+
+fn holdServer(io: std.Io, context: *HoldContext) void {
+    const stream = context.listener.accept(io) catch |err| {
+        context.error_code = err;
+        return;
+    };
+    defer stream.close(io);
+    context.release.waitUncancelable(io);
+}
+
+fn socksConnectRequest(buffer: []u8, port: u16) []const u8 {
+    buffer[0] = 5;
+    buffer[1] = 1;
+    buffer[2] = 0;
+    buffer[3] = 1;
+    @memcpy(buffer[4..8], &[_]u8{ 127, 0, 0, 1 });
+    buffer[8] = @intCast(port >> 8);
+    buffer[9] = @intCast(port & 0xff);
+    return buffer[0..10];
+}
+
+test "limits reject connections over max_connections" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var diagnostic: marmo.Diagnostic = .{};
+    const config: marmo.Config = .{
+        .limits = .{ .max_connections = 1 },
+        .inbounds = &.{
+            .{ .tag = "socks", .protocol = .socks5, .listen = "127.0.0.1:0" },
+        },
+        .route = .{ .final = "direct" },
+    };
+    var instance = try marmo.Instance.init(allocator, io, config, &diagnostic);
+    defer instance.deinit();
+    try instance.start();
+
+    const endpoint = instance.inboundEndpoint("socks") orelse
+        return error.TestUnexpectedResult;
+    const address = switch (endpoint) {
+        .ip => |ip| ip,
+        .domain => return error.TestUnexpectedResult,
+    };
+
+    const first = try std.Io.net.IpAddress.connect(
+        &address,
+        io,
+        .{ .mode = .stream },
+    );
+    defer first.close(io);
+    var waits: usize = 0;
+    while (instance.metricsSnapshot().connections_active == 0 and waits < 200) : (waits += 1) {
+        try std.Io.sleep(io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake);
+    }
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        instance.metricsSnapshot().connections_active,
+    );
+
+    const second = try std.Io.net.IpAddress.connect(
+        &address,
+        io,
+        .{ .mode = .stream },
+    );
+    defer second.close(io);
+
+    var buffer: [1]u8 = undefined;
+    var buffers = [_][]u8{&buffer};
+    const read_len = second.read(io, &buffers) catch 0;
+    try std.testing.expectEqual(@as(usize, 0), read_len);
+    waits = 0;
+    while (instance.metricsSnapshot().connections_rejected == 0 and waits < 200) : (waits += 1) {
+        try std.Io.sleep(io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake);
+    }
+    const snapshot = instance.metricsSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), snapshot.connections_rejected);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.connections_active);
+}
+
+test "handshake timeout closes a silent inbound" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var diagnostic: marmo.Diagnostic = .{};
+    const config: marmo.Config = .{
+        .limits = .{ .handshake_timeout_s = 1 },
+        .inbounds = &.{
+            .{ .tag = "socks", .protocol = .socks5, .listen = "127.0.0.1:0" },
+        },
+        .route = .{ .final = "direct" },
+    };
+    var instance = try marmo.Instance.init(allocator, io, config, &diagnostic);
+    defer instance.deinit();
+    try instance.start();
+
+    const endpoint = instance.inboundEndpoint("socks") orelse
+        return error.TestUnexpectedResult;
+    const address = switch (endpoint) {
+        .ip => |ip| ip,
+        .domain => return error.TestUnexpectedResult,
+    };
+    const client = try std.Io.net.IpAddress.connect(
+        &address,
+        io,
+        .{ .mode = .stream },
+    );
+    defer client.close(io);
+
+    try std.Io.sleep(io, .{ .nanoseconds = 1300 * std.time.ns_per_ms }, .awake);
+    var buffer: [1]u8 = undefined;
+    var buffers = [_][]u8{&buffer};
+    const read_len = client.read(io, &buffers) catch 0;
+    try std.testing.expectEqual(@as(usize, 0), read_len);
+    var waits: usize = 0;
+    while (waits < 200) : (waits += 1) {
+        const current = instance.metricsSnapshot();
+        if (current.timeouts_handshake >= 1 and
+            current.connections_active == 0)
+        {
+            break;
+        }
+        try std.Io.sleep(io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake);
+    }
+    const snapshot = instance.metricsSnapshot();
+    try std.testing.expect(snapshot.timeouts_handshake >= 1);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.connections_active);
+}
+
+test "idle timeout closes a relay with no traffic" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var hold_bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var hold_listener = try hold_bind.listen(io, .{ .reuse_address = true });
+    defer hold_listener.deinit(io);
+    var hold_context: HoldContext = .{ .listener = &hold_listener };
+    var hold_future = io.async(holdServer, .{ io, &hold_context });
+
+    var diagnostic: marmo.Diagnostic = .{};
+    const config: marmo.Config = .{
+        .limits = .{ .idle_timeout_s = 1 },
+        .inbounds = &.{
+            .{ .tag = "socks", .protocol = .socks5, .listen = "127.0.0.1:0" },
+        },
+        .route = .{ .final = "direct" },
+    };
+    var instance = try marmo.Instance.init(allocator, io, config, &diagnostic);
+    defer instance.deinit();
+    try instance.start();
+
+    const endpoint = instance.inboundEndpoint("socks") orelse
+        return error.TestUnexpectedResult;
+    const address = switch (endpoint) {
+        .ip => |ip| ip,
+        .domain => return error.TestUnexpectedResult,
+    };
+    const client = try std.Io.net.IpAddress.connect(
+        &address,
+        io,
+        .{ .mode = .stream },
+    );
+    defer client.close(io);
+    try socksNegotiate(io, client);
+
+    var request_buffer: [10]u8 = undefined;
+    try tcpWrite(io, client, socksConnectRequest(
+        &request_buffer,
+        hold_listener.socket.address.getPort(),
+    ));
+    var reply: [10]u8 = undefined;
+    try tcpReadExact(io, client, &reply);
+    try std.testing.expectEqual(@as(u8, 0), reply[1]);
+
+    try std.Io.sleep(io, .{ .nanoseconds = 1300 * std.time.ns_per_ms }, .awake);
+    var buffer: [1]u8 = undefined;
+    var buffers = [_][]u8{&buffer};
+    const read_len = client.read(io, &buffers) catch 0;
+    try std.testing.expectEqual(@as(usize, 0), read_len);
+    try std.Io.sleep(io, .{ .nanoseconds = 100 * std.time.ns_per_ms }, .awake);
+    var waits: usize = 0;
+    while (waits < 200) : (waits += 1) {
+        const current = instance.metricsSnapshot();
+        if (current.timeouts_idle >= 1 and current.connections_active == 0) {
+            break;
+        }
+        try std.Io.sleep(io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake);
+    }
+    const snapshot = instance.metricsSnapshot();
+    try std.testing.expect(snapshot.timeouts_idle >= 1);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.connections_active);
+
+    hold_context.release.set(io);
+    _ = hold_future.await(io);
+    if (hold_context.error_code) |err| return err;
+}
+
+test "half-close grace closes the remaining direction" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var hold_bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var hold_listener = try hold_bind.listen(io, .{ .reuse_address = true });
+    defer hold_listener.deinit(io);
+    var hold_context: HoldContext = .{ .listener = &hold_listener };
+    var hold_future = io.async(holdServer, .{ io, &hold_context });
+
+    var diagnostic: marmo.Diagnostic = .{};
+    const config: marmo.Config = .{
+        .limits = .{
+            .idle_timeout_s = 60,
+            .downlink_only_s = 1,
+        },
+        .inbounds = &.{
+            .{ .tag = "socks", .protocol = .socks5, .listen = "127.0.0.1:0" },
+        },
+        .route = .{ .final = "direct" },
+    };
+    var instance = try marmo.Instance.init(allocator, io, config, &diagnostic);
+    defer instance.deinit();
+    try instance.start();
+
+    const endpoint = instance.inboundEndpoint("socks") orelse
+        return error.TestUnexpectedResult;
+    const address = switch (endpoint) {
+        .ip => |ip| ip,
+        .domain => return error.TestUnexpectedResult,
+    };
+    const client = try std.Io.net.IpAddress.connect(
+        &address,
+        io,
+        .{ .mode = .stream },
+    );
+    defer client.close(io);
+    try socksNegotiate(io, client);
+
+    var request_buffer: [10]u8 = undefined;
+    try tcpWrite(io, client, socksConnectRequest(
+        &request_buffer,
+        hold_listener.socket.address.getPort(),
+    ));
+    var reply: [10]u8 = undefined;
+    try tcpReadExact(io, client, &reply);
+    try std.testing.expectEqual(@as(u8, 0), reply[1]);
+
+    try client.shutdown(io, .send);
+    try std.Io.sleep(io, .{ .nanoseconds = 1300 * std.time.ns_per_ms }, .awake);
+    var buffer: [1]u8 = undefined;
+    var buffers = [_][]u8{&buffer};
+    const read_len = client.read(io, &buffers) catch 0;
+    try std.testing.expectEqual(@as(usize, 0), read_len);
+    const snapshot = instance.metricsSnapshot();
+    try std.testing.expect(snapshot.timeouts_idle >= 1);
+
+    hold_context.release.set(io);
+    _ = hold_future.await(io);
+    if (hold_context.error_code) |err| return err;
+}
+
+fn h2HalfClosedServerRun(io: std.Io, context: *H2AdapterContext) !void {
+    const accepted = try context.listener.accept(io);
+    const remote: marmo.Endpoint = .{ .ip = accepted.socket.address };
+    const local: marmo.Endpoint = .{ .ip = context.listener.socket.address };
+    const tcp = try marmo.TcpStream.create(allocator, accepted, local, remote);
+
+    const tls = marmo.TlsServerStream.create(
+        io,
+        allocator,
+        tcp.stream(),
+        .{
+            .certificate_chain = &.{context.cert.der},
+            .private_key = context.cert.key_pair,
+            .alpn_protocols = &.{"h2"},
+        },
+    ) catch |err| {
+        tcp.stream().close(io);
+        return err;
+    };
+    const h2 = marmo.H2Stream.createServer(
+        io,
+        allocator,
+        tls.stream(),
+        .{},
+    ) catch |err| {
+        tls.stream().close(io);
+        return err;
+    };
+    const stream = h2.stream();
+    defer stream.close(io);
+
+    var buffer: [16]u8 = undefined;
+    while (true) {
+        var buffers = [_][]u8{&buffer};
+        if (try stream.read(io, &buffers) == 0) break;
+    }
+
+    // The peer half-closed its side. Keep writing past its initial flow
+    // control window; the connection must still process WINDOW_UPDATE.
+    const chunk = try allocator.alloc(u8, 16 * 1024);
+    defer allocator.free(chunk);
+    @memset(chunk, 0x5a);
+    var written: usize = 0;
+    while (written < 3 * 1024 * 1024) : (written += chunk.len) {
+        _ = try stream.write(io, &.{chunk});
+    }
+    stream.shutdown(io, .send) catch |err| switch (err) {
+        error.NotConnected => {},
+        else => return err,
+    };
+    context.done.waitUncancelable(io);
+}
+
+test "HTTP/2 keeps reading flow control after the peer half-closes" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var cert = try tls13.test_cert.generate(allocator, io);
+    defer cert.deinit(allocator);
+
+    var bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var listener = try bind.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+
+    var context: H2AdapterContext = .{
+        .listener = &listener,
+        .cert = &cert,
+    };
+    var server_future = io.async(h2HalfClosedServerRun, .{ io, &context });
+
+    var address: std.Io.net.IpAddress = .{
+        .ip4 = .loopback(listener.socket.address.getPort()),
+    };
+    const accepted = try std.Io.net.IpAddress.connect(
+        &address,
+        io,
+        .{ .mode = .stream },
+    );
+    const remote: marmo.Endpoint = .{ .ip = accepted.socket.address };
+    const tcp = try marmo.TcpStream.create(allocator, accepted, remote, remote);
+    const tls = marmo.TlsClientStream.create(
+        io,
+        allocator,
+        tcp.stream(),
+        .{
+            .server_name = "localhost",
+            .insecure = true,
+            .alpn_protocols = &.{"h2"},
+        },
+    ) catch |err| {
+        tcp.stream().close(io);
+        return err;
+    };
+    const h2 = marmo.H2Stream.createClient(
+        io,
+        allocator,
+        tls.stream(),
+        .{ .host = "localhost", .path = "/" },
+    ) catch |err| {
+        tls.stream().close(io);
+        return err;
+    };
+    const stream = h2.stream();
+    defer stream.close(io);
+
+    _ = try stream.write(io, &.{"request"});
+    try stream.shutdown(io, .send);
+
+    defer context.done.set(io);
+    var buffer: [16 * 1024]u8 = undefined;
+    var total: usize = 0;
+    while (total < 3 * 1024 * 1024) {
+        var buffers = [_][]u8{&buffer};
+        const read_len = try stream.read(io, &buffers);
+        if (read_len == 0) break;
+        total += read_len;
+    }
+    try std.testing.expectEqual(@as(usize, 3 * 1024 * 1024), total);
+    context.done.set(io);
+    try server_future.await(io);
+    if (context.error_code) |err| return err;
 }

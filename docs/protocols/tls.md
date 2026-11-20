@@ -2,9 +2,9 @@
 
 Sources consult: [RFC 8446](https://www.rfc-editor.org/rfc/rfc8446)
 (TLS 1.3), [RFC 8448](https://www.rfc-editor.org/rfc/rfc8448) (example
-handshake traces), and the Zig 0.17.1 `std.crypto.tls.Client` API for the
-client half. The server half is implemented in `packages/tls13` (ADR-0007,
-ADR-0010).
+handshake traces), [RFC 7301](https://www.rfc-editor.org/rfc/rfc7301) (ALPN),
+and the Zig 0.17.1 `std.crypto` APIs for crypto primitives. Both client and
+server are implemented in `packages/tls13` (ADR-0007, ADR-0010, ADR-0012).
 
 ## Implemented scope
 
@@ -13,19 +13,28 @@ ADR-0010).
 - Key exchange group `x25519` (`0x001d`), signature
   `ecdsa_secp256r1_sha256` (`0x0403`).
 - Server handshake: ClientHello, ServerHello, middlebox-compatibility CCS,
-  EncryptedExtensions, Certificate, CertificateVerify, Finished, client
-  Finished verification, and `close_notify`.
+  EncryptedExtensions (including ALPN), Certificate, CertificateVerify,
+  Finished, client Finished verification, and `close_notify`.
+- Client handshake: ClientHello with SNI, supported groups, key share,
+  signature algorithms, and optional ALPN; ServerHello, encrypted server
+  flight with chain/host verification, server Finished verification, and the
+  client Finished.
 - Record protection: AES-128-GCM, 12-byte per-direction nonce XORed with a
   64-bit sequence number, 16-byte tag, maximum plaintext 16 KiB, maximum
   ciphertext 16 KiB + 256.
 - Key schedule: HKDF-SHA256 with `HKDF-Expand-Label`, transcript hashes, and
   constant-time Finished comparison.
 - Certificate/key loading from PEM `CERTIFICATE` blocks or DER, and a PKCS#8
-  or SEC1 ECDSA P-256 private key. The leaf must be P-256 and match the key.
+  or SEC1 ECDSA P-256 private key. The server leaf must be P-256 and match the
+  key. The client accepts ECDSA P-256/P-384, Ed25519, and RSA certificate
+  signatures and verifies chains against the system CA bundle.
+- ALPN (RFC 7301): the client sends `alpn_protocols`; the server selects the
+  first configured protocol the client offered; a non-empty server list with
+  no overlap fails the handshake.
 
-No client authentication, PSK, session tickets, HelloRetryRequest, ALPN
-selection, 0-RTT, or KeyUpdate is implemented. A post-handshake KeyUpdate is
-rejected as a protocol violation rather than silently ignored.
+No client authentication, PSK, session tickets, HelloRetryRequest, 0-RTT, or
+KeyUpdate is implemented. A post-handshake KeyUpdate is rejected as a protocol
+violation rather than silently ignored.
 
 ## Key schedule checks
 
@@ -53,7 +62,9 @@ traces and no private keys. Provenance and license are recorded in
 
 ## Known gaps
 
-- No KeyUpdate, client auth, PSK/tickets, ALPN, or 0-RTT.
+- No KeyUpdate, client auth, PSK, or tickets, and no 0-RTT.
+- ALPN is implemented but there is no application-protocol mismatch alert
+  beyond a typed handshake failure.
 - No post-handshake end-to-end fuzz target: the record codec and handshake
   parser are fuzzed separately, but an authenticated post-handshake stream
   (KeyUpdate, empty records, alert handling) is covered by unit/integration

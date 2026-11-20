@@ -5,6 +5,8 @@
     .minimum_zig_version = "0.17.1",
     .dependencies = .{
         .tls13 = .{ .path = "packages/tls13" },
+        .http2 = .{ .path = "packages/http2" },
+        .ws = .{ .path = "packages/ws" },
     },
     .paths = .{
         "build.zig",
