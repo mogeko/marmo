@@ -757,12 +757,16 @@ fn compileTlsTransport(
     tls_dialer.allow_truncation_attacks =
         tls_config.allow_truncation_attacks;
     if (tls_config.client_certificate) |certificate_path| {
-        const client_credentials = tls_credentials.loadClientCredentials(
+        var client_credentials = tls_credentials.loadClientCredentials(
             allocator,
             io,
             certificate_path,
             tls_config.client_private_key.?,
         ) catch return error.InvalidConfig;
+        defer std.crypto.secureZero(
+            u8,
+            std.mem.asBytes(&client_credentials.private_key),
+        );
         tls_dialer.client_certificate_chain =
             client_credentials.certificate_chain;
         tls_dialer.client_private_key = client_credentials.private_key;

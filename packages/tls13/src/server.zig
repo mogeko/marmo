@@ -84,6 +84,7 @@ pub const Server = struct {
     post_handshake: [handshake.max_handshake]u8 = undefined,
     post_handshake_len: usize = 0,
     pending_key_update_response: std.atomic.Value(bool) = .init(false),
+    negotiated_suite: record.CipherSuite = .aes_128_gcm_sha256,
     allow_truncation_attacks: bool = false,
     closed: bool = false,
     eof: bool = false,
@@ -151,7 +152,7 @@ pub const Server = struct {
     }
 
     pub fn negotiatedCipherSuite(self: *const Server) record.CipherSuite {
-        return self.write_keys.suite;
+        return self.negotiated_suite;
     }
 
     pub fn negotiatedGroup(self: *const Server) u16 {
@@ -290,6 +291,7 @@ pub const Server = struct {
             suite,
             self.client_app_secret,
         ) catch return error.HandshakeFailed;
+        self.negotiated_suite = suite;
         std.crypto.secureZero(u8, std.mem.asBytes(&self.key_schedule));
     }
 
@@ -378,12 +380,20 @@ pub const Server = struct {
     }
 
     fn sendCertificateRequest(self: *Server) Error!void {
-        var extension_buffer: [16]u8 = undefined;
+        const schemes = [_]u16{
+            handshake.signature_ecdsa_secp256r1_sha256,
+            handshake.signature_ecdsa_secp384r1_sha384,
+            handshake.signature_ed25519,
+            handshake.signature_rsa_pss_sha256,
+            handshake.signature_rsa_pss_sha384,
+            handshake.signature_rsa_pss_sha512,
+        };
+        var extension_buffer: [32]u8 = undefined;
         var extensions = handshake.Encoder.init(&extension_buffer);
         try extensions.writeU16(handshake.extension_signature_algorithms);
-        try extensions.writeU16(4);
-        try extensions.writeU16(2);
-        try extensions.writeU16(handshake.signature_ecdsa_secp256r1_sha256);
+        try extensions.writeU16(2 + schemes.len * 2);
+        try extensions.writeU16(schemes.len * 2);
+        for (schemes) |scheme| try extensions.writeU16(scheme);
 
         var body = handshake.Encoder.init(self.message_buffer[4..]);
         try body.writeU8(0); // certificate_request_context
@@ -526,6 +536,7 @@ pub const Server = struct {
     ) Error!usize {
         var cursor: handshake.Cursor = .{ .buf = message[4..] };
         const context_len = cursor.readU8() catch return error.HandshakeFailed;
+        if (context_len != 0) return error.HandshakeFailed;
         _ = cursor.readBytes(context_len) catch return error.HandshakeFailed;
         const list_len = cursor.readU24() catch return error.HandshakeFailed;
         var list = cursor.sub(list_len) catch return error.HandshakeFailed;
@@ -788,11 +799,11 @@ pub const Server = struct {
                 const request_update = handshake.parseKeyUpdate(message) catch
                     return error.ProtocolViolation;
                 self.client_app_secret = handshake.updateSecret(
-                    self.write_keys.suite,
+                    self.negotiated_suite,
                     self.client_app_secret,
                 ) catch return error.ProtocolViolation;
                 self.read_keys = handshake.keysFromSecret(
-                    self.write_keys.suite,
+                    self.negotiated_suite,
                     self.client_app_secret,
                 ) catch return error.ProtocolViolation;
                 if (request_update) {
@@ -823,11 +834,11 @@ pub const Server = struct {
         };
         self.output.writeAll(sealed) catch return error.ProtocolViolation;
         self.server_app_secret = handshake.updateSecret(
-            self.write_keys.suite,
+            self.negotiated_suite,
             self.server_app_secret,
         ) catch return error.ProtocolViolation;
         self.write_keys = handshake.keysFromSecret(
-            self.write_keys.suite,
+            self.negotiated_suite,
             self.server_app_secret,
         ) catch return error.ProtocolViolation;
     }
@@ -900,7 +911,8 @@ fn computeKeyExchange(
     errdefer result.deinit();
     switch (group) {
         handshake.group_x25519 => {
-            const key_pair = std.crypto.dh.X25519.KeyPair.generate(io);
+            var key_pair = std.crypto.dh.X25519.KeyPair.generate(io);
+            defer std.crypto.secureZero(u8, std.mem.asBytes(&key_pair));
             result.secret = key_pair.secret_key;
             result.public[0..32].* = key_pair.public_key;
             result.public_len = 32;
@@ -1669,6 +1681,50 @@ test "an expired trust anchor is rejected" {
             .verify_chain = true,
             .now_sec = now,
             .bundle = &bundle,
+        }, &leaf),
+    );
+}
+
+test "client certificate name constraints are enforced" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var root = try test_cert.generateParams(allocator, io, .{
+        .common_name = "marmo nc root",
+        .san = null,
+        .ca = true,
+        .include_basic_constraints = true,
+        .include_key_usage = true,
+        .name_constraints_dns = ".corp.example",
+    });
+    defer root.deinit(allocator);
+    var client_cert = try test_cert.generateParams(allocator, io, .{
+        .common_name = "client",
+        .issuer_name = "marmo nc root",
+        .issuer_key = root.key_pair,
+        .san = "evil.test",
+        .include_basic_constraints = true,
+        .include_key_usage = true,
+        .eku_client_auth = true,
+    });
+    defer client_cert.deinit(allocator);
+
+    var bundle: std.crypto.Certificate.Bundle = .empty;
+    defer bundle.deinit(allocator);
+    const now = std.Io.Timestamp.now(io, .real).toSeconds();
+    try test_cert.addTrustedDer(&bundle, allocator, root.der, now);
+
+    var leaf: cert_path.Leaf = .{};
+    try std.testing.expectError(
+        error.CertificateRejected,
+        cert_path.verifyClientChain(&.{client_cert.der}, .{
+            .host = null,
+            .verify_chain = true,
+            .now_sec = now,
+            .bundle = &bundle,
+            .purpose = .client,
         }, &leaf),
     );
 }

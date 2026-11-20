@@ -534,3 +534,13 @@ found no P0, two HTTP/2 P1s, and one WebSocket P2 regression. Fixed:
 Remaining recorded gaps: server-sent 1xx and stateful H2 fuzz coverage,
 the H2 8 KiB stream window throughput trade-off, borrowed `headers()` slices,
 WS Origin/auth and lazy compression memory, and external audit.
+
+A TLS follow-up on the same baseline found no P0/P1 and two P2s, now fixed:
+client-certificate CA name constraints are enforced against every SAN, and
+the new client-CA loader shape-checks DER before std parsing, so a malformed
+CA file no longer aborts the process. The CertificateRequest advertises all
+accepted signature schemes, the certificate_request_context is checked,
+`negotiatedCipherSuite` uses a post-handshake field, and client-key stack
+copies are zeroized. Remaining TLS gaps include anchor `pathLen`/`keyUsage`,
+leaf `keyUsage`, missing alerts, single-record handshake messages, and fuzz
+coverage for the client-auth parsers.

@@ -46,6 +46,16 @@
 - `tls_key_update` fuzz target, package loopback matrices for every
   suite/group, mTLS policy tests, KeyUpdate-under-traffic tests, and
   HelloRetryRequest parser tests.
+- Client-certificate chains now enforce CA name constraints on every SAN
+  (DNS and IP), not just the server host name. Client CA files are
+  shape-checked before std parsing, DER CA files are accepted, and
+  `tls.client_ca` without `client_auth` is a config error.
+- CertificateRequest advertises every signature scheme the server accepts;
+  the client sends a zero-length certificate_request_context and the server
+  rejects a non-zero context.
+- `negotiatedCipherSuite()` uses a dedicated post-handshake field, so KeyUpdate
+  read paths no longer read a field the write path concurrently replaces.
+  X25519 ephemeral and loaded client-key stack copies are zeroized.
 
 - ALPN negotiation on the client and server. `Options.alpn_protocols`,
   `ServerOptions.alpn_protocols`, and `negotiatedProtocol()` are available on
@@ -79,7 +89,10 @@
 - Client-auth chain validation uses the configured bundle only; a future
   `certificate_authorities` request hint and per-identity policy are out of
   scope.
-- No external cryptographic audit. Tests: 47 package tests.
+- Trust-anchor `pathLen`/`keyUsage` and leaf `keyUsage` are still not
+  enforced; a CA with `pathLen=0` can sign an intermediate. No TLS alert is
+  sent on most handshake failures.
+- No external cryptographic audit. Tests: 48 package tests.
 
 ## 0.0.1 - 2026-11-19
 

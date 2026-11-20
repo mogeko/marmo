@@ -31,6 +31,8 @@ pub const Params = struct {
     include_key_usage: bool = false,
     eku_server_auth: bool = false,
     eku_client_auth: bool = false,
+    /// Adds a critical permitted DNS name constraint to a CA certificate.
+    name_constraints_dns: ?[]const u8 = null,
     /// Emits a zero-length SIGNATURE BIT STRING for parser hardening tests.
     empty_signature: bool = false,
     /// Wrapper tag for the [3] extensions field. Non-0xa3 values exercise
@@ -314,6 +316,24 @@ fn buildExtensions(gpa: std.mem.Allocator, params: Params) ![]u8 {
             &extensions,
             &.{ 0x55, 0x1d, 0x25 },
             false,
+            value,
+        );
+    }
+
+    if (params.name_constraints_dns) |dns| {
+        const general = try tlv(gpa, 0x82, dns);
+        defer gpa.free(general);
+        const subtree = try tlv(gpa, 0x30, general);
+        defer gpa.free(subtree);
+        const permitted = try tlv(gpa, 0xa0, subtree);
+        defer gpa.free(permitted);
+        const value = try tlv(gpa, 0x30, permitted);
+        defer gpa.free(value);
+        try appendExtension(
+            gpa,
+            &extensions,
+            &.{ 0x55, 0x1d, 0x1e },
+            true,
             value,
         );
     }

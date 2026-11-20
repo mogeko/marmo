@@ -112,7 +112,7 @@ and behavior may change between minor releases.
 
 ### Tests
 
-- 265 tests: 61 root unit, 4 public API, 29 integration, 47 tls13, 44 http2,
+- 267 tests: 61 root unit, 4 public API, 30 integration, 48 tls13, 44 http2,
   66 ws, and 14 fuzz corpus tests, passing in Debug and ReleaseSafe.
 - Local interoperability checks pass for Shadowsocks 2022 (AES-128/256,
   TCP/UDP), VLESS (TCP, simple UoT, XUDP, TCP+UDP) and Trojan (TCP/UDP), in

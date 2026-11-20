@@ -2776,3 +2776,26 @@ test "HTTP/2 keeps reading flow control after the peer half-closes" {
     try server_future.await(io);
     if (context.error_code) |err| return err;
 }
+
+test "a malformed client CA file is rejected without aborting" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "bad-ca.pem",
+        .data = "-----BEGIN CERTIFICATE-----\nMIL//wA=\n-----END CERTIFICATE-----\n",
+    });
+    var path_buffer: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(
+        &path_buffer,
+        ".zig-cache/tmp/{s}/bad-ca.pem",
+        .{tmp.sub_path},
+    );
+    try std.testing.expectError(
+        error.InvalidCredentials,
+        marmo.internal.tls_credentials.loadClientCa(allocator, io, path),
+    );
+}

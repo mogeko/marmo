@@ -355,6 +355,11 @@ fn validateInboundTlsAuth(
             );
             return error.InvalidConfig;
         }
+        diagnostic.set(
+            "inbounds[{d}].tls.client_ca: requires client_auth",
+            .{index},
+        );
+        return error.InvalidConfig;
     }
 }
 

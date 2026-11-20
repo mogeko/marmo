@@ -73,6 +73,7 @@ fn verifyChain(
             params.now_sec,
             params.host,
             params.purpose,
+            chain[0],
         );
     }
     if (trusted) return;
@@ -84,6 +85,7 @@ fn verifyChain(
             params.host,
             index - 1,
             params.purpose,
+            chain[0],
         );
         const subject = parse(chain[index]) catch
             return error.CertificateRejected;
@@ -97,6 +99,7 @@ fn verifyChain(
                 params.now_sec,
                 params.host,
                 params.purpose,
+                chain[0],
             )) {
                 trusted = true;
                 break;
@@ -476,6 +479,7 @@ fn bundleTrusts(
     now_sec: i64,
     host: ?[]const u8,
     purpose: Purpose,
+    leaf_der: []const u8,
 ) Error!bool {
     bundle.verify(subject, now_sec) catch |err| switch (err) {
         error.CertificateIssuerNotFound => return false,
@@ -505,6 +509,9 @@ fn bundleTrusts(
         ) catch return error.CertificateRejected;
         if (extensions.name_constraints) |constraints| {
             if (host) |name| try checkNameConstraints(constraints, name);
+            if (purpose == .client) {
+                try checkClientNameConstraints(constraints, leaf_der);
+            }
         }
         if (extensions.eku_allows_purpose) |allowed| {
             if (!allowed) return error.CertificateRejected;
@@ -530,6 +537,7 @@ fn checkIssuer(
     host: ?[]const u8,
     ca_below: usize,
     purpose: Purpose,
+    leaf_der: []const u8,
 ) Error!void {
     const extensions = parseExtensions(der_bytes, .issuer, purpose) catch
         return error.CertificateRejected;
@@ -545,13 +553,23 @@ fn checkIssuer(
     }
     if (extensions.name_constraints) |constraints| {
         if (host) |name| try checkNameConstraints(constraints, name);
+        if (purpose == .client) {
+            try checkClientNameConstraints(constraints, leaf_der);
+        }
     }
 }
 
 fn checkNameConstraints(value: []const u8, host: []const u8) Error!void {
     const host_ip = std.Io.net.IpAddress.parse(host, 0) catch null;
     const host_dns: ?[]const u8 = if (host_ip == null) host else null;
+    return checkNameConstraintsFor(value, host_dns, host_ip);
+}
 
+fn checkNameConstraintsFor(
+    value: []const u8,
+    host_dns: ?[]const u8,
+    host_ip: ?std.Io.net.IpAddress,
+) Error!void {
     const sequence = elementAt(value, 0) orelse
         return error.CertificateRejected;
     if (sequence.identifier.tag != .sequence) {
@@ -591,6 +609,42 @@ fn checkNameConstraints(value: []const u8, host: []const u8) Error!void {
     }
     if (permitted_present and !permitted_match) {
         return error.CertificateRejected;
+    }
+}
+
+/// RFC 5280 name constraints also apply to every name in the client
+/// certificate, even though client certificates have no host to verify.
+fn checkClientNameConstraints(
+    constraints: []const u8,
+    leaf_der: []const u8,
+) Error!void {
+    const extensions = try parseExtensions(leaf_der, .leaf, .client);
+    const san = extensions.subject_alt_names orelse return;
+    const sequence = elementAt(san, 0) orelse
+        return error.CertificateRejected;
+    if (sequence.identifier.tag != .sequence) {
+        return error.CertificateRejected;
+    }
+    var cursor = sequence.slice.start;
+    while (cursor < sequence.slice.end) {
+        const name = elementAt(san, cursor) orelse
+            return error.CertificateRejected;
+        cursor = name.slice.end;
+        const bytes = san[name.slice.start..name.slice.end];
+        switch (identifier(name)) {
+            0x82 => try checkNameConstraintsFor(constraints, bytes, null),
+            0x87 => {
+                const address: ?std.Io.net.IpAddress = switch (bytes.len) {
+                    4 => .{ .ip4 = .{ .bytes = bytes[0..4].*, .port = 0 } },
+                    16 => .{ .ip6 = .{ .bytes = bytes[0..16].*, .port = 0 } },
+                    else => null,
+                };
+                if (address) |ip| {
+                    try checkNameConstraintsFor(constraints, null, ip);
+                }
+            },
+            else => {},
+        }
     }
 }
 
@@ -642,6 +696,7 @@ const Extensions = struct {
     key_cert_sign: ?bool = null,
     path_len: ?u16 = null,
     name_constraints: ?[]const u8 = null,
+    subject_alt_names: ?[]const u8 = null,
     eku_allows_purpose: ?bool = null,
 };
 
@@ -775,6 +830,7 @@ fn parseExtensionList(
             // `Certificate.Parsed.verifyHostName` reparses this value with an
             // unbounded DER parser, so bound it here first.
             try validateGeneralNames(value);
+            extensions.subject_alt_names = value;
         } else if (std.mem.eql(u8, oid, &oid_name_constraints)) {
             extensions.name_constraints = value;
         } else if (critical) {

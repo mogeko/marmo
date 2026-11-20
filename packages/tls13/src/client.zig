@@ -88,6 +88,7 @@ pub const Client = struct {
     client_private_key: ?Ecdsa.KeyPair = null,
     certificate_requested: bool = false,
     pending_key_update_response: std.atomic.Value(bool) = .init(false),
+    negotiated_suite: record.CipherSuite = .aes_128_gcm_sha256,
     allow_truncation_attacks: bool = false,
     closed: bool = false,
     eof_received: bool = false,
@@ -151,7 +152,7 @@ pub const Client = struct {
     }
 
     pub fn negotiatedCipherSuite(self: *const Client) record.CipherSuite {
-        return self.write_keys.suite;
+        return self.negotiated_suite;
     }
 
     pub fn readError(self: *const Client) ?InitError {
@@ -295,6 +296,7 @@ pub const Client = struct {
             suite,
             self.client_app_secret,
         ) catch return error.HandshakeFailed;
+        self.negotiated_suite = suite;
         std.crypto.secureZero(u8, std.mem.asBytes(&self.key_schedule));
         if (options.required_alpn) |required| {
             const selected = self.negotiatedProtocol() orelse
@@ -877,11 +879,11 @@ pub const Client = struct {
                 const request_update = handshake.parseKeyUpdate(message) catch
                     return error.HandshakeFailed;
                 self.server_app_secret = handshake.updateSecret(
-                    self.write_keys.suite,
+                    self.negotiated_suite,
                     self.server_app_secret,
                 ) catch return error.HandshakeFailed;
                 self.read_keys = handshake.keysFromSecret(
-                    self.write_keys.suite,
+                    self.negotiated_suite,
                     self.server_app_secret,
                 ) catch return error.HandshakeFailed;
                 if (request_update) {
@@ -914,11 +916,11 @@ pub const Client = struct {
         };
         self.output.writeAll(sealed) catch return error.HandshakeFailed;
         self.client_app_secret = handshake.updateSecret(
-            self.write_keys.suite,
+            self.negotiated_suite,
             self.client_app_secret,
         ) catch return error.HandshakeFailed;
         self.write_keys = handshake.keysFromSecret(
-            self.write_keys.suite,
+            self.negotiated_suite,
             self.client_app_secret,
         ) catch return error.HandshakeFailed;
     }

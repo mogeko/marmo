@@ -33,7 +33,10 @@ implemented in `packages/tls13` (ADR-0007, ADR-0010, ADR-0012 and its
 - Client authentication: the client sends a configured ECDSA P-256 chain and
   `CertificateVerify` when the server requests one, or an empty Certificate
   when it has none. The server verifies the client chain against a configured
-  trust bundle and applies `none`/`optional`/`required` policy.
+  trust bundle, applies `none`/`optional`/`required` policy, and enforces CA
+  name constraints against every DNS/IP SAN in the client certificate. The
+  CertificateRequest advertises the signature schemes the server accepts, and
+  the handshake-internal certificate_request_context must be zero.
 - Record protection: AES-128-GCM, AES-256-GCM, or ChaCha20-Poly1305, 12-byte
   per-direction nonce XORed with a 64-bit sequence number, 16-byte tag,
   maximum plaintext 16 KiB, maximum ciphertext 16 KiB + 256.
@@ -91,7 +94,8 @@ and `tls_cert_path`. The short corpus smoke runs in `zig build test`; see
   credential keys and no SNI multi-certificate selection.
 - Certificate policy still differs from OpenSSL in a few areas: no-SAN
   certificates fall back to CN, leaf `keyUsage` is not checked, and anchor
-  `pathLen`/`keyUsage` are not enforced.
+  `pathLen`/`keyUsage` are not enforced. A trust anchor with `pathLen=0` can
+  still sign an intermediate.
 - A HelloRetryRequest is rejected rather than retried, because the client
   always offers X25519 and P-256 shares.
 - No post-handshake end-to-end fuzz target: KeyUpdate parsing is fuzzed, but an
