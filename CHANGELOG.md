@@ -76,6 +76,9 @@ and behavior may change between minor releases.
 - The WebSocket server adapter defaults to no internal handshake timer so the
   ADR-0015 reaper owns the deadline. Standalone users must set
   `handshake_timeout_ns` explicitly.
+- Per-connection peer failures are logged at debug level instead of warn, so
+  normal protocol violations, resets, and truncation cannot flood embedder
+  logs. `accept failed` and `spawn failed` remain warn-level.
 - WebSocket reads accept standard-client single frames up to 1 MiB; writes
   still fragment at 64 KiB.
 

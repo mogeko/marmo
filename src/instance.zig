@@ -492,7 +492,13 @@ fn healthLoopWrapper(io: std.Io, selector: *Selector) std.Io.Cancelable!void {
 fn connectionWrapper(context: *ConnContext) std.Io.Cancelable!void {
     handleConnection(context) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
-        else => std.log.scoped(.marmo).warn("connection failed: {s}", .{@errorName(err)}),
+        // Peer-driven failures (protocol violations, resets, truncation) are
+        // normal on an exposed proxy and must not become warn-level log
+        // floods. Embedders that want them can raise the log level.
+        else => std.log.scoped(.marmo).debug(
+            "connection failed: {s}",
+            .{@errorName(err)},
+        ),
     };
 }
 
