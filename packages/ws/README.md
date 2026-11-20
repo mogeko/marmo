@@ -37,7 +37,7 @@ The caller owns `input` and `output` and keeps them alive for the connection.
 `read` returns 0 after a close frame; `write` sends one binary message per
 call; `end` sends close code 1000. Abrupt EOF before a close frame is a
 protocol error. The package also exports `handshake`, `frame`, `Error`,
-`max_handshake` (8 KiB), and `max_frame_payload` (64 KiB) for fuzzing and
+`max_handshake` (8 KiB), and `max_read_payload` (1 MiB), `max_frame_payload` (64 KiB) for fuzzing and
 adapters.
 
 ## Scope
@@ -48,8 +48,8 @@ adapters.
 - Binary and text messages, continuation, ping/pong, and close.
 - Close codes are validated; invalid codes/reasons get 1002/1007. Messages are
   capped at 1 MiB and 1024 fragments; control frames per read are capped.
-- Client masking is mandatory and server frames must be unmasked. A single
-  frame is capped at 64 KiB, so larger messages must be fragmented by the peer.
+- Client masking is mandatory and server frames must be unmasked. Reads accept
+  a single frame up to the 1 MiB message limit; writes fragment at 64 KiB.
 - No extensions (including `permessage-deflate`), redirects, subprotocol
   negotiation, or HTTP authentication. Handshake parsing is strict: obs-fold,
   whitespace before the colon, duplicate required headers, and body-bearing

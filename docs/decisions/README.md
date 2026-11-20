@@ -35,7 +35,7 @@ Statuses: `Proposed` → `Accepted` | `Rejected` | `Superseded by ADR-NNNN`.
 | [0012](0012-tls-alpn.md) | TLS ALPN negotiation | Accepted | ALPN on client and server; in-tree TLS 1.3 client |
 | [0013](0013-http2-package.md) | HTTP/2 transport package | Accepted | `packages/http2`; one stream; framing/HPACK/flow control |
 | [0014](0014-websocket-package.md) | WebSocket transport package | Accepted | `packages/ws`; RFC 6455 handshake and framing |
-| [0015](0015-connection-limits-and-timeouts.md) | Connection limits and idle timeouts | Accepted | global limits 1024/10/300/1/1; per-connection watchdog; UDP excluded |
+| [0015](0015-connection-limits-and-timeouts.md) | Connection limits and idle timeouts | Accepted | global limits 1024/10/300/1/1; per-Instance reaper; UDP excluded |
 
 ## Accepted decisions
 

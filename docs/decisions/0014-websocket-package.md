@@ -64,3 +64,10 @@ bounded at 1 MiB and 1024 fragments, control frames per read are bounded, close
 codes and UTF-8 reasons are validated, and client masking uses a 4 KiB scratch
 buffer. A single frame remains capped at 64 KiB; larger messages must be
 fragmented by the peer.
+
+## Amendment (2026-11-20, read frame limit)
+
+The read side now accepts a single frame up to the 1 MiB message limit so
+standard clients that send a whole message as one frame interoperate. The write
+side still fragments at 64 KiB, and the previous sentence about a 64 KiB read
+cap no longer applies. Each connection reserves a 1 MiB frame buffer.

@@ -5,6 +5,10 @@ and behavior may change between minor releases.
 
 ## Unreleased
 
+> Version not bumped yet. When releasing, replace "Unreleased" with the
+> version and date, update `build.zig.zon` and the README status, and keep
+> the known limitations below in the release notes.
+
 ### Security
 
 - Seventh re-audit (2026-11-20): TLS validates the trust anchor's validity
@@ -114,6 +118,56 @@ and behavior may change between minor releases.
   partial record as EOF. The bug lost split replies and was found during
   trojan-gfw UDP interop; `packages/tls13/src/reader.zig` has a regression
   test.
+
+### Changed
+
+- The TLS client is now the in-tree TLS 1.3 implementation. TLS 1.2-only
+  servers are rejected; a missing `close_notify` is a truncation error unless
+  `allow_truncation_attacks` is enabled. ALPN is available to both client and
+  server.
+- The global `limits` policy is enforced by default: 1024 TCP connections,
+  10 s handshake deadline, 300 s idle timeout, and 1 s uplink/downlink grace.
+  UDP is omitted from `max_connections`.
+- The WebSocket server adapter defaults to no internal handshake timer so the
+  ADR-0015 reaper owns the deadline. Standalone users must set
+  `handshake_timeout_ns` explicitly.
+- WebSocket reads accept standard-client single frames up to 1 MiB; writes
+  still fragment at 64 KiB.
+
+### Known limitations
+
+- TLS has no client authentication, PSK, session tickets, 0-RTT, KeyUpdate,
+  TLS 1.2, or revocation checking. It supports only X25519 and
+  `TLS_AES_128_GCM_SHA256`; servers pinned to AES-256-GCM, ChaCha20-Poly1305,
+  secp256r1, or HelloRetryRequest cannot interoperate.
+- TLS certificate policy is stricter than std but still differs from OpenSSL:
+  no-SAN certificates fall back to CN, leaf `keyUsage` is not checked, and
+  trust-anchor `pathLen`/`keyUsage` constraints are not enforced.
+- HTTP/2 is one stream per connection and is not wired into `Config` or
+  `Instance`; `H2Stream`/`H2Dialer` are programmatic adapters only. There is
+  no multiplexing, gRPC, 1xx/trailers, CONNECT/extended CONNECT, server push,
+  HTTP/1.1 upgrade, or graceful GOAWAY/RST sending. HPACK encoding has no
+  Huffman or dynamic-table insertion, receive flow control is not enforced,
+  and data/control frames share one write lock.
+- WebSocket is not wired into `Config` or `Instance`; `WsStream`/`WsDialer`
+  are programmatic adapters only. There is no permessage-deflate, subprotocol
+  negotiation, Origin/auth handling, true half-close, or HTTP/2 WebSocket.
+  Text frames are not UTF-8 validated, most frame violations do not send Close
+  1002, and a connection reserves 1 MiB before the handshake once wired to an
+  inbound.
+- VLESS/VMess over WebSocket or HTTP/2 is not implemented; only TCP/TLS
+  transports are configurable. QUIC, gRPC, TUIC, and Hysteria2 remain Phase 3.
+- The library remains not production-ready, has no external cryptographic or
+  transport audit, and its public API is unstable.
+
+### Tests
+
+- 183 tests: 60 root unit, 4 public API, 28 integration, 34 tls13, 23 http2,
+  22 ws, and 12 fuzz corpus tests, passing in Debug and ReleaseSafe.
+- Local interoperability checks pass for Shadowsocks 2022 (AES-128/256,
+  TCP/UDP), VLESS (TCP, simple UoT, XUDP, TCP+UDP) and Trojan (TCP/UDP), in
+  both directions against shadowsocks-rust 1.25.0 and Xray-core 26.11.9.
+  The harness is not committed and is not part of CI.
 
 ## 0.0.2 - 2026-11-19
 
