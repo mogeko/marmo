@@ -33,20 +33,44 @@ pub const Frame = struct {
     fin: bool,
     opcode: u8,
     payload: []u8,
+    /// Set when a permessage-deflate encoded data frame carries RSV1.
+    rsv1: bool = false,
 };
 
-/// Reads exactly one frame. Server roles require masked client frames; client
-/// roles require unmasked server frames.
+pub const ReadOptions = struct {
+    /// Allow RSV1 on a first text/binary frame. The caller enforces message
+    /// state (RSV1 is never valid on a continuation or control frame).
+    allow_rsv1: bool = false,
+};
+
+pub const WriteOptions = struct {
+    /// Set RSV1 on a data frame. Only valid for text/binary first frames.
+    rsv1: bool = false,
+};
+
+/// Reads exactly one frame with default options. Server roles require masked
+/// client frames; client roles require unmasked server frames.
 pub fn read(
     input: *std.Io.Reader,
     role: Role,
     payload_buffer: []u8,
 ) Error!Frame {
+    return readFrame(input, role, payload_buffer, .{});
+}
+
+/// Reads exactly one frame. RSV1 is accepted only for a text/binary frame
+/// when `options.allow_rsv1` is set; RSV2/RSV3 and compressed control or
+/// continuation frames are always protocol violations.
+pub fn readFrame(
+    input: *std.Io.Reader,
+    role: Role,
+    payload_buffer: []u8,
+    options: ReadOptions,
+) Error!Frame {
     var header: [2]u8 = undefined;
     try readExact(input, &header, true);
 
     const fin = header[0] & 0x80 != 0;
-    if (header[0] & 0x70 != 0) return error.ProtocolViolation;
     const opcode = header[0] & 0x0f;
     switch (opcode) {
         opcode_continuation,
@@ -58,6 +82,7 @@ pub fn read(
         => {},
         else => return error.ProtocolViolation,
     }
+    const rsv1 = try validateReserved(header[0], opcode, options);
 
     const masked = header[1] & 0x80 != 0;
     switch (role) {
@@ -70,11 +95,13 @@ pub fn read(
         var extended: [2]u8 = undefined;
         try readExact(input, &extended, false);
         payload_len = std.mem.readInt(u16, &extended, .big);
+        if (payload_len < 126) return error.ProtocolViolation;
     } else if (payload_len == 127) {
         var extended: [8]u8 = undefined;
         try readExact(input, &extended, false);
         payload_len = std.mem.readInt(u64, &extended, .big);
         if (payload_len >> 63 != 0) return error.ProtocolViolation;
+        if (payload_len < 65536) return error.ProtocolViolation;
     }
     if (payload_len > max_read_payload) return error.MessageTooBig;
     if (opcode >= opcode_close) {
@@ -98,11 +125,34 @@ pub fn read(
             byte.* ^= mask[index % 4];
         }
     }
-    return .{ .fin = fin, .opcode = opcode, .payload = payload };
+    return .{
+        .fin = fin,
+        .opcode = opcode,
+        .payload = payload,
+        .rsv1 = rsv1,
+    };
 }
 
-/// Writes one frame. `scratch` must be at least `payload.len` bytes and is used
-/// only when client masking is required.
+/// Validates reserved bits and returns whether RSV1 marks a compressed
+/// message. RSV1 is legal only on a first text/binary frame when enabled.
+fn validateReserved(
+    header: u8,
+    opcode: u8,
+    options: ReadOptions,
+) Error!bool {
+    const reserved = header & 0x70;
+    if (reserved == 0) return false;
+    if (reserved != 0x40 or !options.allow_rsv1) {
+        return error.ProtocolViolation;
+    }
+    if (opcode != opcode_text and opcode != opcode_binary) {
+        return error.ProtocolViolation;
+    }
+    return true;
+}
+
+/// Writes one frame with default options. `scratch` must be at least
+/// `payload.len` bytes and is used only when client masking is required.
 pub fn write(
     io: std.Io,
     output: *std.Io.Writer,
@@ -112,16 +162,34 @@ pub fn write(
     payload: []const u8,
     scratch: []u8,
 ) Error!void {
+    return writeFrame(io, output, role, opcode, fin, payload, scratch, .{});
+}
+
+/// Writes one frame. RSV1 is rejected on control and continuation frames.
+pub fn writeFrame(
+    io: std.Io,
+    output: *std.Io.Writer,
+    role: Role,
+    opcode: u8,
+    fin: bool,
+    payload: []const u8,
+    scratch: []u8,
+    options: WriteOptions,
+) Error!void {
     if (payload.len > max_payload) return error.ProtocolViolation;
     if (opcode >= opcode_close) {
-        if (!fin or payload.len > max_control_payload) {
+        if (!fin or payload.len > max_control_payload or options.rsv1) {
             return error.ProtocolViolation;
         }
+    }
+    if (options.rsv1 and opcode != opcode_text and opcode != opcode_binary) {
+        return error.ProtocolViolation;
     }
 
     var header: [header_max]u8 = undefined;
     var header_len: usize = 2;
     header[0] = opcode | (if (fin) @as(u8, 0x80) else 0);
+    if (options.rsv1) header[0] |= 0x40;
     header[1] = 0;
     const masked = role == .client;
     if (masked) header[1] = 0x80;
@@ -223,5 +291,134 @@ test "control frames must not be fragmented" {
     try std.testing.expectError(
         error.ProtocolViolation,
         read(&reader, .client, &payload),
+    );
+}
+
+test "RSV1 is rejected unless explicitly allowed" {
+    var bytes = [_]u8{ 0xc2, 0x00 };
+    var reader = std.Io.Reader.fixed(&bytes);
+    var payload: [16]u8 = undefined;
+    try std.testing.expectError(
+        error.ProtocolViolation,
+        read(&reader, .client, &payload),
+    );
+
+    var allowed_reader = std.Io.Reader.fixed(&bytes);
+    const parsed = try readFrame(
+        &allowed_reader,
+        .client,
+        &payload,
+        .{ .allow_rsv1 = true },
+    );
+    try std.testing.expect(parsed.rsv1);
+    try std.testing.expectEqual(opcode_binary, parsed.opcode);
+}
+
+test "RSV1 is invalid on continuation and control frames" {
+    var continuation = [_]u8{ 0xc0, 0x00 };
+    var reader = std.Io.Reader.fixed(&continuation);
+    var payload: [16]u8 = undefined;
+    try std.testing.expectError(
+        error.ProtocolViolation,
+        readFrame(&reader, .client, &payload, .{ .allow_rsv1 = true }),
+    );
+
+    var control = [_]u8{ 0xc9, 0x00 };
+    var control_reader = std.Io.Reader.fixed(&control);
+    try std.testing.expectError(
+        error.ProtocolViolation,
+        readFrame(&control_reader, .client, &payload, .{ .allow_rsv1 = true }),
+    );
+}
+
+test "RSV2 and RSV3 are always rejected" {
+    var rsv2 = [_]u8{ 0xa2, 0x00 };
+    var rsv2_reader = std.Io.Reader.fixed(&rsv2);
+    var payload: [16]u8 = undefined;
+    try std.testing.expectError(
+        error.ProtocolViolation,
+        readFrame(&rsv2_reader, .client, &payload, .{ .allow_rsv1 = true }),
+    );
+    var rsv3 = [_]u8{ 0x92, 0x00 };
+    var rsv3_reader = std.Io.Reader.fixed(&rsv3);
+    try std.testing.expectError(
+        error.ProtocolViolation,
+        readFrame(&rsv3_reader, .client, &payload, .{ .allow_rsv1 = true }),
+    );
+}
+
+test "writer sets RSV1 only on allowed data frames" {
+    const allocator = std.testing.allocator;
+    var storage: std.Io.Writer.Allocating = .init(allocator);
+    defer storage.deinit();
+
+    try writeFrame(
+        std.testing.io,
+        &storage.writer,
+        .server,
+        opcode_text,
+        true,
+        "hi",
+        &.{},
+        .{ .rsv1 = true },
+    );
+    var reader = std.Io.Reader.fixed(storage.written());
+    var payload: [16]u8 = undefined;
+    const parsed = try readFrame(
+        &reader,
+        .client,
+        &payload,
+        .{ .allow_rsv1 = true },
+    );
+    try std.testing.expect(parsed.rsv1);
+    try std.testing.expectEqual(opcode_text, parsed.opcode);
+
+    storage.clearRetainingCapacity();
+    try std.testing.expectError(
+        error.ProtocolViolation,
+        writeFrame(
+            std.testing.io,
+            &storage.writer,
+            .server,
+            opcode_ping,
+            true,
+            "hi",
+            &.{},
+            .{ .rsv1 = true },
+        ),
+    );
+    try std.testing.expectError(
+        error.ProtocolViolation,
+        writeFrame(
+            std.testing.io,
+            &storage.writer,
+            .server,
+            opcode_continuation,
+            true,
+            "hi",
+            &.{},
+            .{ .rsv1 = true },
+        ),
+    );
+}
+
+test "non-minimal length encodings are rejected" {
+    var short = [_]u8{
+        0x82, 0xFE, 0x00, 0x05, 0, 0, 0, 0, 'h', 'e', 'l', 'l', 'o',
+    };
+    var short_reader = std.Io.Reader.fixed(&short);
+    var payload: [16]u8 = undefined;
+    try std.testing.expectError(
+        error.ProtocolViolation,
+        read(&short_reader, .server, &payload),
+    );
+
+    var long = [_]u8{
+        0x82, 0xFF, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0, 0, 0, 0,
+    };
+    var long_reader = std.Io.Reader.fixed(&long);
+    try std.testing.expectError(
+        error.ProtocolViolation,
+        read(&long_reader, .server, &payload),
     );
 }

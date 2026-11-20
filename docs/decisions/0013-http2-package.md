@@ -73,3 +73,42 @@ validates HEADERS against the active stream; reports RST_STREAM and truncating
 GOAWAY as `ConnectionReset`; caps CONTINUATION at 16 frames; uses a byte-budgeted
 4 KiB HPACK table (up to 128 entries); serializes writers; and supports an
 optional `ServerOptions.path` plus request pseudo-header validation.
+
+## Amendment (2026-11-20): bounded multiplexing and gRPC semantics
+
+Direct implementation request by @mogeko. This supersedes Alternative 2 for the
+multiplexing question in the Decision above; the package boundary and std-only
+constraint are unchanged.
+
+The one-active-stream model is replaced with a fixed, bounded multiplexer:
+
+- A 16-entry stream table owns the state, send/recv windows, per-stream DATA
+  ring, and separate initial-header and trailer storage. Streams transition
+  through OPEN, HALF_CLOSED_LOCAL, HALF_CLOSED_REMOTE, and CLOSED; `openStream`
+  and `acceptStream` may be called repeatedly.
+- One frame pump demultiplexes incoming frames. Readers serialize on an input
+  mutex for one frame at a time and otherwise copy from their own queue; the
+  header block, HPACK decoder, and send scratch buffer remain connection-scoped
+  and are protected by their existing locks.
+- The package advertises and enforces its real limits: 16 concurrent streams,
+  an 8 KiB per-stream receive window, a 128 KiB connection receive window, an
+  8 KiB `MAX_HEADER_LIST_SIZE`, 4 KiB HPACK dynamic table, 16 KiB frames, and
+  64 KiB raw header blocks.
+- gRPC-enabling HTTP/2 semantics are in scope even though gRPC framing is not:
+  1xx informational responses are accepted before the final response, a second
+  HEADERS block is treated as trailers and exposed to the caller, and
+  END_STREAM/half-close is preserved per stream.
+- Receive flow control is enforced and violations send `FLOW_CONTROL_ERROR` in
+  GOAWAY. Local connection errors send GOAWAY, stream errors send RST_STREAM,
+  and an explicit graceful close sends GOAWAY with `NO_ERROR`.
+- Header validation is strict (pseudo-header order/uniqueness/known names,
+  token field names, connection-specific headers, `TE: trailers`, CONNECT
+  rules, trailers without pseudo-headers and with END_STREAM), and HPACK
+  header-list accounting uses the RFC 9113 32-byte per-entry rule. HPACK
+  integer decoding rejects values above 32 bits.
+
+Out of scope and recorded as follow-ups rather than implemented here: Config /
+`Instance` wiring, root adapter changes, server push and PRIORITY effects, h2c
+upgrade, HPACK encoder Huffman/dynamic-table insertion, connection pooling,
+HTTP/2 WebSocket, and gRPC message framing. The fixed inline stream storage is
+a deliberate no-allocator choice; making limits configurable is later work.

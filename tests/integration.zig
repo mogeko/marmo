@@ -1056,6 +1056,8 @@ test "selector health check probes a node" {
 const TlsAdapterContext = struct {
     listener: *std.Io.net.Server,
     cert: *tls13.test_cert.Certificate,
+    client_auth: tls13.ClientAuth = .none,
+    client_ca: ?*const std.crypto.Certificate.Bundle = null,
     error_code: ?anyerror = null,
 };
 
@@ -1077,6 +1079,8 @@ fn tlsAdapterServerRun(io: std.Io, context: *TlsAdapterContext) !void {
         .{
             .certificate_chain = &.{context.cert.der},
             .private_key = context.cert.key_pair,
+            .client_auth = context.client_auth,
+            .client_ca = context.client_ca,
         },
     ) catch |err| {
         tcp.stream().close(io);
@@ -1146,6 +1150,91 @@ test "TLS 1.3 adapters exchange application data" {
         offset += read_len;
     }
     try std.testing.expectEqualStrings("hello", &response);
+
+    stream.shutdown(io, .send) catch |err| switch (err) {
+        error.NotConnected => {},
+        else => return err,
+    };
+    _ = server_future.await(io);
+    if (context.error_code) |err| return err;
+}
+
+test "TLS adapters enforce required client authentication" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_cert = try tls13.test_cert.generate(allocator, io);
+    defer server_cert.deinit(allocator);
+    var root = try tls13.test_cert.generateCa(allocator, io, "adapter client ca");
+    defer root.deinit(allocator);
+    var client_cert = try tls13.test_cert.generateParams(allocator, io, .{
+        .common_name = "adapter client",
+        .issuer_name = "adapter client ca",
+        .issuer_key = root.key_pair,
+        .san = null,
+        .include_basic_constraints = true,
+        .include_key_usage = true,
+        .eku_client_auth = true,
+    });
+    defer client_cert.deinit(allocator);
+    var bundle: std.crypto.Certificate.Bundle = .empty;
+    defer bundle.deinit(allocator);
+    try tls13.test_cert.addTrustedDer(
+        &bundle,
+        allocator,
+        root.der,
+        std.Io.Timestamp.now(io, .real).toSeconds(),
+    );
+
+    var bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var listener = try bind.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    var context: TlsAdapterContext = .{
+        .listener = &listener,
+        .cert = &server_cert,
+        .client_auth = .required,
+        .client_ca = &bundle,
+    };
+    var server_future = io.async(tlsAdapterServer, .{ io, &context });
+
+    var address: std.Io.net.IpAddress = .{
+        .ip4 = .loopback(listener.socket.address.getPort()),
+    };
+    const accepted = try std.Io.net.IpAddress.connect(
+        &address,
+        io,
+        .{ .mode = .stream },
+    );
+    const remote: marmo.Endpoint = .{ .ip = accepted.socket.address };
+    const tcp = try marmo.TcpStream.create(allocator, accepted, remote, remote);
+    const tls = marmo.TlsClientStream.create(
+        io,
+        allocator,
+        tcp.stream(),
+        .{
+            .server_name = "localhost",
+            .insecure = true,
+            .client_certificate_chain = &.{client_cert.der},
+            .client_private_key = client_cert.key_pair,
+        },
+    ) catch |err| {
+        tcp.stream().close(io);
+        return err;
+    };
+    const stream = tls.stream();
+    defer stream.close(io);
+
+    _ = try stream.write(io, &.{"mtls"});
+    var response: [4]u8 = undefined;
+    var offset: usize = 0;
+    while (offset < response.len) {
+        var buffers = [_][]u8{response[offset..]};
+        const read_len = try stream.read(io, &buffers);
+        if (read_len == 0) return error.EndOfStream;
+        offset += read_len;
+    }
+    try std.testing.expectEqualStrings("mtls", &response);
 
     stream.shutdown(io, .send) catch |err| switch (err) {
         error.NotConnected => {},
@@ -2686,4 +2775,27 @@ test "HTTP/2 keeps reading flow control after the peer half-closes" {
     context.done.set(io);
     try server_future.await(io);
     if (context.error_code) |err| return err;
+}
+
+test "a malformed client CA file is rejected without aborting" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "bad-ca.pem",
+        .data = "-----BEGIN CERTIFICATE-----\nMIL//wA=\n-----END CERTIFICATE-----\n",
+    });
+    var path_buffer: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(
+        &path_buffer,
+        ".zig-cache/tmp/{s}/bad-ca.pem",
+        .{tmp.sub_path},
+    );
+    try std.testing.expectError(
+        error.InvalidCredentials,
+        marmo.internal.tls_credentials.loadClientCa(allocator, io, path),
+    );
 }

@@ -5,45 +5,78 @@
 > Package version not bumped yet; the root release decides when this becomes
 > a tagged package version.
 
-### Security
+### Added
 
-- The server sends its own SETTINGS before ACKING the client, does not wait
-  for the client ACK before accepting HEADERS, and accepts legal server
-  `ENABLE_PUSH = 0`.
-- A local `END_STREAM` no longer closes the TCP write side, so WINDOW_UPDATE
-  and other control frames can still be sent after a half-close.
-- Truncated frames/EOF map to `ConnectionReset` and wake blocked writers;
-  request pseudo-headers, configured paths, header names, and the first
-  response `:status` are validated; header-list and HPACK size-update limits
-  are enforced.
-- DATA padding is stripped and validated, a second HEADERS block (trailers) is
-  rejected instead of overwriting the request/response headers, and a failed
-  WINDOW_UPDATE write no longer discards already received DATA.
-- A writer waiting for flow control pumps control frames after the peer
-  half-closes, so `WINDOW_UPDATE`/PING/RST are still processed when no read
-  task remains.
+- Connection multiplexing: a fixed 16-entry stream table, odd/even stream ids,
+  OPEN/HALF_CLOSED/CLOSED transitions, per-stream DATA queues and header
+  storage, and a frame pump shared by concurrent stream readers. `openStream`
+  and `acceptStream` can now be called repeatedly.
+- gRPC-enabling semantics: 1xx informational responses are accepted before the
+  final response, a second HEADERS block is decoded as trailers, and
+  `Stream.headers()`, `Stream.trailers()`, `Stream.informationalStatus()`, and
+  `Stream.sendTrailers()` expose the three header blocks independently.
+- `Stream.reset()` sends RST_STREAM for one stream; `Client.closeGracefully()`
+  and `Server.closeGracefully()` send GOAWAY with `NO_ERROR`.
+- `Stream.close()` keeps the existing half-close semantics; reads continue
+  until the peer's END_STREAM.
 
 ### Changed
 
-- Added `Stream.cancel()` and internal cancellation/wakeup state so an aborted
-  connection unblocks writers.
-- `Server.acceptStream()` marks the first HEADERS block as seen.
-- `MAX_HEADER_LIST_SIZE` is advertised and large single header values are
-  accepted up to the implementation limit.
+- Receive flow control is enforced. DATA beyond the stream or connection
+  window sends GOAWAY with `FLOW_CONTROL_ERROR`; padding is credited when it is
+  parsed and data is credited when the application consumes it.
+- Strict header validation replaces the previous request-only checks: pseudo
+  headers must be unique, ordered first, and known; field names must be
+  lowercase tokens; connection-specific headers are rejected; `TE` may only be
+  `trailers`; CONNECT omits `:scheme`/`:path`; trailers may not contain pseudo
+  headers and must carry END_STREAM.
+- Local protocol and stream-state errors now send GOAWAY or RST_STREAM.
+  Receiving RST_STREAM aborts one stream, while a GOAWAY aborts only streams
+  above its last-stream-id unless the error code is non-zero.
+- SETTINGS are applied to every existing stream (INITIAL_WINDOW_SIZE deltas),
+  the peer's MAX_FRAME_SIZE and MAX_CONCURRENT_STREAMS are enforced, and
+  invalid or oversized ACK/settings payloads produce FRAME_SIZE_ERROR or
+  PROTOCOL_ERROR GOAWAYs. `ENABLE_PUSH = 0` is accepted from hyper-h2 servers
+  for interoperability; push is never enabled.
+- `MAX_HEADER_LIST_SIZE` now advertises the real limit (8 KiB), and HPACK
+  header-list accounting uses `name.len + value.len + 32` per field.
+- HPACK integer decoding accumulates in 64 bits and rejects values above
+  32 bits instead of overflowing `usize` on 32-bit targets.
+- Frame, header, DATA, trailer, and HPACK buffers are zeroized on deinit and
+  on stream abort/reuse.
+- HEADERS/CONTINUATION field blocks on closed, refused, or otherwise discarded
+  streams are still fully decompressed before RST/GOAWAY, keeping the
+  connection-level HPACK table aligned. A block that exceeds the header-list
+  or storage bound closes the connection with COMPRESSION_ERROR instead of
+  continuing with a half-updated decoder.
+- DATA discarded on a closed stream, and queued DATA dropped by a local
+  reset/abort or GOAWAY, is credited back to the connection receive window with
+  WINDOW_UPDATE so long-lived connections do not leak flow-control credit.
+- A seventeenth concurrent stream, a stream-level WINDOW_UPDATE overflow, and a
+  malformed PRIORITY length are stream errors (RST_STREAM), not connection
+  GOAWAYs. `ServerOptions.path` is now enforced, and a client resets a stream
+  that receives DATA before the final response.
+- The HPACK header array allows 256 fields so a legal 8 KiB list of small
+  fields is not rejected by a lower count cap.
+- `write` pumps incoming frames while waiting for flow-control credit so a
+  single-threaded embedder does not deadlock on WINDOW_UPDATE.
 
 ### Known limitations
 
-- One active stream per connection; no multiplexing, connection reuse, server
-  push, PRIORITY effects, or HTTP/1.1 upgrade.
-- No gRPC: 1xx responses and trailers are rejected; no CONNECT or extended
-  CONNECT; no WebSocket over HTTP/2.
-- HPACK encoding has no Huffman or dynamic-table insertion. Decoding caps
-  header count and value size below the advertised 64 KiB list.
-- Receive flow control is not enforced, updates are sent on receipt rather
-  than consumption, and a failed update disables further updates.
-- Data and control frames share one write lock; large writes can delay PING
-  ACKs and WINDOW_UPDATE. GOAWAY/RST_STREAM are not sent on local errors.
-- No external audit. Tests: 23 package tests.
+- No server push, PRIORITY effects, HTTP/1.1 upgrade/h2c, connection pooling,
+  HTTP/2 WebSocket, or gRPC message framing.
+- HPACK encoding has no Huffman or dynamic-table insertion. Decoding supports
+  both.
+- The stream table and all queues are fixed inline storage (16 streams, 8 KiB
+  per-stream receive window/header list); sizing is not configurable yet. The
+  8 KiB stream receive window is a throughput regression for high-RTT single
+  stream users compared with the previous 1 MiB window.
+- The server cannot send 1xx responses; only the receive side accepts them.
+  Borrowed `headers()`/`trailers()` slices are only valid until the next frame
+  pump/reset.
+- No external audit. Tests: 44 package tests. Differential checks against
+  Python h2/hpack and curl are local, not part of CI; a stateful connection
+  fuzz target is not yet in the shared harness.
 
 ## 0.0.1 - 2026-11-19
 

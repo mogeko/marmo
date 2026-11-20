@@ -487,3 +487,60 @@ the WS client handshake still uses one timer task; outbound connect/DNS cannot
 be canceled by a handshake deadline; TLS still falls back to CN when no SAN is
 present and does not check leaf keyUsage; H2 remains single-stream and shares
 one write lock between data and control frames.
+
+## 12. Post-audit implementation update (2026-11-21)
+
+The high-priority functional gaps identified in the release review were
+implemented in three isolated worktrees and merged after package and root
+tests:
+
+- TLS: client authentication (`none`/`optional`/`required`), AES-256-GCM and
+  ChaCha20-Poly1305, X25519/P-256 ECDHE, and KeyUpdate. Root config adds the
+  client certificate/key and inbound client-CA policy. PSK/resumption/tickets/
+  0-RTT, TLS 1.2, revocation, ECH, record padding, SNI multi-certificate
+  selection, and RSA/Ed25519 credentials remain out of scope.
+- HTTP/2: bounded 16-stream multiplexing, per-stream flow control, 1xx and
+  trailers, GOAWAY/RST_STREAM, strict header validation, HPACK integer and
+  header-list fixes, and buffer zeroization. Config/Instance wiring, server
+  push/PRIORITY, h2c, HTTP/2 WebSocket, and gRPC framing remain out of scope.
+- WebSocket: RFC 7692 permessage-deflate and subprotocol negotiation, plus
+  incremental text UTF-8 validation and correct Close codes. Config/Instance
+  wiring, Origin/auth, redirects, HTTP/2 WebSocket, true half-close, and lazy
+  compression/frame memory remain out of scope.
+
+The full suite is now 251 tests (61 root, 4 public API, 29 integration, 47
+tls13, 36 http2, 60 ws, 14 fuzz). TLS, HTTP/2, and WebSocket interop was
+rechecked locally against OpenSSL 4.1, curl/nghttp2, Python `h2`/`hpack`,
+Python `websockets`, and Node `ws`.
+
+## 13. Post-audit H2/WS follow-up (2026-11-21)
+
+An independent audit of the newly added multiplexing and compression code
+found no P0, two HTTP/2 P1s, and one WebSocket P2 regression. Fixed:
+
+- HTTP/2: field blocks on closed/refused streams are fully decompressed before
+  discard, and an oversized header list closes the connection with
+  COMPRESSION_ERROR instead of leaving a half-updated HPACK table. Connection
+  window credit is returned for discarded/aborted DATA; the 17th stream, a
+  stream WINDOW_UPDATE overflow, and a bad PRIORITY length are stream errors;
+  `ServerOptions.path` is enforced; DATA before the final response is rejected;
+  the HPACK header count is 256 so legal 8 KiB lists are accepted.
+- WebSocket: pings queue instead of dropping under writer contention, valid
+  close codes are echoed, non-minimal lengths/BFINAL/malformed extensions/
+  duplicate subprotocols are rejected, `close_sent` is atomic, remaining
+  buffers are zeroized, and `ws_deflate`/`ws_connection_deflate` fuzz targets
+  were added.
+
+Remaining recorded gaps: server-sent 1xx and stateful H2 fuzz coverage,
+the H2 8 KiB stream window throughput trade-off, borrowed `headers()` slices,
+WS Origin/auth and lazy compression memory, and external audit.
+
+A TLS follow-up on the same baseline found no P0/P1 and two P2s, now fixed:
+client-certificate CA name constraints are enforced against every SAN, and
+the new client-CA loader shape-checks DER before std parsing, so a malformed
+CA file no longer aborts the process. The CertificateRequest advertises all
+accepted signature schemes, the certificate_request_context is checked,
+`negotiatedCipherSuite` uses a post-handshake field, and client-key stack
+copies are zeroized. Remaining TLS gaps include anchor `pathLen`/`keyUsage`,
+leaf `keyUsage`, missing alerts, single-record handshake messages, and fuzz
+coverage for the client-auth parsers.

@@ -21,6 +21,10 @@ pub const Options = struct {
     alpn_protocols: []const []const u8 = &.{},
     /// Require this negotiated ALPN protocol.
     required_alpn: ?[]const u8 = null,
+    /// Client certificate chain, leaf first. Empty disables client auth.
+    client_certificate_chain: []const []const u8 = &.{},
+    /// Client ECDSA P-256 key matching the first certificate.
+    client_private_key: ?std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair = null,
     /// Treat a missing close_notify as EOF instead of a truncation error.
     allow_truncation_attacks: bool = false,
     /// Bounded handshake duration. Zero disables the timeout.
@@ -143,6 +147,8 @@ pub const TlsClientStream = struct {
                 .ca = options.ca,
                 .alpn_protocols = options.alpn_protocols,
                 .required_alpn = options.required_alpn,
+                .client_certificate_chain = options.client_certificate_chain,
+                .client_private_key = options.client_private_key,
                 .allow_truncation_attacks = options.allow_truncation_attacks,
                 .read_buffer = &self.plain_read_buffer,
                 .write_buffer = &self.plain_write_buffer,

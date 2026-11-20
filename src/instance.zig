@@ -126,6 +126,7 @@ pub const Instance = struct {
 
         const compiled = try compileOutbounds(
             allocator,
+            io,
             gpa,
             direct,
             config.outbounds,
@@ -491,7 +492,10 @@ fn healthLoopWrapper(io: std.Io, selector: *Selector) std.Io.Cancelable!void {
 fn connectionWrapper(context: *ConnContext) std.Io.Cancelable!void {
     handleConnection(context) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
-        else => std.log.scoped(.marmo).warn("connection failed: {s}", .{@errorName(err)}),
+        // Peer-driven failures (protocol violations, resets, truncation) are
+        // normal on an exposed proxy and must not become warn-level log
+        // floods. Embedders that want them can raise the log level.
+        else => std.log.scoped(.marmo).debug("connection failed: {s}", .{@errorName(err)}),
     };
 }
 
@@ -593,6 +597,7 @@ const CompiledSelector = struct {
 
 fn compileOutbounds(
     allocator: std.mem.Allocator,
+    io: std.Io,
     gpa: std.mem.Allocator,
     direct: *Direct,
     configs: []const Config.Outbound,
@@ -624,6 +629,7 @@ fn compileOutbounds(
         if (config.protocol == .selector) continue;
         outbounds[filled] = try compileNonSelector(
             allocator,
+            io,
             gpa,
             direct,
             config,
@@ -653,6 +659,7 @@ fn compileOutbounds(
 
 fn compileNonSelector(
     allocator: std.mem.Allocator,
+    io: std.Io,
     gpa: std.mem.Allocator,
     direct: *Direct,
     config: Config.Outbound,
@@ -713,8 +720,8 @@ fn compileNonSelector(
                 .cleanup_ctx = shadowsocks,
             };
         },
-        .trojan => try compileTrojan(allocator, gpa, direct, config),
-        .vless => try compileVless(allocator, gpa, direct, config),
+        .trojan => try compileTrojan(allocator, io, gpa, direct, config),
+        .vless => try compileVless(allocator, io, gpa, direct, config),
         .selector => unreachable,
     };
 }
@@ -727,6 +734,7 @@ const TlsTransport = struct {
 
 fn compileTlsTransport(
     allocator: std.mem.Allocator,
+    io: std.Io,
     gpa: std.mem.Allocator,
     direct: *Direct,
     server: Endpoint,
@@ -748,6 +756,21 @@ fn compileTlsTransport(
     tls_dialer.required_alpn = tls_config.required_alpn;
     tls_dialer.allow_truncation_attacks =
         tls_config.allow_truncation_attacks;
+    if (tls_config.client_certificate) |certificate_path| {
+        var client_credentials = tls_credentials.loadClientCredentials(
+            allocator,
+            io,
+            certificate_path,
+            tls_config.client_private_key.?,
+        ) catch return error.InvalidConfig;
+        defer std.crypto.secureZero(
+            u8,
+            std.mem.asBytes(&client_credentials.private_key),
+        );
+        tls_dialer.client_certificate_chain =
+            client_credentials.certificate_chain;
+        tls_dialer.client_private_key = client_credentials.private_key;
+    }
     return .{
         .dialer = tls_dialer.asDialer(),
         .cleanup = cleanupTlsDialer,
@@ -757,6 +780,7 @@ fn compileTlsTransport(
 
 fn compileTrojan(
     allocator: std.mem.Allocator,
+    io: std.Io,
     gpa: std.mem.Allocator,
     direct: *Direct,
     config: Config.Outbound,
@@ -773,6 +797,7 @@ fn compileTrojan(
     errdefer allocator.destroy(trojan);
     const transport = try compileTlsTransport(
         allocator,
+        io,
         gpa,
         direct,
         server,
@@ -797,6 +822,7 @@ fn compileTrojan(
 
 fn compileVless(
     allocator: std.mem.Allocator,
+    io: std.Io,
     gpa: std.mem.Allocator,
     direct: *Direct,
     config: Config.Outbound,
@@ -813,6 +839,7 @@ fn compileVless(
     if (config.tls) |tls| {
         const compiled = try compileTlsTransport(
             allocator,
+            io,
             gpa,
             direct,
             server,
@@ -914,6 +941,30 @@ fn loadInboundTls(
     options.alpn_protocols = tls.alpn orelse &.{};
     options.handshake_timeout_ns =
         @as(u64, tls.handshake_timeout_s) * std.time.ns_per_s;
+    options.client_auth = switch (tls.client_auth) {
+        .none => .none,
+        .optional => .optional,
+        .required => .required,
+    };
+    if (tls.client_ca) |path| {
+        const bundle = tls_credentials.loadClientCa(
+            allocator,
+            io,
+            path,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidCredentials => {
+                diagnostic.set(
+                    "inbounds[{d}].tls.client_ca: invalid CA file",
+                    .{index},
+                );
+                return error.InvalidConfig;
+            },
+        };
+        const bundle_ptr = try allocator.create(std.crypto.Certificate.Bundle);
+        bundle_ptr.* = bundle;
+        options.client_ca = bundle_ptr;
+    }
     return options;
 }
 

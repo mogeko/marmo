@@ -55,8 +55,14 @@ pub const Config = struct {
         private_key: []const u8,
         /// ALPN protocols in server preference order.
         alpn: ?[]const []const u8 = null,
+        /// PEM or DER client-certificate trust anchors.
+        client_ca: ?[]const u8 = null,
+        /// Whether a client certificate is requested and verified.
+        client_auth: ClientAuth = .none,
         handshake_timeout_s: u16 = 10,
     };
+
+    pub const ClientAuth = enum { none, optional, required };
 
     pub const Outbound = struct {
         tag: []const u8,
@@ -81,6 +87,10 @@ pub const Config = struct {
         alpn: ?[]const []const u8 = null,
         /// Require the server to select this protocol.
         required_alpn: ?[]const u8 = null,
+        /// PEM or DER client certificate chain file, leaf first.
+        client_certificate: ?[]const u8 = null,
+        /// PEM or DER ECDSA P-256 client private key file.
+        client_private_key: ?[]const u8 = null,
         /// Treat a missing close_notify as EOF instead of ConnectionReset.
         allow_truncation_attacks: bool = false,
         handshake_timeout_s: u16 = 10,
@@ -307,6 +317,7 @@ fn validateVlessInbound(
         );
         return error.InvalidConfig;
     }
+    try validateInboundTlsAuth(tls, index, diagnostic);
     var alpn_path_buffer: [64]u8 = undefined;
     const alpn_path = std.fmt.bufPrint(
         &alpn_path_buffer,
@@ -314,6 +325,42 @@ fn validateVlessInbound(
         .{index},
     ) catch return error.InvalidConfig;
     try validateAlpn(tls.alpn, null, alpn_path, diagnostic);
+}
+
+fn validateInboundTlsAuth(
+    tls: Config.InboundTls,
+    index: usize,
+    diagnostic: *Diagnostic,
+) ValidationError!void {
+    if (tls.client_auth != .none) {
+        const ca = tls.client_ca orelse {
+            diagnostic.set(
+                "inbounds[{d}].tls.client_ca: required when client_auth is enabled",
+                .{index},
+            );
+            return error.InvalidConfig;
+        };
+        if (ca.len == 0) {
+            diagnostic.set(
+                "inbounds[{d}].tls.client_ca: must not be empty",
+                .{index},
+            );
+            return error.InvalidConfig;
+        }
+    } else if (tls.client_ca) |ca| {
+        if (ca.len == 0) {
+            diagnostic.set(
+                "inbounds[{d}].tls.client_ca: must not be empty",
+                .{index},
+            );
+            return error.InvalidConfig;
+        }
+        diagnostic.set(
+            "inbounds[{d}].tls.client_ca: requires client_auth",
+            .{index},
+        );
+        return error.InvalidConfig;
+    }
 }
 
 fn validateTrojanInbound(
@@ -355,6 +402,7 @@ fn validateTrojanInbound(
         );
         return error.InvalidConfig;
     }
+    try validateInboundTlsAuth(tls, index, diagnostic);
     if (inbound.fallback) |fallback| {
         if (fallback.len == 0) {
             diagnostic.set("inbounds[{d}].fallback: must not be empty", .{index});
@@ -528,6 +576,33 @@ fn validateOutboundTls(
             .{index},
         );
         return error.InvalidConfig;
+    }
+    const has_certificate = tls_config.client_certificate != null;
+    const has_private_key = tls_config.client_private_key != null;
+    if (has_certificate != has_private_key) {
+        diagnostic.set(
+            "outbounds[{d}].tls.client_certificate: requires client_private_key and vice versa",
+            .{index},
+        );
+        return error.InvalidConfig;
+    }
+    if (tls_config.client_certificate) |path| {
+        if (path.len == 0) {
+            diagnostic.set(
+                "outbounds[{d}].tls.client_certificate: must not be empty",
+                .{index},
+            );
+            return error.InvalidConfig;
+        }
+    }
+    if (tls_config.client_private_key) |path| {
+        if (path.len == 0) {
+            diagnostic.set(
+                "outbounds[{d}].tls.client_private_key: must not be empty",
+                .{index},
+            );
+            return error.InvalidConfig;
+        }
     }
     var alpn_path_buffer: [64]u8 = undefined;
     const alpn_path = std.fmt.bufPrint(
@@ -1091,6 +1166,71 @@ test "config validates VLESS inbound TLS fields" {
     );
     try std.testing.expectEqualStrings(
         "inbounds[0].uuid: invalid UUID",
+        diagnostic.message(),
+    );
+}
+
+test "config validates TLS client authentication and client credentials" {
+    var diagnostic: Diagnostic = .{};
+    var valid = try fromJson(std.testing.allocator,
+        \\{
+        \\  "inbounds": [
+        \\    { "tag": "vless", "protocol": "vless", "listen": "127.0.0.1:443",
+        \\      "uuid": "00112233-4455-6677-8899-aabbccddeeff",
+        \\      "tls": { "certificate": "cert.pem", "private_key": "key.pem",
+        \\               "client_ca": "clients.pem", "client_auth": "required" } }
+        \\  ],
+        \\  "outbounds": [
+        \\    { "tag": "proxy", "protocol": "vless",
+        \\      "server": "example.com:443",
+        \\      "uuid": "00112233-4455-6677-8899-aabbccddeeff",
+        \\      "tls": { "sni": "example.com",
+        \\               "client_certificate": "client.pem",
+        \\               "client_private_key": "client-key.pem" } }
+        \\  ]
+        \\}
+    );
+    defer valid.deinit();
+    try validate(valid.inner.value, &diagnostic);
+
+    var missing_ca = try fromJson(std.testing.allocator,
+        \\{
+        \\  "inbounds": [
+        \\    { "tag": "vless", "protocol": "vless", "listen": "127.0.0.1:443",
+        \\      "uuid": "00112233-4455-6677-8899-aabbccddeeff",
+        \\      "tls": { "certificate": "cert.pem", "private_key": "key.pem",
+        \\               "client_auth": "optional" } }
+        \\  ]
+        \\}
+    );
+    defer missing_ca.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(missing_ca.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "inbounds[0].tls.client_ca: required when client_auth is enabled",
+        diagnostic.message(),
+    );
+
+    var half_client_cert = try fromJson(std.testing.allocator,
+        \\{
+        \\  "outbounds": [
+        \\    { "tag": "proxy", "protocol": "vless",
+        \\      "server": "example.com:443",
+        \\      "uuid": "00112233-4455-6677-8899-aabbccddeeff",
+        \\      "tls": { "sni": "example.com",
+        \\               "client_certificate": "client.pem" } }
+        \\  ]
+        \\}
+    );
+    defer half_client_cert.deinit();
+    try std.testing.expectError(
+        error.InvalidConfig,
+        validate(half_client_cert.inner.value, &diagnostic),
+    );
+    try std.testing.expectEqualStrings(
+        "outbounds[0].tls.client_certificate: requires client_private_key and vice versa",
         diagnostic.message(),
     );
 }

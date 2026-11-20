@@ -32,9 +32,9 @@ Statuses: `Proposed` → `Accepted` | `Rejected` | `Superseded by ADR-NNNN`.
 | [0009](0009-licensing-and-interop.md) | Licensing and interop hygiene | Accepted | LGPL-2.1; clean-room protocol work |
 | [0010](0010-tls-module-package.md) | TLS module as a replaceable package | Accepted | `packages/tls13`; std-only API; path dependency |
 | [0011](0011-trojan-inbound-fallback.md) | Trojan inbound fallback | Accepted | optional explicit fallback; routed through `Dispatch`; no default |
-| [0012](0012-tls-alpn.md) | TLS ALPN negotiation | Accepted | ALPN on client and server; in-tree TLS 1.3 client |
-| [0013](0013-http2-package.md) | HTTP/2 transport package | Accepted | `packages/http2`; one stream; framing/HPACK/flow control |
-| [0014](0014-websocket-package.md) | WebSocket transport package | Accepted | `packages/ws`; RFC 6455 handshake and framing |
+| [0012](0012-tls-alpn.md) | TLS ALPN negotiation | Accepted | ALPN, mTLS, AES-128/256-GCM and ChaCha20-Poly1305, X25519/P-256, KeyUpdate |
+| [0013](0013-http2-package.md) | HTTP/2 transport package | Accepted | `packages/http2`; 16-stream multiplexing; framing/HPACK/flow control; 1xx/trailers |
+| [0014](0014-websocket-package.md) | WebSocket transport package | Accepted | `packages/ws`; RFC 6455, permessage-deflate, subprotocols |
 | [0015](0015-connection-limits-and-timeouts.md) | Connection limits and idle timeouts | Accepted | global limits 1024/10/300/1/1; per-Instance reaper; UDP excluded |
 
 ## Accepted decisions

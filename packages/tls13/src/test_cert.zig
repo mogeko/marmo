@@ -30,6 +30,9 @@ pub const Params = struct {
     include_basic_constraints: bool = false,
     include_key_usage: bool = false,
     eku_server_auth: bool = false,
+    eku_client_auth: bool = false,
+    /// Adds a critical permitted DNS name constraint to a CA certificate.
+    name_constraints_dns: ?[]const u8 = null,
     /// Emits a zero-length SIGNATURE BIT STRING for parser hardening tests.
     empty_signature: bool = false,
     /// Wrapper tag for the [3] extensions field. Non-0xa3 values exercise
@@ -285,20 +288,52 @@ fn buildExtensions(gpa: std.mem.Allocator, params: Params) ![]u8 {
             bit_string,
         );
     }
-    if (params.eku_server_auth) {
+    if (params.eku_server_auth or params.eku_client_auth) {
         const server_auth = try tlv(
             gpa,
             0x06,
             &.{ 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01 },
         );
         defer gpa.free(server_auth);
-        const value = try tlv(gpa, 0x30, server_auth);
+        const client_auth = try tlv(
+            gpa,
+            0x06,
+            &.{ 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x02 },
+        );
+        defer gpa.free(client_auth);
+        var eku_content: std.ArrayList(u8) = .empty;
+        defer eku_content.deinit(gpa);
+        if (params.eku_server_auth) {
+            try eku_content.appendSlice(gpa, server_auth);
+        }
+        if (params.eku_client_auth) {
+            try eku_content.appendSlice(gpa, client_auth);
+        }
+        const value = try tlv(gpa, 0x30, eku_content.items);
         defer gpa.free(value);
         try appendExtension(
             gpa,
             &extensions,
             &.{ 0x55, 0x1d, 0x25 },
             false,
+            value,
+        );
+    }
+
+    if (params.name_constraints_dns) |dns| {
+        const general = try tlv(gpa, 0x82, dns);
+        defer gpa.free(general);
+        const subtree = try tlv(gpa, 0x30, general);
+        defer gpa.free(subtree);
+        const permitted = try tlv(gpa, 0xa0, subtree);
+        defer gpa.free(permitted);
+        const value = try tlv(gpa, 0x30, permitted);
+        defer gpa.free(value);
+        try appendExtension(
+            gpa,
+            &extensions,
+            &.{ 0x55, 0x1d, 0x1e },
+            true,
             value,
         );
     }

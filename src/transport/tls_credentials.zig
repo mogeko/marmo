@@ -17,6 +17,87 @@ pub const LoadError = error{
     InvalidCredentials,
 };
 
+pub const ClientCredentials = struct {
+    certificate_chain: []const []const u8,
+    private_key: Ecdsa.KeyPair,
+};
+
+/// Loads a client certificate chain and matching ECDSA P-256 key. The caller
+/// owns the returned chain; the key is zeroized on `deinit`.
+pub fn loadClientCredentials(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    certificate_path: []const u8,
+    private_key_path: []const u8,
+) LoadError!ClientCredentials {
+    const certificate_text = readFile(
+        allocator,
+        io,
+        certificate_path,
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidCredentials,
+    };
+    defer allocator.free(certificate_text);
+    const private_key_text = readFile(
+        allocator,
+        io,
+        private_key_path,
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidCredentials,
+    };
+    defer {
+        std.crypto.secureZero(u8, private_key_text);
+        allocator.free(private_key_text);
+    }
+
+    const chain = try parseCertificateChain(allocator, certificate_text);
+    errdefer freeCertificateChain(allocator, chain);
+    var key = try parsePrivateKey(allocator, private_key_text);
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&key));
+
+    tls13.validateCredentials(chain, key) catch
+        return error.InvalidCredentials;
+    return .{ .certificate_chain = chain, .private_key = key };
+}
+
+/// Loads one or more PEM/DER trust anchors into a certificate bundle. The
+/// caller owns the bundle and its allocator. Every certificate is shape-checked
+/// before the std parser sees it; a malformed CA file is a config error, not a
+/// process abort.
+pub fn loadClientCa(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+) LoadError!std.crypto.Certificate.Bundle {
+    const text = readFile(allocator, io, path) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidCredentials,
+    };
+    defer allocator.free(text);
+    const chain = try parseCertificateChain(allocator, text);
+    defer freeCertificateChain(allocator, chain);
+    if (chain.len == 0) return error.InvalidCredentials;
+
+    var bundle: std.crypto.Certificate.Bundle = .empty;
+    errdefer bundle.deinit(allocator);
+    const now_sec = std.Io.Timestamp.now(io, .real).toSeconds();
+    for (chain) |der| {
+        tls13.cert_path.validateCertificateDer(der) catch
+            return error.InvalidCredentials;
+        const start: u32 = @intCast(bundle.bytes.items.len);
+        bundle.bytes.appendSlice(allocator, der) catch
+            return error.OutOfMemory;
+        bundle.parseCert(allocator, start, now_sec) catch {
+            bundle.bytes.items.len = start;
+            return error.InvalidCredentials;
+        };
+    }
+    if (bundle.bytes.items.len == 0) return error.InvalidCredentials;
+    return bundle;
+}
+
 pub fn loadOptions(
     allocator: std.mem.Allocator,
     io: std.Io,
