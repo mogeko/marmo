@@ -594,6 +594,116 @@ impl Window {
     }
 }
 
+/// The authenticated fixed header of a TCP client request.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ClientRequestFixed {
+    /// Request salt (zero-padded).
+    pub salt: [u8; 32],
+    /// Salt length.
+    pub salt_len: u8,
+    /// Subkey for the request body.
+    pub recv_key: [u8; 32],
+    /// Variable-header length declared by the fixed header.
+    pub variable_len: usize,
+}
+
+/// Decodes only the fixed header of a TCP client request.
+///
+/// `bytes` must hold `salt_len + 11 + TAG_LENGTH` bytes; the caller reads the
+/// variable header next using [`decode_client_variable`].
+pub fn decode_client_fixed(
+    method: Method,
+    psk: &[u8],
+    bytes: &[u8],
+    now: u64,
+) -> Result<ClientRequestFixed, SsError> {
+    let salt_len = method.salt_len();
+    if psk.len() < method.key_len() || bytes.len() < salt_len + 11 + TAG_LENGTH {
+        return Err(SsError::MalformedPacket);
+    }
+    let salt = &bytes[..salt_len];
+    let mut subkey = derive_subkey(method, psk, salt);
+
+    let mut fixed = [0_u8; 11];
+    let fixed_len = open(
+        method,
+        &subkey,
+        nonce_from_counter(0),
+        &bytes[salt_len..salt_len + 11 + TAG_LENGTH],
+        &mut fixed,
+    )?;
+    if fixed_len != 11 || fixed[0] != 0 {
+        return Err(SsError::ProtocolViolation);
+    }
+    let timestamp = u64::from_be_bytes(
+        fixed[1..9]
+            .try_into()
+            .map_err(|_| SsError::MalformedPacket)?,
+    );
+    if !validate_timestamp(timestamp, now) {
+        return Err(SsError::ProtocolViolation);
+    }
+    let variable_len = usize::from(u16::from_be_bytes([fixed[9], fixed[10]]));
+    if variable_len == 0 {
+        return Err(SsError::ProtocolViolation);
+    }
+
+    let mut salt_copy = [0_u8; 32];
+    salt_copy[..salt_len].copy_from_slice(salt);
+    let mut recv_key = [0_u8; 32];
+    recv_key[..method.key_len()].copy_from_slice(&subkey[..method.key_len()]);
+    subkey.zeroize();
+
+    Ok(ClientRequestFixed {
+        salt: salt_copy,
+        salt_len: salt_len as u8,
+        recv_key,
+        variable_len,
+    })
+}
+
+/// Decodes the variable header of a TCP client request.
+///
+/// `bytes` must hold `fixed.variable_len + TAG_LENGTH` bytes, and `plaintext`
+/// must have room for `fixed.variable_len` bytes.
+pub fn decode_client_variable<'a>(
+    method: Method,
+    fixed: &ClientRequestFixed,
+    bytes: &[u8],
+    plaintext: &'a mut [u8],
+) -> Result<(Endpoint, &'a [u8]), SsError> {
+    let variable_len = fixed.variable_len;
+    if bytes.len() < variable_len + TAG_LENGTH || plaintext.len() < variable_len {
+        return Err(SsError::MalformedPacket);
+    }
+    let plain_len = open(
+        method,
+        &fixed.recv_key,
+        nonce_from_counter(1),
+        &bytes[..variable_len + TAG_LENGTH],
+        &mut plaintext[..variable_len],
+    )?;
+    if plain_len != variable_len {
+        return Err(SsError::ProtocolViolation);
+    }
+
+    let (target, mut offset) = decode_address(&plaintext[..variable_len], 0)?;
+    if offset + 2 > variable_len {
+        return Err(SsError::ProtocolViolation);
+    }
+    let padding_len = usize::from(read_u16(&plaintext[offset..offset + 2]));
+    offset += 2;
+    if padding_len > MAX_PADDING || offset + padding_len > variable_len {
+        return Err(SsError::ProtocolViolation);
+    }
+    offset += padding_len;
+    let initial_payload = &plaintext[offset..variable_len];
+    if initial_payload.is_empty() && padding_len == 0 {
+        return Err(SsError::ProtocolViolation);
+    }
+    Ok((target, initial_payload))
+}
+
 /// A decoded TCP client request header.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ClientRequest<'a> {
@@ -681,22 +791,67 @@ pub fn decode_client_request<'a>(
     plaintext: &'a mut [u8],
     now: u64,
 ) -> Result<ClientRequest<'a>, SsError> {
+    let fixed = decode_client_fixed(method, psk, bytes, now)?;
+    let variable_start = usize::from(fixed.salt_len) + 11 + TAG_LENGTH;
+    let total = variable_start + fixed.variable_len + TAG_LENGTH;
+    if bytes.len() < total {
+        return Err(SsError::MalformedPacket);
+    }
+    let (target, initial_payload) =
+        decode_client_variable(method, &fixed, &bytes[variable_start..total], plaintext)?;
+    Ok(ClientRequest {
+        salt: fixed.salt,
+        salt_len: fixed.salt_len,
+        recv_key: fixed.recv_key,
+        target,
+        initial_payload,
+        consumed: total,
+    })
+}
+
+/// The authenticated fixed header of a TCP server response.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServerResponseFixed {
+    /// Response salt (zero-padded).
+    pub salt: [u8; 32],
+    /// Salt length.
+    pub salt_len: u8,
+    /// Subkey for the response body.
+    pub send_key: [u8; 32],
+    /// Length of the first payload carried after the fixed header.
+    pub first_len: usize,
+}
+
+/// Decodes only the fixed header of a TCP server response.
+///
+/// `bytes` must hold `salt_len + 11 + request_salt.len() + TAG_LENGTH` bytes;
+/// the caller reads the first payload next using [`decode_server_variable`].
+pub fn decode_server_fixed(
+    method: Method,
+    psk: &[u8],
+    request_salt: &[u8],
+    bytes: &[u8],
+    now: u64,
+) -> Result<ServerResponseFixed, SsError> {
     let salt_len = method.salt_len();
-    if bytes.len() < salt_len + 11 + TAG_LENGTH || psk.len() < method.key_len() {
+    let fixed_len = 11 + salt_len;
+    if request_salt.len() != salt_len
+        || psk.len() < method.key_len()
+        || bytes.len() < salt_len + fixed_len + TAG_LENGTH
+    {
         return Err(SsError::MalformedPacket);
     }
     let salt = &bytes[..salt_len];
     let mut subkey = derive_subkey(method, psk, salt);
-
-    let mut fixed = [0_u8; 11];
-    let fixed_len = open(
+    let mut fixed = [0_u8; 43];
+    let opened = open(
         method,
         &subkey,
         nonce_from_counter(0),
-        &bytes[salt_len..salt_len + 11 + TAG_LENGTH],
-        &mut fixed,
+        &bytes[salt_len..salt_len + fixed_len + TAG_LENGTH],
+        &mut fixed[..fixed_len],
     )?;
-    if fixed_len != 11 || fixed[0] != 0 {
+    if opened != fixed_len || fixed[0] != 1 {
         return Err(SsError::ProtocolViolation);
     }
     let timestamp = u64::from_be_bytes(
@@ -707,56 +862,55 @@ pub fn decode_client_request<'a>(
     if !validate_timestamp(timestamp, now) {
         return Err(SsError::ProtocolViolation);
     }
-    let variable_len = usize::from(u16::from_be_bytes([fixed[9], fixed[10]]));
-    if variable_len == 0 {
+    if &fixed[9..9 + salt_len] != request_salt {
         return Err(SsError::ProtocolViolation);
     }
-
-    let variable_start = salt_len + 11 + TAG_LENGTH;
-    let total = variable_start + variable_len + TAG_LENGTH;
-    if bytes.len() < total || plaintext.len() < variable_len {
-        return Err(SsError::MalformedPacket);
-    }
-    let plain_len = open(
-        method,
-        &subkey,
-        nonce_from_counter(1),
-        &bytes[variable_start..total],
-        &mut plaintext[..variable_len],
-    )?;
-    if plain_len != variable_len {
-        return Err(SsError::ProtocolViolation);
-    }
-
-    let (target, mut offset) = decode_address(&plaintext[..variable_len], 0)?;
-    if offset + 2 > variable_len {
-        return Err(SsError::ProtocolViolation);
-    }
-    let padding_len = usize::from(read_u16(&plaintext[offset..offset + 2]));
-    offset += 2;
-    if padding_len > MAX_PADDING || offset + padding_len > variable_len {
-        return Err(SsError::ProtocolViolation);
-    }
-    offset += padding_len;
-    let initial_payload = &plaintext[offset..variable_len];
-    if initial_payload.is_empty() && padding_len == 0 {
+    let first_len = usize::from(u16::from_be_bytes([
+        fixed[9 + salt_len],
+        fixed[10 + salt_len],
+    ]));
+    if first_len == 0 {
         return Err(SsError::ProtocolViolation);
     }
 
     let mut salt_copy = [0_u8; 32];
     salt_copy[..salt_len].copy_from_slice(salt);
-    let mut recv_key = [0_u8; 32];
-    recv_key[..method.key_len()].copy_from_slice(&subkey[..method.key_len()]);
+    let mut send_key = [0_u8; 32];
+    send_key[..method.key_len()].copy_from_slice(&subkey[..method.key_len()]);
     subkey.zeroize();
-
-    Ok(ClientRequest {
+    Ok(ServerResponseFixed {
         salt: salt_copy,
         salt_len: salt_len as u8,
-        recv_key,
-        target,
-        initial_payload,
-        consumed: total,
+        send_key,
+        first_len,
     })
+}
+
+/// Decodes the first payload of a TCP server response.
+///
+/// `bytes` must hold `fixed.first_len + TAG_LENGTH` bytes, and `plaintext`
+/// must have room for `fixed.first_len` bytes.
+pub fn decode_server_variable<'a>(
+    method: Method,
+    fixed: &ServerResponseFixed,
+    bytes: &[u8],
+    plaintext: &'a mut [u8],
+) -> Result<&'a [u8], SsError> {
+    let first_len = fixed.first_len;
+    if bytes.len() < first_len + TAG_LENGTH || plaintext.len() < first_len {
+        return Err(SsError::MalformedPacket);
+    }
+    let opened = open(
+        method,
+        &fixed.send_key,
+        nonce_from_counter(1),
+        &bytes[..first_len + TAG_LENGTH],
+        &mut plaintext[..first_len],
+    )?;
+    if opened != first_len {
+        return Err(SsError::ProtocolViolation);
+    }
+    Ok(&plaintext[..first_len])
 }
 
 /// A decoded TCP server response header.
@@ -833,68 +987,20 @@ pub fn decode_server_response<'a>(
     plaintext: &'a mut [u8],
     now: u64,
 ) -> Result<ServerResponse<'a>, SsError> {
-    let salt_len = method.salt_len();
-    if request_salt.len() != salt_len || bytes.len() < salt_len + 11 + salt_len + TAG_LENGTH {
-        return Err(SsError::MalformedPacket);
-    }
-    let salt = &bytes[..salt_len];
-    let mut subkey = derive_subkey(method, psk, salt);
-    let fixed_len = 11 + salt_len;
-    let mut fixed = [0_u8; 43];
-    let opened = open(
-        method,
-        &subkey,
-        nonce_from_counter(0),
-        &bytes[salt_len..salt_len + fixed_len + TAG_LENGTH],
-        &mut fixed[..fixed_len],
-    )?;
-    if opened != fixed_len || fixed[0] != 1 {
-        return Err(SsError::ProtocolViolation);
-    }
-    let timestamp = u64::from_be_bytes(
-        fixed[1..9]
-            .try_into()
-            .map_err(|_| SsError::MalformedPacket)?,
-    );
-    if !validate_timestamp(timestamp, now) {
-        return Err(SsError::ProtocolViolation);
-    }
-    if &fixed[9..9 + salt_len] != request_salt {
-        return Err(SsError::ProtocolViolation);
-    }
-    let first_len = usize::from(u16::from_be_bytes([
-        fixed[9 + salt_len],
-        fixed[10 + salt_len],
-    ]));
-    if first_len == 0 || plaintext.len() < first_len {
-        return Err(SsError::ProtocolViolation);
-    }
-    let payload_start = salt_len + fixed_len + TAG_LENGTH;
-    let total = payload_start + first_len + TAG_LENGTH;
+    let fixed = decode_server_fixed(method, psk, request_salt, bytes, now)?;
+    let salt_len = usize::from(fixed.salt_len);
+    let payload_start = salt_len + 11 + salt_len + TAG_LENGTH;
+    let total = payload_start + fixed.first_len + TAG_LENGTH;
     if bytes.len() < total {
         return Err(SsError::MalformedPacket);
     }
-    let opened = open(
-        method,
-        &subkey,
-        nonce_from_counter(1),
-        &bytes[payload_start..total],
-        &mut plaintext[..first_len],
-    )?;
-    if opened != first_len {
-        return Err(SsError::ProtocolViolation);
-    }
-
-    let mut salt_copy = [0_u8; 32];
-    salt_copy[..salt_len].copy_from_slice(salt);
-    let mut send_key = [0_u8; 32];
-    send_key[..method.key_len()].copy_from_slice(&subkey[..method.key_len()]);
-    subkey.zeroize();
+    let first_payload =
+        decode_server_variable(method, &fixed, &bytes[payload_start..total], plaintext)?;
     Ok(ServerResponse {
-        salt: salt_copy,
-        salt_len: salt_len as u8,
-        send_key,
-        first_payload: &plaintext[..first_len],
+        salt: fixed.salt,
+        salt_len: fixed.salt_len,
+        send_key: fixed.send_key,
+        first_payload,
         consumed: total,
     })
 }
@@ -1225,6 +1331,65 @@ mod tests {
                 Err(SsError::AuthenticationFailed)
             );
         }
+    }
+
+    #[test]
+    fn tcp_request_headers_decode_in_two_steps() {
+        let method = Method::Aes256Gcm;
+        let psk = key(method);
+        let salt = [7_u8; 32];
+        let target = Endpoint::from_domain("two-step.example", 80).expect("domain");
+        let mut encoded = [0_u8; 1024];
+        let length = encode_client_request(
+            method,
+            &psk,
+            &salt,
+            &target,
+            1_000,
+            b"pad",
+            b"payload",
+            &mut encoded,
+        )
+        .expect("encode");
+
+        let fixed_len = salt.len() + 11 + TAG_LENGTH;
+        let fixed = decode_client_fixed(method, &psk, &encoded[..fixed_len], 1_000).expect("fixed");
+        assert_eq!(fixed.variable_len, length - fixed_len - TAG_LENGTH);
+        assert_eq!(&fixed.salt[..32], &salt[..]);
+
+        let mut plaintext = [0_u8; 1024];
+        let (decoded_target, payload) =
+            decode_client_variable(method, &fixed, &encoded[fixed_len..length], &mut plaintext)
+                .expect("variable");
+        assert_eq!(decoded_target, target);
+        assert_eq!(payload, b"payload");
+
+        let response_salt = [3_u8; 32];
+        let mut response = [0_u8; 512];
+        let response_len = encode_server_response(
+            method,
+            &psk,
+            &salt,
+            &response_salt,
+            1_000,
+            b"first",
+            &mut response,
+        )
+        .expect("encode response");
+        let response_fixed_len = salt.len() + 11 + 32 + TAG_LENGTH;
+        let fixed =
+            decode_server_fixed(method, &psk, &salt, &response[..response_fixed_len], 1_000)
+                .expect("response fixed");
+        assert_eq!(fixed.first_len, 5);
+        let mut plaintext = [0_u8; 64];
+        let first = decode_server_variable(
+            method,
+            &fixed,
+            &response[response_fixed_len..response_len],
+            &mut plaintext,
+        )
+        .expect("response variable");
+        assert_eq!(first, b"first");
     }
 
     #[test]

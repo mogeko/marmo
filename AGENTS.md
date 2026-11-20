@@ -11,7 +11,7 @@ repository ships the library only: no CLI, daemon, or `app` layer.
   decision and wait for the user.
 - Migration freeze (2026-11-21): G1 passed; ADR-0017..ADR-0020 are accepted and
   `docs/architecture.md` is the target Rust design. R1 is complete; R2 is
-  next. The Zig tree remains frozen: no Zig features, no
+  under way. The Zig tree remains frozen: no Zig features, no
   refactors, no exception beyond security fixes and fixture additions. Rust
   work follows `docs/architecture.md` and `crates/README.md`.
 - Accepted ADRs are immutable; supersede them with a new ADR instead of editing.
@@ -21,8 +21,11 @@ repository ships the library only: no CLI, daemon, or `app` layer.
 
 ## Repo state
 
-- The Rust target lives in `crates/` (R0: workspace, CI, license gate). It is
-  unreleased; `master` stays Zig-only until the parity integration merge.
+- The Rust target lives in `crates/` (R2: workspace and CI, config and
+  validation, routing, limits, SOCKS5 CONNECT + UDP ASSOCIATE, HTTP CONNECT
+  and forwarding, HTTP CONNECT outbound, SS2022 primitives, UDP packet codec,
+  and TCP stream). It is unreleased; `master` stays Zig-only until the parity
+  integration merge.
 - Phase 1 MVP is implemented. Phase 2 has started with outbound selectors:
   manual, round-robin, random, fallback, and least-latency, plus active TCP
   health probes, VLESS outbound and inbound over TCP/TLS/WebSocket/HTTP/2

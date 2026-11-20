@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 base64.workspace = true
+getrandom.workspace = true
 httparse.workspace = true
 marmo-net = { workspace = true, features = ["serde"] }
 marmo-proto.workspace = true

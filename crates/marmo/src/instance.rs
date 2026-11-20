@@ -12,6 +12,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use marmo_net::{Endpoint, Network};
+use marmo_proto::shadowsocks::{Key, Method};
+use marmo_transport::BoxStream;
 use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Handle;
@@ -21,10 +23,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::{Config, ConfigError, InboundProtocol, OutboundProtocol};
 use crate::direct;
-use crate::inbound::{http, socks5};
+use crate::inbound::{self, http, socks5};
 use crate::limits::Limits;
-use crate::outbound::http_connect;
+use crate::outbound::{self, http_connect};
 use crate::routing::{Action, Router, RoutingError};
+use crate::shadowsocks::credentials;
 use crate::supervisor::Supervisor;
 
 /// A built instance; no sockets are open yet.
@@ -156,6 +159,15 @@ impl InstanceBuilder {
             let kind = match inbound.protocol {
                 InboundProtocol::Socks5 => InboundKind::Socks5,
                 InboundProtocol::Http => InboundKind::Http,
+                InboundProtocol::Shadowsocks => {
+                    let (method, key) =
+                        credentials(inbound.method.as_deref(), inbound.password.as_deref())
+                            .map_err(|error| BuildError::Credentials {
+                                tag: inbound.tag.clone(),
+                                reason: error.to_string(),
+                            })?;
+                    InboundKind::Shadowsocks { method, key }
+                }
                 protocol => {
                     return Err(BuildError::UnsupportedInbound {
                         tag: inbound.tag.clone(),
@@ -198,6 +210,30 @@ impl InstanceBuilder {
                             value: server.to_string(),
                         })?;
                     outbounds.push(OutboundKind::Http { server });
+                }
+                OutboundProtocol::Shadowsocks => {
+                    let Some(server) = outbound.server.as_deref() else {
+                        return Err(BuildError::OutboundEndpoint {
+                            tag: outbound.tag.clone(),
+                            value: String::new(),
+                        });
+                    };
+                    let server =
+                        Endpoint::parse(server).map_err(|_| BuildError::OutboundEndpoint {
+                            tag: outbound.tag.clone(),
+                            value: server.to_string(),
+                        })?;
+                    let (method, key) =
+                        credentials(outbound.method.as_deref(), outbound.password.as_deref())
+                            .map_err(|error| BuildError::Credentials {
+                                tag: outbound.tag.clone(),
+                                reason: error.to_string(),
+                            })?;
+                    outbounds.push(OutboundKind::Shadowsocks {
+                        server,
+                        method,
+                        key,
+                    });
                 }
                 protocol => {
                     return Err(BuildError::UnsupportedOutbound {
@@ -370,12 +406,28 @@ impl Context {
         }
     }
 
-    pub(crate) async fn connect(&self, action: Action, target: &Endpoint) -> io::Result<TcpStream> {
+    pub(crate) async fn connect(
+        &self,
+        action: Action,
+        target: &Endpoint,
+    ) -> io::Result<(BoxStream, Option<SocketAddr>)> {
         match action {
-            Action::Direct => direct::connect(target).await,
+            Action::Direct => direct::connect(target).await.map(boxed),
             Action::Route(id) => match self.outbounds.get(id.index() as usize) {
-                Some(OutboundKind::Direct) => direct::connect(target).await,
-                Some(OutboundKind::Http { server }) => http_connect::connect(server, target).await,
+                Some(OutboundKind::Direct) => direct::connect(target).await.map(boxed),
+                Some(OutboundKind::Http { server }) => {
+                    http_connect::connect(server, target).await.map(boxed)
+                }
+                Some(OutboundKind::Shadowsocks {
+                    server,
+                    method,
+                    key,
+                }) => {
+                    let (stream, bound) =
+                        outbound::shadowsocks::connect(server, *method, Arc::clone(key), target)
+                            .await?;
+                    Ok((Box::new(stream), bound))
+                }
                 None => Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "outbound id is out of range",
@@ -389,16 +441,29 @@ impl Context {
     }
 }
 
+fn boxed(stream: TcpStream) -> (BoxStream, Option<SocketAddr>) {
+    let bound = stream.local_addr().ok();
+    (Box::new(stream), bound)
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum OutboundKind {
     Direct,
-    Http { server: Endpoint },
+    Http {
+        server: Endpoint,
+    },
+    Shadowsocks {
+        server: Endpoint,
+        method: Method,
+        key: Arc<Key>,
+    },
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone)]
 enum InboundKind {
     Socks5,
     Http,
+    Shadowsocks { method: Method, key: Arc<Key> },
 }
 
 struct InboundSpec {
@@ -452,7 +517,7 @@ async fn serve_inbound(inbound: BoundInbound, context: Arc<Context>) -> Result<(
                     continue;
                 };
                 let tag = Arc::clone(&inbound.tag);
-                let kind = inbound.kind;
+                let kind = inbound.kind.clone();
                 let task_context = Arc::clone(&context);
                 let runtime = context.runtime.clone();
                 let _ = connections.spawn_on(async move {
@@ -463,6 +528,16 @@ async fn serve_inbound(inbound: BoundInbound, context: Arc<Context>) -> Result<(
                         }
                         InboundKind::Http => {
                             http::handle(stream, task_context, tag).await;
+                        }
+                        InboundKind::Shadowsocks { method, key } => {
+                            inbound::shadowsocks::handle(
+                                stream,
+                                task_context,
+                                tag,
+                                method,
+                                key,
+                            )
+                            .await;
                         }
                     }
                 }, &runtime);
@@ -526,6 +601,14 @@ pub enum BuildError {
         tag: String,
         /// Configured server string.
         value: String,
+    },
+    /// The configured credentials could not be used.
+    #[error("'{tag}' has invalid credentials: {reason}")]
+    Credentials {
+        /// Inbound or outbound tag.
+        tag: String,
+        /// Why the credentials were rejected.
+        reason: String,
     },
 }
 
