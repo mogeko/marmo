@@ -46,7 +46,7 @@ pub fn verifyServerChain(
     var previous = leaf_cert;
     var trusted = false;
     if (params.bundle) |bundle| {
-        trusted = try bundleTrusts(bundle, leaf_cert, params.now_sec);
+        trusted = try bundleTrusts(bundle, leaf_cert, params.now_sec, params.host);
     }
     if (trusted) return;
 
@@ -59,7 +59,7 @@ pub fn verifyServerChain(
         previous.verify(subject, params.now_sec) catch
             return error.CertificateRejected;
         if (params.bundle) |bundle| {
-            if (try bundleTrusts(bundle, subject, params.now_sec)) {
+            if (try bundleTrusts(bundle, subject, params.now_sec, params.host)) {
                 trusted = true;
                 break;
             }
@@ -70,8 +70,80 @@ pub fn verifyServerChain(
 }
 
 fn parse(bytes: []const u8) !Certificate.Parsed {
+    try validateCertificateDer(bytes);
     const certificate: Certificate = .{ .buffer = bytes, .index = 0 };
     return certificate.parse();
+}
+
+/// Validates every DER TLV boundary before handing the certificate to
+/// `std.crypto.Certificate`, whose parser assumes a well-formed buffer.
+pub fn validateCertificateDer(bytes: []const u8) Error!void {
+    if (bytes.len < 2) return error.CertificateRejected;
+    const top = try readTlv(bytes, 0);
+    if (top.tag != 0x30) return error.CertificateRejected;
+    if (top.content_end != bytes.len) return error.CertificateRejected;
+
+    var stack: [64]usize = undefined;
+    var depth: usize = 0;
+    stack[0] = top.content_end;
+    depth = 1;
+    var cursor = top.content_start;
+    while (depth != 0) {
+        const end = stack[depth - 1];
+        if (cursor == end) {
+            depth -= 1;
+            continue;
+        }
+        if (cursor > end) return error.CertificateRejected;
+        const tlv = try readTlv(bytes, cursor);
+        if (tlv.content_end > end) return error.CertificateRejected;
+        if (tlv.tag & 0x20 != 0) {
+            if (depth == stack.len) return error.CertificateRejected;
+            stack[depth] = tlv.content_end;
+            depth += 1;
+            cursor = tlv.content_start;
+        } else {
+            cursor = tlv.content_end;
+        }
+    }
+}
+
+const Tlv = struct {
+    tag: u8,
+    content_start: usize,
+    content_end: usize,
+    next: usize,
+};
+
+fn readTlv(bytes: []const u8, index: usize) Error!Tlv {
+    if (index + 2 > bytes.len) return error.CertificateRejected;
+    const tag = bytes[index];
+    const size_byte = bytes[index + 1];
+    var cursor = index + 2;
+    var length: usize = 0;
+    if (size_byte & 0x80 == 0) {
+        length = size_byte;
+    } else {
+        const count = size_byte & 0x7f;
+        if (count == 0 or count > 4) return error.CertificateRejected;
+        if (cursor + count > bytes.len) return error.CertificateRejected;
+        for (bytes[cursor..][0..count]) |byte| {
+            length = std.math.mul(usize, length, 256) catch
+                return error.CertificateRejected;
+            length = std.math.add(usize, length, byte) catch
+                return error.CertificateRejected;
+        }
+        cursor += count;
+    }
+    const end = std.math.add(usize, cursor, length) catch
+        return error.CertificateRejected;
+    if (end > bytes.len) return error.CertificateRejected;
+    return .{
+        .tag = tag,
+        .content_start = cursor,
+        .content_end = end,
+        .next = end,
+    };
 }
 
 fn copyLeaf(subject: Certificate.Parsed, leaf: *Leaf) Error!void {
@@ -88,11 +160,32 @@ fn bundleTrusts(
     bundle: *const Certificate.Bundle,
     subject: Certificate.Parsed,
     now_sec: i64,
+    host: ?[]const u8,
 ) Error!bool {
     bundle.verify(subject, now_sec) catch |err| switch (err) {
         error.CertificateIssuerNotFound => return false,
         else => return error.CertificateRejected,
     };
+    // Apply trust-anchor constraints found in the bundle. A trust anchor is
+    // still allowed to omit basicConstraints for legacy compatibility.
+    if (bundle.find(subject.issuer())) |index| {
+        const anchor: Certificate = .{
+            .buffer = bundle.bytes.items,
+            .index = index,
+        };
+        const parsed = anchor.parse() catch return error.CertificateRejected;
+        const extensions = parseExtensions(
+            bundle.bytes.items[index..],
+            .issuer,
+        ) catch return error.CertificateRejected;
+        _ = parsed;
+        if (extensions.name_constraints) |constraints| {
+            if (host) |name| try checkNameConstraints(constraints, name);
+        }
+        if (extensions.eku_allows_server) |allowed| {
+            if (!allowed) return error.CertificateRejected;
+        }
+    }
     return true;
 }
 
@@ -122,14 +215,17 @@ fn checkIssuer(
     if (extensions.path_len) |limit| {
         if (limit < ca_below) return error.CertificateRejected;
     }
+    if (extensions.eku_allows_server) |allowed| {
+        if (!allowed) return error.CertificateRejected;
+    }
     if (extensions.name_constraints) |constraints| {
         if (host) |name| try checkNameConstraints(constraints, name);
     }
 }
 
 fn checkNameConstraints(value: []const u8, host: []const u8) Error!void {
-    // IP address SANs are outside this DNS-only policy.
-    if (std.Io.net.IpAddress.parse(host, 0)) |_| return else |_| {}
+    const host_ip = std.Io.net.IpAddress.parse(host, 0) catch null;
+    const host_dns: ?[]const u8 = if (host_ip == null) host else null;
 
     const sequence = elementAt(value, 0) orelse
         return error.CertificateRejected;
@@ -146,20 +242,24 @@ fn checkNameConstraints(value: []const u8, host: []const u8) Error!void {
         const kind = identifier(subtree);
         if (kind != 0xa0 and kind != 0xa1) continue;
         if (kind == 0xa0) permitted_present = true;
-        var base_cursor = subtree.slice.start;
-        while (base_cursor < subtree.slice.end) {
-            const entry = elementAt(value, base_cursor) orelse
+
+        var entry_cursor = subtree.slice.start;
+        while (entry_cursor < subtree.slice.end) {
+            const entry = elementAt(value, entry_cursor) orelse
                 return error.CertificateRejected;
-            base_cursor = entry.slice.end;
-            // GeneralSubtree is a SEQUENCE; its first child is GeneralName.
+            entry_cursor = entry.slice.end;
             if (entry.identifier.tag != .sequence) continue;
             const base = elementAt(value, entry.slice.start) orelse
                 return error.CertificateRejected;
-            if (identifier(base) != 0x82) continue;
-            const dns = value[base.slice.start..base.slice.end];
+            const name = value[base.slice.start..base.slice.end];
+            const matches = switch (identifier(base)) {
+                0x82 => if (host_dns) |dns| dnsMatches(dns, name) else false,
+                0x87 => if (host_ip) |ip| ipMatches(ip, name) else false,
+                else => false,
+            };
             if (kind == 0xa1) {
-                if (dnsMatches(host, dns)) return error.CertificateRejected;
-            } else if (dnsMatches(host, dns)) {
+                if (matches) return error.CertificateRejected;
+            } else if (matches) {
                 permitted_match = true;
             }
         }
@@ -167,6 +267,35 @@ fn checkNameConstraints(value: []const u8, host: []const u8) Error!void {
     if (permitted_present and !permitted_match) {
         return error.CertificateRejected;
     }
+}
+
+fn ipMatches(ip: std.Io.net.IpAddress, constraint: []const u8) bool {
+    return switch (ip) {
+        .ip4 => |address| blk: {
+            if (constraint.len != 8) break :blk false;
+            for (0..4) |index| {
+                const mask = constraint[4 + index];
+                if ((address.bytes[index] & mask) !=
+                    (constraint[index] & mask))
+                {
+                    break :blk false;
+                }
+            }
+            break :blk true;
+        },
+        .ip6 => |address| blk: {
+            if (constraint.len != 32) break :blk false;
+            for (0..16) |index| {
+                const mask = constraint[16 + index];
+                if ((address.bytes[index] & mask) !=
+                    (constraint[index] & mask))
+                {
+                    break :blk false;
+                }
+            }
+            break :blk true;
+        },
+    };
 }
 
 fn dnsMatches(host: []const u8, constraint: []const u8) bool {
@@ -188,6 +317,7 @@ const Extensions = struct {
     key_cert_sign: ?bool = null,
     path_len: ?u16 = null,
     name_constraints: ?[]const u8 = null,
+    eku_allows_server: ?bool = null,
 };
 
 fn parseExtensions(
@@ -282,7 +412,9 @@ fn parseExtensionList(
         } else if (std.mem.eql(u8, oid, &oid_key_usage)) {
             extensions.key_cert_sign = try parseKeyUsage(value);
         } else if (std.mem.eql(u8, oid, &oid_ext_key_usage)) {
-            if (kind == .leaf and !try hasServerAuth(value)) {
+            const allowed = try hasServerAuth(value);
+            extensions.eku_allows_server = allowed;
+            if (kind == .leaf and !allowed) {
                 return error.CertificateRejected;
             }
         } else if (std.mem.eql(u8, oid, &oid_subject_alt_name)) {
@@ -328,6 +460,10 @@ fn parseBasicConstraints(value: []const u8) Error!BasicConstraints {
         if (bytes.len == 0 or bytes.len > 2) {
             return error.CertificateRejected;
         }
+        if (bytes[0] & 0x80 != 0) return error.CertificateRejected;
+        if (bytes.len == 2 and bytes[0] == 0 and bytes[1] < 0x80) {
+            return error.CertificateRejected; // non-minimal DER
+        }
         var path_len: u16 = 0;
         for (bytes) |byte| {
             path_len = std.math.mul(u16, path_len, 256) catch
@@ -368,7 +504,11 @@ fn hasServerAuth(value: []const u8) Error!bool {
             return error.CertificateRejected;
         }
         const oid = value[oid_elem.slice.start..oid_elem.slice.end];
-        if (std.mem.eql(u8, oid, &oid_server_auth)) return true;
+        if (std.mem.eql(u8, oid, &oid_server_auth) or
+            std.mem.eql(u8, oid, &oid_any_ext_key_usage))
+        {
+            return true;
+        }
     }
     return false;
 }
@@ -401,6 +541,7 @@ const oid_name_constraints = [_]u8{ 0x55, 0x1d, 0x1e };
 const oid_server_auth = [_]u8{
     0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01,
 };
+const oid_any_ext_key_usage = [_]u8{ 0x55, 0x1d, 0x25, 0x00 };
 
 test "basicConstraints and keyUsage are parsed" {
     const ca = [_]u8{
@@ -437,5 +578,46 @@ test "name constraints permit and exclude DNS subtrees" {
     try std.testing.expectError(
         error.CertificateRejected,
         checkNameConstraints(&excluded, "proxy.example.com"),
+    );
+}
+
+test "malformed DER is rejected before std parse" {
+    const cases = [_][]const u8{
+        &.{},
+        &.{0x30},
+        &.{ 0x30, 0x01, 0x00 },
+        &.{ 0x30, 0x82, 0xff, 0xff },
+        &.{ 0x31, 0x00 },
+    };
+    for (cases) |bytes| {
+        try std.testing.expectError(
+            error.CertificateRejected,
+            validateCertificateDer(bytes),
+        );
+    }
+}
+
+test "negative and non-minimal pathLen are rejected" {
+    const negative = [_]u8{ 0x30, 0x03, 0x02, 0x01, 0xff };
+    try std.testing.expectError(
+        error.CertificateRejected,
+        parseBasicConstraints(&negative),
+    );
+    const non_minimal = [_]u8{ 0x30, 0x04, 0x02, 0x02, 0x00, 0x01 };
+    try std.testing.expectError(
+        error.CertificateRejected,
+        parseBasicConstraints(&non_minimal),
+    );
+}
+
+test "IP name constraints match address and mask" {
+    const permitted = [_]u8{
+        0x30, 0x0e, 0xa0, 0x0c, 0x30, 0x0a, 0x87, 0x08,
+        10,   0,    0,    0,    255,  0,    0,    0,
+    };
+    try checkNameConstraints(&permitted, "10.1.2.3");
+    try std.testing.expectError(
+        error.CertificateRejected,
+        checkNameConstraints(&permitted, "11.1.2.3"),
     );
 }

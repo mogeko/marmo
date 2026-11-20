@@ -81,6 +81,8 @@ pub const Config = struct {
         alpn: ?[]const []const u8 = null,
         /// Require the server to select this protocol.
         required_alpn: ?[]const u8 = null,
+        /// Treat a missing close_notify as EOF instead of ConnectionReset.
+        allow_truncation_attacks: bool = false,
         handshake_timeout_s: u16 = 10,
     };
 

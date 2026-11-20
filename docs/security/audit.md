@@ -325,3 +325,27 @@ unbounded built-in fuzzer; it is opt-in and not part of CI.
 5. **Side channels**: timing behavior of routing and TLS alert handling was not
    measured. Secret comparisons use constant-time helpers, but this is not a
    complete side-channel analysis.
+
+
+## 6. Second re-audit (2026-11-20)
+
+A second strict pass compared the packages with OpenSSL 4.1, curl/nghttp2,
+Python `h2`/`hpack`, and Python `websockets`. Fixed before this note:
+
+- TLS: DER boundary prevalidation before std certificate parsing; negative
+  pathLen; trust-anchor and IP name constraints; intermediate CA EKU;
+  `allow_truncation_attacks` in outbound config.
+- HTTP/2: server preface SETTINGS order; HEADERS before client ACK; local
+  `END_STREAM` no longer closes the TCP write side; legal server
+  `ENABLE_PUSH=0`; truncation to `ConnectionReset`; optional request path and
+  pseudo-header syntax; response `:status` validation; max header list
+  advertised; HPACK size-update placement.
+- WebSocket: continuation opcodes for writes over 64 KiB; close 1009 for an
+  oversized frame; control-frame keepalive limit; strict close handling.
+- ADR-0015: independent idle/grace deadlines, zero grace immediate, and peer
+  stream abort on timeout.
+
+Residual: TLS RA-05 (outbound connect/DNS cannot yet be canceled by the
+handshake deadline), WebSocket handshake timeout still uses a per-connection
+sleep task, single WS frames remain capped at 64 KiB, and H2 remains limited to
+one stream per connection. These are tracked for the next hardening pass.

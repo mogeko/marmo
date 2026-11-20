@@ -180,6 +180,20 @@ const FakeDispatch = struct {
     };
 };
 
+fn fuzzTlsCertPath(_: Context, smith: *std.testing.Smith) anyerror!void {
+    var input: [16 * 1024]u8 = undefined;
+    const len = smith.slice(&input);
+    var leaf: tls13.cert_path.Leaf = .{};
+    _ = tls13.cert_path.verifyServerChain(&.{input[0..len]}, .{
+        .host = null,
+        .verify_chain = false,
+        .now_sec = 0,
+        .bundle = null,
+    }, &leaf) catch |err| switch (err) {
+        error.CertificateRejected => return,
+    };
+}
+
 fn fuzzTlsServerHello(_: Context, smith: *std.testing.Smith) anyerror!void {
     var buffer: [tls13.handshake.max_handshake]u8 = undefined;
     const len = smith.slice(&buffer);
@@ -196,6 +210,7 @@ fn fuzzWsFrame(_: Context, smith: *std.testing.Smith) anyerror!void {
     _ = ws.frame.read(&reader, .server, &payload) catch |err| switch (err) {
         error.Canceled,
         error.EndOfStream,
+        error.MessageTooBig,
         error.ProtocolViolation,
         error.Unexpected,
         => return,
@@ -933,6 +948,7 @@ pub const targets = [_]Target{
     .{ .name = "tls_credentials", .max_input = 4096, .run = fuzzTlsCredentials },
     .{ .name = "tls_key_schedule", .max_input = 64, .run = fuzzTlsKeySchedule },
     .{ .name = "tls_server_hello", .max_input = 16 * 1024, .run = fuzzTlsServerHello },
+    .{ .name = "tls_cert_path", .max_input = 16 * 1024, .run = fuzzTlsCertPath },
     .{ .name = "ws_frame", .max_input = ws.max_frame_payload, .run = fuzzWsFrame },
     .{ .name = "ws_handshake", .max_input = ws.max_handshake, .run = fuzzWsHandshake },
     .{ .name = "ws_connection", .max_input = 64 * 1024, .run = fuzzWsConnection },
@@ -1112,6 +1128,17 @@ test "fuzz corpus: TLS record read and open" {
     });
     try std.testing.fuzz(testContext(), fuzzTlsRecordOpenValid, .{
         .corpus = &.{"hello"},
+    });
+}
+
+test "fuzz corpus: TLS certificate path" {
+    try std.testing.fuzz(testContext(), fuzzTlsCertPath, .{
+        .corpus = &.{
+            "",
+            "\x30",
+            "\x30\x01\x00",
+            "\x30\x82\xff\xff",
+        },
     });
 }
 

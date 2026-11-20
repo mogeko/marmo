@@ -170,7 +170,9 @@ pub const H2Stream = struct {
                     => {},
                     else => return error.Unexpected,
                 };
-                return self.inner.shutdown(io, .send);
+                // Keep the TCP write side open for WINDOW_UPDATE/control
+                // frames; `.send` means H2 END_STREAM, not TCP FIN.
+                return;
             },
             .both => return self.inner.shutdown(io, .both),
         }
@@ -409,3 +411,86 @@ const SocketWriter = struct {
         }
     }
 };
+
+const ShutdownRecorder = struct {
+    shutdown_calls: std.atomic.Value(u32) = .init(0),
+    closed: bool = false,
+
+    fn stream(self: *ShutdownRecorder) Stream {
+        return .{ .ctx = self, .vtable = &vtable };
+    }
+
+    fn read(_: *anyopaque, _: std.Io, _: [][]u8) Stream.ReadError!usize {
+        return 0;
+    }
+
+    fn write(
+        _: *anyopaque,
+        _: std.Io,
+        buffers: []const []const u8,
+    ) Stream.WriteError!usize {
+        var total: usize = 0;
+        for (buffers) |buffer| total += buffer.len;
+        return total;
+    }
+
+    fn shutdown(
+        ctx: *anyopaque,
+        _: std.Io,
+        _: Stream.ShutdownHow,
+    ) Stream.ShutdownError!void {
+        const self: *ShutdownRecorder = @ptrCast(@alignCast(ctx));
+        _ = self.shutdown_calls.fetchAdd(1, .acq_rel);
+    }
+
+    fn close(ctx: *anyopaque, _: std.Io) void {
+        const self: *ShutdownRecorder = @ptrCast(@alignCast(ctx));
+        self.closed = true;
+    }
+
+    fn local(_: *anyopaque) Endpoint {
+        return .{ .ip = .{ .ip4 = .loopback(0) } };
+    }
+
+    fn remote(_: *anyopaque) Endpoint {
+        return .{ .ip = .{ .ip4 = .loopback(0) } };
+    }
+
+    const vtable: Stream.VTable = .{
+        .read = read,
+        .write = write,
+        .shutdown = shutdown,
+        .close = close,
+        .local = local,
+        .remote = remote,
+    };
+};
+
+test "H2 shutdown(.send) does not close the TCP write side" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var inner: ShutdownRecorder = .{};
+    const adapter = try H2Stream.createBase(io, std.testing.allocator, inner.stream());
+    defer adapter.stream().close(io);
+    adapter.mode = .{ .server = .{
+        .connection = .{
+            .io = io,
+            .input = &adapter.socket_reader.interface,
+            .output = &adapter.socket_writer.interface,
+            .role = .server,
+            .stream_id = 1,
+        },
+    } };
+    adapter.h2_stream = .{
+        .connection = &adapter.mode.server.connection,
+        .id = 1,
+    };
+
+    try adapter.stream().shutdown(io, .send);
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        inner.shutdown_calls.load(.acquire),
+    );
+}

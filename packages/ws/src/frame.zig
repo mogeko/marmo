@@ -19,6 +19,7 @@ pub const Role = enum { client, server };
 pub const Error = error{
     Canceled,
     EndOfStream,
+    MessageTooBig,
     ProtocolViolation,
     Unexpected,
 };
@@ -70,7 +71,7 @@ pub fn read(
         payload_len = std.mem.readInt(u64, &extended, .big);
         if (payload_len >> 63 != 0) return error.ProtocolViolation;
     }
-    if (payload_len > max_payload) return error.ProtocolViolation;
+    if (payload_len > max_payload) return error.MessageTooBig;
     if (opcode >= opcode_close) {
         if (!fin or payload_len > max_control_payload) {
             return error.ProtocolViolation;

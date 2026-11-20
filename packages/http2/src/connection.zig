@@ -87,6 +87,7 @@ pub const Connection = struct {
     stream_aborted: std.atomic.Value(bool) = .init(false),
     canceled: std.atomic.Value(bool) = .init(false),
     local_closed: bool = false,
+    response_headers_seen: bool = false,
 
     pub fn stream(self: *Connection) ?Stream {
         if (self.stream_id == 0) return null;
@@ -125,7 +126,15 @@ pub const Connection = struct {
         while (!self.remote_end_stream.load(.acquire)) {
             if (self.canceled.load(.acquire)) return error.Canceled;
             if (self.stream_aborted.load(.acquire)) return error.ConnectionReset;
-            try self.processFrame();
+            self.processFrame() catch |err| {
+                self.stream_aborted.store(true, .release);
+                self.window_event.set(self.io);
+                return switch (err) {
+                    error.Canceled => error.Canceled,
+                    error.Closed => error.ConnectionReset,
+                    else => err,
+                };
+            };
             if (self.pending_offset < self.pending_len) {
                 return self.copyPending(buffers);
             }
@@ -199,7 +208,16 @@ pub const Connection = struct {
                     return error.ProtocolViolation;
                 }
                 const decoded = try self.readHeaderBlock(parsed);
-                _ = decoded;
+                if (self.role == .client and !self.response_headers_seen) {
+                    const status = findHeader(decoded, ":status") orelse
+                        return error.ProtocolViolation;
+                    const code = std.fmt.parseInt(u16, status, 10) catch
+                        return error.ProtocolViolation;
+                    if (code < 200 or code >= 300) {
+                        return error.ProtocolViolation;
+                    }
+                    self.response_headers_seen = true;
+                }
                 if (parsed.flags & frame.flag_end_stream != 0) {
                     self.remote_end_stream.store(true, .release);
                 }
@@ -303,9 +321,11 @@ pub const Connection = struct {
             setting_enable_push => {
                 // A client may send 0 or 1. A server MUST NOT send this
                 // setting, and values above 1 are invalid.
-                if (self.role == .client or value > 1) {
+                // A server MUST NOT send 1; 0 is legal and common.
+                if (self.role == .client and value != 0) {
                     return error.ProtocolViolation;
                 }
+                if (value > 1) return error.ProtocolViolation;
             },
             setting_header_table_size,
             setting_max_header_list_size,
@@ -531,7 +551,7 @@ pub const Connection = struct {
     }
 
     fn sendOurSettings(self: *Connection) Error!void {
-        var payload: [24]u8 = undefined;
+        var payload: [32]u8 = undefined;
         var len: usize = 0;
         if (self.role == .client) {
             len = appendSetting(&payload, len, setting_enable_push, 0);
@@ -548,6 +568,12 @@ pub const Connection = struct {
             len,
             setting_max_frame_size,
             frame.max_frame_size,
+        );
+        len = appendSetting(
+            &payload,
+            len,
+            setting_max_header_list_size,
+            64 * 1024,
         );
         try self.sendFrame(frame.type_settings, 0, 0, payload[0..len]);
         try self.sendWindowUpdate(
@@ -582,6 +608,43 @@ fn findHeader(headers: []const Header, name: []const u8) ?[]const u8 {
 }
 
 fn validateRequest(headers: []const Header, path: ?[]const u8) Error!void {
+    var seen_method = false;
+    var seen_scheme = false;
+    var seen_path = false;
+    var seen_authority = false;
+    for (headers) |header| {
+        if (header.name.len == 0) return error.ProtocolViolation;
+        for (header.name) |byte| {
+            if (byte >= 'A' and byte <= 'Z') return error.ProtocolViolation;
+            if (byte == 0 or byte == '\r' or byte == '\n') {
+                return error.ProtocolViolation;
+            }
+        }
+        for (header.value) |byte| {
+            if (byte == 0 or byte == '\r' or byte == '\n') {
+                return error.ProtocolViolation;
+            }
+        }
+        if (std.mem.eql(u8, header.name, ":method")) {
+            if (seen_method) return error.ProtocolViolation;
+            seen_method = true;
+        } else if (std.mem.eql(u8, header.name, ":scheme")) {
+            if (seen_scheme) return error.ProtocolViolation;
+            seen_scheme = true;
+        } else if (std.mem.eql(u8, header.name, ":path")) {
+            if (seen_path) return error.ProtocolViolation;
+            seen_path = true;
+        } else if (std.mem.eql(u8, header.name, ":authority")) {
+            if (seen_authority) return error.ProtocolViolation;
+            seen_authority = true;
+        } else if (std.mem.eql(u8, header.name, "connection")) {
+            return error.ProtocolViolation;
+        } else if (std.mem.eql(u8, header.name, "te")) {
+            if (!std.mem.eql(u8, header.value, "trailers")) {
+                return error.ProtocolViolation;
+            }
+        }
+    }
     const method = findHeader(headers, ":method") orelse
         return error.ProtocolViolation;
     const authority = findHeader(headers, ":authority") orelse
@@ -595,6 +658,11 @@ fn validateRequest(headers: []const Header, path: ?[]const u8) Error!void {
             return error.ProtocolViolation;
         const value = request_path orelse return error.ProtocolViolation;
         if (scheme.len == 0 or value.len == 0) {
+            return error.ProtocolViolation;
+        }
+        if (value[0] != '/' and
+            !(std.mem.eql(u8, method, "OPTIONS") and std.mem.eql(u8, value, "*")))
+        {
             return error.ProtocolViolation;
         }
     }
@@ -692,9 +760,8 @@ pub const Server = struct {
         {
             return error.HandshakeFailed;
         }
-        try server.connection.processSettings(first);
         try server.connection.sendOurSettings();
-        try serverHandshake(&server.connection);
+        try server.connection.processSettings(first);
         return server;
     }
 
@@ -736,6 +803,7 @@ pub const Server = struct {
                 frame.type_goaway => return error.Closed,
                 frame.type_rst_stream => return error.Closed,
                 frame.type_priority => {},
+                frame.type_data => return error.ProtocolViolation,
                 else => {},
             }
         }
@@ -790,37 +858,6 @@ fn clientHandshake(connection: *Connection) Error!void {
     }
 }
 
-fn serverHandshake(connection: *Connection) Error!void {
-    var got_ack = false;
-    var frames: usize = 0;
-    while (!got_ack) {
-        frames += 1;
-        if (frames > 32) return error.HandshakeFailed;
-        const parsed = frame.read(connection.input, &connection.frame_buffer) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => return error.HandshakeFailed,
-        };
-        if (parsed.frame_type == frame.type_settings and
-            parsed.flags & frame.flag_ack != 0)
-        {
-            got_ack = true;
-            continue;
-        }
-        if (parsed.frame_type == frame.type_settings) {
-            connection.processSettings(parsed) catch return error.HandshakeFailed;
-            continue;
-        }
-        if (parsed.frame_type == frame.type_ping) {
-            connection.processPing(parsed) catch return error.HandshakeFailed;
-            continue;
-        }
-        if (parsed.frame_type == frame.type_window_update) {
-            connection.processWindowUpdate(parsed) catch return error.HandshakeFailed;
-            continue;
-        }
-    }
-}
-
 test "client settings include one concurrent stream" {
     var connection: Connection = .{
         .io = std.testing.io,
@@ -850,9 +887,10 @@ test "client ENABLE_PUSH settings are accepted by a server" {
     );
 
     connection.role = .client;
+    try connection.applySetting(setting_enable_push, 0);
     try std.testing.expectError(
         error.ProtocolViolation,
-        connection.applySetting(setting_enable_push, 0),
+        connection.applySetting(setting_enable_push, 1),
     );
 }
 
@@ -973,7 +1011,6 @@ test "server accepts curl settings and responds to a no-body request" {
         0x00, 0x03, 0x00, 0x00, 0x00, 0x64, // MAX_CONCURRENT_STREAMS=100
     };
     try frame.write(&input_writer, frame.type_settings, 0, 0, &settings);
-    try frame.write(&input_writer, frame.type_settings, frame.flag_ack, 0, &.{});
 
     var header_block: [128]u8 = undefined;
     var block_len: usize = 0;
@@ -995,6 +1032,11 @@ test "server accepts curl settings and responds to a no-body request" {
 
     var server = try Server.init(std.testing.io, &input, &output.writer);
     defer server.deinit();
+    var out_reader = std.Io.Reader.fixed(output.written());
+    var out_frame: [frame.max_frame_size]u8 = undefined;
+    const first_out = try frame.read(&out_reader, &out_frame);
+    try std.testing.expectEqual(frame.type_settings, first_out.frame_type);
+    try std.testing.expectEqual(@as(u8, 0), first_out.flags & frame.flag_ack);
     const stream = try server.acceptStream();
     const response = [_]Header{
         .{ .name = ":status", .value = "200" },

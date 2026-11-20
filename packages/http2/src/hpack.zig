@@ -8,7 +8,7 @@ pub const max_headers = 128;
 pub const max_dynamic_size = 4096;
 pub const max_dynamic_entries = 128;
 pub const max_name = 256;
-pub const max_value = 4096;
+pub const max_value = 16 * 1024;
 
 pub const Error = error{
     Malformed,
@@ -123,10 +123,13 @@ pub const Decoder = struct {
         var storage_used: usize = 0;
         var header_count: usize = 0;
         var pos: usize = 0;
+        var header_seen = false;
+        var size_updates: usize = 0;
 
         while (pos < block.len) {
             const first = block[pos];
             if (first & 0x80 != 0) {
+                header_seen = true;
                 const index = try decodeInt(block, &pos, 7);
                 const header = try self.lookup(index);
                 try appendHeader(
@@ -140,6 +143,7 @@ pub const Decoder = struct {
                 continue;
             }
             if (first & 0x40 != 0) {
+                header_seen = true;
                 const name = try self.decodeName(block, &pos, 6, storage, &storage_used);
                 const value = try decodeString(block, &pos, storage, &storage_used);
                 try appendHeader(
@@ -154,12 +158,17 @@ pub const Decoder = struct {
                 continue;
             }
             if (first & 0x20 != 0) {
+                if (header_seen or size_updates >= 2) {
+                    return error.Malformed;
+                }
+                size_updates += 1;
                 const size = try decodeInt(block, &pos, 5);
                 if (size > max_dynamic_size) return error.Malformed;
                 self.max_size = size;
                 self.evict();
                 continue;
             }
+            header_seen = true;
             const name = try self.decodeName(block, &pos, 4, storage, &storage_used);
             const value = try decodeString(block, &pos, storage, &storage_used);
             try appendHeader(
@@ -298,13 +307,27 @@ fn appendHeader(
     if (name.len == 0 or name.len > max_name or value.len > max_value) {
         return error.Malformed;
     }
-    const name_copy = try copyToStorage(storage, storage_used, name);
-    const value_copy = try copyToStorage(storage, storage_used, value);
+    const name_copy = try ensureInStorage(storage, storage_used, name);
+    const value_copy = try ensureInStorage(storage, storage_used, value);
     headers[header_count.*] = .{
         .name = name_copy,
         .value = value_copy,
     };
     header_count.* += 1;
+}
+
+fn ensureInStorage(
+    storage: []u8,
+    used: *usize,
+    bytes: []const u8,
+) Error![]const u8 {
+    if (bytes.len != 0) {
+        const start = @intFromPtr(storage.ptr);
+        const end = start + storage.len;
+        const pointer = @intFromPtr(bytes.ptr);
+        if (pointer >= start and pointer + bytes.len <= end) return bytes;
+    }
+    return copyToStorage(storage, used, bytes);
 }
 
 fn copyToStorage(

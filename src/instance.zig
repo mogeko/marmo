@@ -746,6 +746,8 @@ fn compileTlsTransport(
     );
     tls_dialer.alpn_protocols = tls_config.alpn orelse &.{};
     tls_dialer.required_alpn = tls_config.required_alpn;
+    tls_dialer.allow_truncation_attacks =
+        tls_config.allow_truncation_attacks;
     return .{
         .dialer = tls_dialer.asDialer(),
         .cleanup = cleanupTlsDialer,

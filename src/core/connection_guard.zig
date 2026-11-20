@@ -83,7 +83,11 @@ pub const Guard = struct {
     abort_stream: Stream,
     timeouts: Timeouts,
     phase: std.atomic.Value(Phase) = .init(.handshake),
-    deadline_ns: std.atomic.Value(i64) = .init(0),
+    handshake_deadline_ns: std.atomic.Value(i64) = .init(never),
+    idle_deadline_ns: std.atomic.Value(i64) = .init(never),
+    grace_deadline_ns: std.atomic.Value(i64) = .init(never),
+    peer_stream: ?Stream = null,
+    peer_lock: std.Io.Mutex = .init,
     done: std.atomic.Value(bool) = .init(false),
     fired: std.atomic.Value(bool) = .init(false),
 
@@ -103,7 +107,11 @@ pub const Guard = struct {
             .abort_stream = abort_stream,
             .timeouts = timeouts,
         };
-        guard.arm(.handshake, timeouts.handshake_ns);
+        guard.handshake_deadline_ns.store(
+            addDeadline(nowNs(io), timeouts.handshake_ns, false),
+            .release,
+        );
+        guard.phase.store(.handshake, .release);
         return guard;
     }
 
@@ -116,16 +124,25 @@ pub const Guard = struct {
     pub fn markRelay(self: *Guard) void {
         if (self.done.load(.acquire)) return;
         if (self.phase.load(.acquire) != .handshake) return;
-        self.arm(.relay, self.timeouts.idle_ns);
+        self.phase.store(.relay, .release);
+        self.handshake_deadline_ns.store(never, .release);
+        self.idle_deadline_ns.store(
+            addDeadline(nowNs(self.io), self.timeouts.idle_ns, true),
+            .release,
+        );
+        self.grace_deadline_ns.store(never, .release);
     }
 
     /// Records application payload movement in either direction.
     pub fn touch(self: *Guard) void {
         if (self.done.load(.acquire)) return;
-        if (self.phase.load(.acquire) != .relay) return;
+        const phase = self.phase.load(.acquire);
+        if (phase == .handshake or phase == .done) return;
         if (self.timeouts.idle_ns == 0) return;
-        const deadline = addTimeout(nowNs(self.io), self.timeouts.idle_ns);
-        self.deadline_ns.store(deadline, .release);
+        self.idle_deadline_ns.store(
+            addDeadline(nowNs(self.io), self.timeouts.idle_ns, true),
+            .release,
+        );
     }
 
     /// Starts the absolute grace timer after one direction half-closes.
@@ -133,10 +150,21 @@ pub const Guard = struct {
         if (self.done.load(.acquire)) return;
         const phase = self.phase.load(.acquire);
         if (phase == .handshake or phase == .done) return;
-        switch (which) {
-            .uplink => self.arm(.downlink_only, self.timeouts.downlink_only_ns),
-            .downlink => self.arm(.uplink_only, self.timeouts.uplink_only_ns),
-        }
+        const grace = switch (which) {
+            .uplink => self.timeouts.downlink_only_ns,
+            .downlink => self.timeouts.uplink_only_ns,
+        };
+        self.phase.store(
+            switch (which) {
+                .uplink => .downlink_only,
+                .downlink => .uplink_only,
+            },
+            .release,
+        );
+        self.grace_deadline_ns.store(
+            addDeadline(nowNs(self.io), grace, false),
+            .release,
+        );
     }
 
     /// Removes the guard from the reaper before the stream is closed.
@@ -145,19 +173,24 @@ pub const Guard = struct {
         self.registry.remove(self.io, self);
     }
 
-    fn arm(self: *Guard, phase: Phase, timeout_ns: u64) void {
-        self.phase.store(phase, .release);
-        self.deadline_ns.store(
-            addTimeout(nowNs(self.io), timeout_ns),
-            .release,
-        );
+    pub fn setPeer(self: *Guard, peer: Stream) void {
+        self.peer_lock.lock(self.io) catch return;
+        defer self.peer_lock.unlock(self.io);
+        self.peer_stream = peer;
     }
 
     fn checkExpired(self: *Guard, now: i64) void {
         if (self.done.load(.acquire)) return;
         const phase = self.phase.load(.acquire);
         if (phase == .done) return;
-        if (now < self.deadline_ns.load(.acquire)) return;
+        const deadline = @min(
+            self.handshake_deadline_ns.load(.acquire),
+            @min(
+                self.idle_deadline_ns.load(.acquire),
+                self.grace_deadline_ns.load(.acquire),
+            ),
+        );
+        if (now < deadline) return;
         self.fire(phase);
     }
 
@@ -173,6 +206,16 @@ pub const Guard = struct {
         // try the directions separately so the remaining side still sees EOF.
         self.abort_stream.shutdown(self.io, .send) catch {};
         self.abort_stream.shutdown(self.io, .recv) catch {};
+
+        var peer: ?Stream = null;
+        self.peer_lock.lock(self.io) catch return;
+        peer = self.peer_stream;
+        self.peer_stream = null;
+        self.peer_lock.unlock(self.io);
+        if (peer) |stream| {
+            stream.shutdown(self.io, .send) catch {};
+            stream.shutdown(self.io, .recv) catch {};
+        }
     }
 };
 
@@ -182,8 +225,42 @@ pub fn nowNs(io: std.Io) i64 {
         std.math.maxInt(i64);
 }
 
-fn addTimeout(now: i64, timeout_ns: u64) i64 {
-    if (timeout_ns == 0) return never;
+fn addDeadline(now: i64, timeout_ns: u64, zero_means_never: bool) i64 {
+    if (timeout_ns == 0) return if (zero_means_never) never else now;
     if (timeout_ns > std.math.maxInt(i64)) return never;
     return std.math.add(i64, now, @intCast(timeout_ns)) catch never;
+}
+
+test "zero grace is immediate while zero idle is disabled" {
+    try std.testing.expectEqual(
+        @as(i64, 100),
+        addDeadline(100, 0, false),
+    );
+    try std.testing.expectEqual(never, addDeadline(100, 0, true));
+}
+
+test "idle and grace deadlines remain independent" {
+    var entries: [0]?*Guard = .{};
+    var registry: Registry = .{ .entries = entries[0..] };
+    var metrics: Metrics = .{};
+    var guard = Guard.init(
+        std.testing.io,
+        &registry,
+        &metrics,
+        undefined,
+        .{
+            .handshake_ns = std.time.ns_per_s,
+            .idle_ns = 2 * std.time.ns_per_s,
+            .uplink_only_ns = 5 * std.time.ns_per_s,
+            .downlink_only_ns = 5 * std.time.ns_per_s,
+        },
+    );
+    guard.markRelay();
+    const idle = guard.idle_deadline_ns.load(.acquire);
+    guard.halfClose(.uplink);
+    const grace = guard.grace_deadline_ns.load(.acquire);
+    try std.testing.expect(idle < grace);
+    try std.testing.expectEqual(idle, guard.idle_deadline_ns.load(.acquire));
+    guard.touch();
+    try std.testing.expect(guard.idle_deadline_ns.load(.acquire) >= idle);
 }

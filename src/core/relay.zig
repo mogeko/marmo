@@ -43,7 +43,10 @@ pub fn relayWithGuard(
         .client_buffer = client_buffer[0..],
         .remote_buffer = remote_buffer[0..],
     };
-    if (guard) |value| value.markRelay();
+    if (guard) |value| {
+        value.setPeer(remote);
+        value.markRelay();
+    }
 
     var upstream = io.concurrent(
         copyWrapper,

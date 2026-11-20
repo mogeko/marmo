@@ -7,6 +7,17 @@ and behavior may change between minor releases.
 
 ### Security
 
+- Second re-audit (2026-11-20): TLS certificate DER is prevalidated before
+  `std.crypto.Certificate` parsing (empty/truncated certificates no longer
+  abort), pathLen/name constraints cover IP and trust anchors, and intermediate
+  EKUs are checked. HTTP/2 sends SETTINGS as the server preface, accepts
+  headers before the client ACK, keeps TCP write open after a local
+  END_STREAM, accepts legal server ENABLE_PUSH=0, maps truncation to errors,
+  and validates request headers/status. WebSocket writes use continuation
+  frames, oversized frames get close 1009, and control-frame limits no longer
+  kill keepalives. ADR-0015 now uses independent idle/grace deadlines, treats
+  zero grace as immediate, aborts both relay directions, and exposes the
+  remaining residual items in `docs/security/audit.md`.
 - TLS client certificate paths now require issuer `basicConstraints CA:TRUE`
   and `keyUsage keyCertSign`; a CA:FALSE intermediate is rejected. Host-name
   verification is independent of chain verification. Post-handshake plaintext

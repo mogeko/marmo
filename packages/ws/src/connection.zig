@@ -13,7 +13,7 @@ pub const Error = error{
 };
 
 pub const max_message = 1024 * 1024;
-pub const max_controls_per_read = 32;
+pub const max_controls_per_read = 1024;
 pub const max_fragments_per_message = 1024;
 
 pub const ClientOptions = struct {
@@ -57,6 +57,10 @@ pub const Connection = struct {
             ) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 error.EndOfStream => return error.ProtocolViolation,
+                error.MessageTooBig => {
+                    self.closeWithCode(1009);
+                    return error.ProtocolViolation;
+                },
                 error.ProtocolViolation => return error.ProtocolViolation,
                 error.Unexpected => return error.Unexpected,
             };
@@ -172,7 +176,11 @@ pub const Connection = struct {
             const chunk_len = @min(bytes.len - offset, frame.max_payload);
             const chunk = bytes[offset..][0..chunk_len];
             const fin = offset + chunk_len == bytes.len;
-            try self.writeFrameLocked(frame.opcode_binary, fin, chunk);
+            const opcode = if (offset == 0)
+                frame.opcode_binary
+            else
+                frame.opcode_continuation;
+            try self.writeFrameLocked(opcode, fin, chunk);
             offset += chunk_len;
         }
     }
@@ -206,8 +214,25 @@ pub const Connection = struct {
         };
     }
 
+    fn closeWithCode(self: *Connection, code: u16) void {
+        self.write_lock.lock(self.io) catch return;
+        defer self.write_lock.unlock(self.io);
+        if (self.close_sent) return;
+        var payload = [_]u8{
+            @intCast(code >> 8),
+            @intCast(code & 0xff),
+        };
+        self.writeFrameLocked(frame.opcode_close, true, &payload) catch return;
+        self.close_sent = true;
+        self.eof = true;
+        self.output.flush() catch {};
+    }
+
     fn receiveClose(self: *Connection, payload: []const u8) Error!void {
-        if (payload.len == 1) return error.ProtocolViolation;
+        if (payload.len == 1) {
+            self.closeWithCode(1002);
+            return error.ProtocolViolation;
+        }
         var code: ?u16 = null;
         if (payload.len >= 2) {
             code = std.mem.readInt(u16, payload[0..2], .big);
@@ -710,4 +735,32 @@ test "zero-length read buffers are not clean EOF" {
         error.Unexpected,
         connection.read(&.{}),
     );
+}
+
+test "writes over 64 KiB use continuation frames" {
+    const allocator = std.testing.allocator;
+    var storage: std.Io.Writer.Allocating = .init(allocator);
+    defer storage.deinit();
+    var input = std.Io.Reader.fixed(&.{});
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &storage.writer,
+        .role = .client,
+    };
+    var payload: [100_000]u8 = undefined;
+    @memset(&payload, 'x');
+    _ = try connection.write(&.{&payload});
+
+    var reader = std.Io.Reader.fixed(storage.written());
+    var buffer: [frame.max_payload]u8 = undefined;
+    const first = try frame.read(&reader, .server, &buffer);
+    try std.testing.expectEqual(frame.opcode_binary, first.opcode);
+    try std.testing.expect(!first.fin);
+    try std.testing.expectEqual(@as(usize, frame.max_payload), first.payload.len);
+
+    const second = try frame.read(&reader, .server, &buffer);
+    try std.testing.expectEqual(frame.opcode_continuation, second.opcode);
+    try std.testing.expect(second.fin);
+    try std.testing.expectEqual(@as(usize, 100_000 - frame.max_payload), second.payload.len);
 }

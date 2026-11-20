@@ -2403,8 +2403,10 @@ test "handshake timeout closes a silent inbound" {
     var buffers = [_][]u8{&buffer};
     const read_len = client.read(io, &buffers) catch 0;
     try std.testing.expectEqual(@as(usize, 0), read_len);
+    try std.Io.sleep(io, .{ .nanoseconds = 100 * std.time.ns_per_ms }, .awake);
     const snapshot = instance.metricsSnapshot();
     try std.testing.expect(snapshot.timeouts_handshake >= 1);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.connections_active);
 }
 
 test "idle timeout closes a relay with no traffic" {
@@ -2458,8 +2460,10 @@ test "idle timeout closes a relay with no traffic" {
     var buffers = [_][]u8{&buffer};
     const read_len = client.read(io, &buffers) catch 0;
     try std.testing.expectEqual(@as(usize, 0), read_len);
+    try std.Io.sleep(io, .{ .nanoseconds = 100 * std.time.ns_per_ms }, .awake);
     const snapshot = instance.metricsSnapshot();
     try std.testing.expect(snapshot.timeouts_idle >= 1);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.connections_active);
 
     hold_context.release.set(io);
     _ = hold_future.await(io);

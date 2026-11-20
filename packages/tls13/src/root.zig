@@ -13,6 +13,7 @@ pub const test_cert = @import("test_cert.zig");
 /// Wire-level handshake and record modules. Exposed so adapters and fuzz
 /// harnesses can exercise the parser without a socket; no stability guarantee.
 pub const handshake = @import("handshake.zig");
+pub const cert_path = @import("cert_path.zig");
 pub const record = @import("record.zig");
 
 pub const Ca = @import("ca.zig").Ca;

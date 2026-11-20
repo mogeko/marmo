@@ -594,6 +594,10 @@ pub fn validateCredentials(
     }
     if (total + 4 > handshake.max_handshake) return error.HandshakeFailed;
 
+    for (certificate_chain) |certificate| {
+        cert_path.validateCertificateDer(certificate) catch
+            return error.HandshakeFailed;
+    }
     const leaf: std.crypto.Certificate = .{
         .buffer = certificate_chain[0],
         .index = 0,
@@ -1085,5 +1089,14 @@ test "certificate path enforces pathLenConstraint" {
             .now_sec = now,
             .bundle = &bundle,
         }, &leaf),
+    );
+}
+
+test "validateCredentials rejects malformed DER without panicking" {
+    const key_pair = Ecdsa.KeyPair.generate(std.testing.io);
+    const tiny = [_]u8{0x30};
+    try std.testing.expectError(
+        error.HandshakeFailed,
+        validateCredentials(&.{&tiny}, key_pair),
     );
 }
