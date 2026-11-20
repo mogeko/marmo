@@ -512,3 +512,25 @@ The full suite is now 251 tests (61 root, 4 public API, 29 integration, 47
 tls13, 36 http2, 60 ws, 14 fuzz). TLS, HTTP/2, and WebSocket interop was
 rechecked locally against OpenSSL 4.1, curl/nghttp2, Python `h2`/`hpack`,
 Python `websockets`, and Node `ws`.
+
+## 13. Post-audit H2/WS follow-up (2026-11-21)
+
+An independent audit of the newly added multiplexing and compression code
+found no P0, two HTTP/2 P1s, and one WebSocket P2 regression. Fixed:
+
+- HTTP/2: field blocks on closed/refused streams are fully decompressed before
+  discard, and an oversized header list closes the connection with
+  COMPRESSION_ERROR instead of leaving a half-updated HPACK table. Connection
+  window credit is returned for discarded/aborted DATA; the 17th stream, a
+  stream WINDOW_UPDATE overflow, and a bad PRIORITY length are stream errors;
+  `ServerOptions.path` is enforced; DATA before the final response is rejected;
+  the HPACK header count is 256 so legal 8 KiB lists are accepted.
+- WebSocket: pings queue instead of dropping under writer contention, valid
+  close codes are echoed, non-minimal lengths/BFINAL/malformed extensions/
+  duplicate subprotocols are rejected, `close_sent` is atomic, remaining
+  buffers are zeroized, and `ws_deflate`/`ws_connection_deflate` fuzz targets
+  were added.
+
+Remaining recorded gaps: server-sent 1xx and stateful H2 fuzz coverage,
+the H2 8 KiB stream window throughput trade-off, borrowed `headers()` slices,
+WS Origin/auth and lazy compression memory, and external audit.

@@ -495,10 +495,7 @@ fn connectionWrapper(context: *ConnContext) std.Io.Cancelable!void {
         // Peer-driven failures (protocol violations, resets, truncation) are
         // normal on an exposed proxy and must not become warn-level log
         // floods. Embedders that want them can raise the log level.
-        else => std.log.scoped(.marmo).debug(
-            "connection failed: {s}",
-            .{@errorName(err)},
-        ),
+        else => std.log.scoped(.marmo).debug("connection failed: {s}", .{@errorName(err)}),
     };
 }
 

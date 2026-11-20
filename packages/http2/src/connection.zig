@@ -130,6 +130,7 @@ const StreamEntry = struct {
     header_storage: [hpack.max_header_list]u8 = undefined,
     header_list: [hpack.max_headers]Header = undefined,
     header_count: usize = 0,
+    response_final: bool = false,
     trailer_storage: [hpack.max_header_list]u8 = undefined,
     trailer_list: [hpack.max_headers]Header = undefined,
     trailer_count: usize = 0,
@@ -236,6 +237,10 @@ pub const Connection = struct {
     decoder: hpack.Decoder = .{},
     frame_buffer: [frame.max_frame_size]u8 = undefined,
     header_block: [max_header_block]u8 = undefined,
+    /// Scratch for field blocks on closed/refused streams that must still be
+    /// decompressed to keep the connection-level HPACK state aligned.
+    discard_storage: [hpack.max_header_list]u8 = undefined,
+    discard_headers: [hpack.max_headers]Header = undefined,
     header_block_len: usize = 0,
     send_block: [max_header_block]u8 = undefined,
 
@@ -259,6 +264,11 @@ pub const Connection = struct {
     goaway_received: bool = false,
     goaway_sent: bool = false,
     goaway_error: u32 = error_code_no_error,
+    /// Connection-window credit for DATA discarded on closed/aborted streams.
+    connection_window_credit: usize = 0,
+    connection_update_credit: usize = 0,
+    /// Optional request path enforced by the server role.
+    request_path: ?[]const u8 = null,
 
     pub fn stream(self: *Connection) ?Stream {
         self.state_mutex.lock(self.io) catch return null;
@@ -358,16 +368,25 @@ pub const Connection = struct {
     }
 
     fn abortStream(self: *Connection, id: u32) void {
-        self.state_mutex.lock(self.io) catch return;
-        defer self.state_mutex.unlock(self.io);
-        const index = self.streamIndex(id) orelse return;
-        const entry = &self.streams[index];
-        entry.aborted = true;
-        entry.remote_end = true;
-        entry.local_end = true;
-        entry.zeroizeBuffers();
-        entry.refreshState();
-        self.window_event.set(self.io);
+        var abandoned: usize = 0;
+        {
+            self.state_mutex.lock(self.io) catch return;
+            defer self.state_mutex.unlock(self.io);
+            const index = self.streamIndex(id) orelse return;
+            const entry = &self.streams[index];
+            abandoned = entry.data_len;
+            entry.aborted = true;
+            entry.remote_end = true;
+            entry.local_end = true;
+            entry.zeroizeBuffers();
+            entry.refreshState();
+            self.window_event.set(self.io);
+        }
+        if (abandoned != 0) {
+            self.connection_window_credit += abandoned;
+            self.connection_update_credit += abandoned;
+            self.flushConnectionCredit();
+        }
     }
 
     fn markLocalEnd(self: *Connection, id: u32) void {
@@ -401,16 +420,15 @@ pub const Connection = struct {
     fn acceptNext(self: *Connection) Error!Stream {
         while (true) {
             if (self.canceled.load(.acquire)) return error.Canceled;
+            {
+                self.state_mutex.lock(self.io) catch return error.Canceled;
+                const stopping = self.goaway_received or self.goaway_sent;
+                self.state_mutex.unlock(self.io);
+                if (stopping) return error.Closed;
+            }
             if (self.takeAccepted()) |id| {
                 return .{ .connection = self, .id = id };
             }
-            var stopping = false;
-            {
-                self.state_mutex.lock(self.io) catch return error.Canceled;
-                defer self.state_mutex.unlock(self.io);
-                stopping = self.goaway_received or self.goaway_sent;
-            }
-            if (stopping) return error.Closed;
             self.pumpFrame() catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 error.Closed => return error.Closed,
@@ -597,6 +615,12 @@ pub const Connection = struct {
     }
 
     fn resetStream(self: *Connection, id: u32, code: u32) Error!void {
+        {
+            self.state_mutex.lock(self.io) catch return error.Canceled;
+            defer self.state_mutex.unlock(self.io);
+            const index = self.streamIndex(id) orelse return error.Closed;
+            if (self.streams[index].state == .closed) return error.Closed;
+        }
         try self.sendReset(id, code);
         self.abortStream(id);
     }
@@ -726,6 +750,7 @@ pub const Connection = struct {
             .reset => |code| {
                 self.sendReset(parsed.stream_id, code) catch {};
                 self.abortStream(parsed.stream_id);
+                self.flushConnectionCredit();
             },
             .connection => |code| return self.connectionError(code),
         }
@@ -738,7 +763,14 @@ pub const Connection = struct {
         flow_len: usize,
         end_stream: bool,
     ) Action {
+        const flow: i64 = @intCast(flow_len);
         const index = self.streamIndex(id) orelse {
+            if (flow > self.conn_recv_window) {
+                return .{ .connection = error_code_flow_control };
+            }
+            self.conn_recv_window -= flow;
+            self.connection_window_credit += flow_len;
+            self.connection_update_credit += flow_len;
             if (id <= self.last_peer_stream_id or
                 id <= self.last_local_stream_id)
             {
@@ -747,10 +779,18 @@ pub const Connection = struct {
             return .{ .connection = error_code_protocol };
         };
         const entry = &self.streams[index];
+        if (self.role == .client and !entry.response_final) {
+            return .{ .reset = error_code_protocol };
+        }
         if (entry.aborted or entry.state == .closed or entry.remote_end) {
+            if (flow > self.conn_recv_window) {
+                return .{ .connection = error_code_flow_control };
+            }
+            self.conn_recv_window -= flow;
+            self.connection_window_credit += flow_len;
+            self.connection_update_credit += flow_len;
             return .{ .reset = error_code_stream_closed };
         }
-        const flow: i64 = @intCast(flow_len);
         if (flow > entry.recv_window or flow > self.conn_recv_window) {
             return .{ .connection = error_code_flow_control };
         }
@@ -795,6 +835,28 @@ pub const Connection = struct {
             };
         }
         self.sendWindowUpdate(0, bytes) catch {
+            self.send_updates_disabled.store(true, .release);
+        };
+    }
+
+    fn flushConnectionCredit(self: *Connection) void {
+        const window_credit = self.connection_window_credit;
+        const update_credit = self.connection_update_credit;
+        self.connection_window_credit = 0;
+        self.connection_update_credit = 0;
+        if (window_credit != 0) {
+            self.state_mutex.lock(self.io) catch return;
+            const credit: i64 = @intCast(window_credit);
+            self.conn_recv_window = @min(
+                self.conn_recv_window + credit,
+                connection_recv_window,
+            );
+            self.state_mutex.unlock(self.io);
+        }
+        if (update_credit == 0 or self.send_updates_disabled.load(.acquire)) {
+            return;
+        }
+        self.sendWindowUpdate(0, update_credit) catch {
             self.send_updates_disabled.store(true, .release);
         };
     }
@@ -870,6 +932,20 @@ pub const Connection = struct {
         self.header_block_len += bytes.len;
     }
 
+    /// Decodes a field block solely to keep the connection-level HPACK state
+    /// aligned when the stream itself must be refused or discarded. Returns
+    /// an action only when the block itself is invalid (which closes the
+    /// connection with COMPRESSION_ERROR).
+    fn discardHeaderBlock(self: *Connection, block: []const u8) ?Action {
+        _ = self.decoder.decodeBounded(
+            block,
+            &self.discard_storage,
+            &self.discard_headers,
+            hpack.max_header_list,
+        ) catch return .{ .connection = error_code_compression };
+        return null;
+    }
+
     fn serverHeaders(
         self: *Connection,
         parsed: frame.Frame,
@@ -890,9 +966,23 @@ pub const Connection = struct {
                     block,
                 );
             } else if (id <= self.last_peer_stream_id) {
-                action = .{ .reset = error_code_stream_closed };
+                if (self.discardHeaderBlock(block)) |discarded| {
+                    action = discarded;
+                } else {
+                    action = .none;
+                }
+            } else if (self.goaway_sent and id > self.last_stream_id) {
+                if (self.discardHeaderBlock(block)) |discarded| {
+                    action = discarded;
+                } else {
+                    action = .{ .reset = error_code_refused_stream };
+                }
             } else if (self.activeStreamCount() >= max_concurrent_streams) {
-                action = .{ .connection = error_code_protocol };
+                if (self.discardHeaderBlock(block)) |discarded| {
+                    action = discarded;
+                } else {
+                    action = .{ .reset = error_code_refused_stream };
+                }
             } else {
                 action = self.serverNewStream(id, parsed, block);
             }
@@ -906,7 +996,12 @@ pub const Connection = struct {
         parsed: frame.Frame,
         block: []const u8,
     ) Action {
-        if (entry.aborted or entry.state == .closed or entry.remote_end) {
+        if (entry.aborted or entry.state == .closed) {
+            if (self.discardHeaderBlock(block)) |discarded| return discarded;
+            return .none;
+        }
+        if (entry.remote_end) {
+            if (self.discardHeaderBlock(block)) |discarded| return discarded;
             return .{ .reset = error_code_stream_closed };
         }
         if (!entry.headers_seen) {
@@ -935,6 +1030,7 @@ pub const Connection = struct {
         block: []const u8,
     ) Action {
         const index = self.allocStream(id, self.peer_initial_window) orelse {
+            if (self.discardHeaderBlock(block)) |discarded| return discarded;
             return .{ .reset = error_code_refused_stream };
         };
         const entry = &self.streams[index];
@@ -945,7 +1041,10 @@ pub const Connection = struct {
             entry.reset();
             return self.headerDecodeAction(err);
         };
-        validateRequest(entry.header_list[0..entry.header_count], null) catch {
+        validateRequest(
+            entry.header_list[0..entry.header_count],
+            self.request_path,
+        ) catch {
             entry.reset();
             return .{ .reset = error_code_protocol };
         };
@@ -976,9 +1075,17 @@ pub const Connection = struct {
                     block,
                 );
             } else if (id <= self.last_local_stream_id) {
-                action = .{ .reset = error_code_stream_closed };
+                if (self.discardHeaderBlock(block)) |discarded| {
+                    action = discarded;
+                } else {
+                    action = .none;
+                }
             } else {
-                action = .{ .connection = error_code_protocol };
+                if (self.discardHeaderBlock(block)) |discarded| {
+                    action = discarded;
+                } else {
+                    action = .{ .connection = error_code_protocol };
+                }
             }
         }
         return self.applyAction(id, action);
@@ -991,7 +1098,8 @@ pub const Connection = struct {
         block: []const u8,
     ) Action {
         if (entry.aborted or entry.state == .closed) {
-            return .{ .reset = error_code_stream_closed };
+            if (self.discardHeaderBlock(block)) |discarded| return discarded;
+            return .none;
         }
         const end_stream = parsed.flags & frame.flag_end_stream != 0;
         if (!entry.headers_seen) {
@@ -1014,6 +1122,7 @@ pub const Connection = struct {
                 return .none;
             }
             entry.headers_seen = true;
+            entry.response_final = true;
         } else {
             if (!end_stream or entry.remote_end) {
                 return .{ .reset = error_code_protocol };
@@ -1064,7 +1173,7 @@ pub const Connection = struct {
         _ = self;
         return switch (err) {
             error.Malformed => .{ .connection = error_code_compression },
-            error.OutOfMemory => .{ .reset = error_code_enhance_your_calm },
+            error.OutOfMemory => .{ .connection = error_code_compression },
         };
     }
 
@@ -1211,7 +1320,10 @@ pub const Connection = struct {
             failure = self.applyWindowUpdate(parsed.stream_id, increment);
             self.window_event.set(self.io);
         }
-        if (failure != 0) return self.connectionError(failure);
+        if (failure != 0) {
+            if (parsed.stream_id == 0) return self.connectionError(failure);
+            return self.resetStream(parsed.stream_id, failure);
+        }
     }
 
     fn applyWindowUpdate(
@@ -1252,11 +1364,13 @@ pub const Connection = struct {
             return self.connectionError(error_code_frame_size);
         }
         var idle = false;
+        var abandoned: usize = 0;
         {
             self.state_mutex.lock(self.io) catch return error.Canceled;
             defer self.state_mutex.unlock(self.io);
             if (self.streamIndex(parsed.stream_id)) |index| {
                 const entry = &self.streams[index];
+                abandoned = entry.data_len;
                 entry.aborted = true;
                 entry.remote_end = true;
                 entry.local_end = true;
@@ -1269,6 +1383,11 @@ pub const Connection = struct {
                 idle = true;
             }
         }
+        if (abandoned != 0) {
+            self.connection_window_credit += abandoned;
+            self.connection_update_credit += abandoned;
+            self.flushConnectionCredit();
+        }
         if (idle) return self.connectionError(error_code_protocol);
     }
 
@@ -1277,7 +1396,7 @@ pub const Connection = struct {
             return self.connectionError(error_code_protocol);
         }
         if (parsed.payload.len != 5) {
-            return self.connectionError(error_code_frame_size);
+            return self.resetStream(parsed.stream_id, error_code_frame_size);
         }
     }
 
@@ -1295,12 +1414,13 @@ pub const Connection = struct {
         ) & 0x7fffffff;
         const code = std.mem.readInt(u32, parsed.payload[4..8], .big);
         self.state_mutex.lock(self.io) catch return error.Canceled;
-        defer self.state_mutex.unlock(self.io);
         self.goaway_received = true;
         self.goaway_error = code;
+        var abandoned: usize = 0;
         for (&self.streams) |*entry| {
             if (entry.state == .idle) continue;
             if (code != error_code_no_error or entry.id > last_stream_id) {
+                abandoned += entry.data_len;
                 entry.aborted = true;
                 entry.remote_end = true;
                 entry.local_end = true;
@@ -1309,6 +1429,12 @@ pub const Connection = struct {
             }
         }
         self.window_event.set(self.io);
+        if (abandoned != 0) {
+            self.connection_window_credit += abandoned;
+            self.connection_update_credit += abandoned;
+        }
+        self.state_mutex.unlock(self.io);
+        if (abandoned != 0) self.flushConnectionCredit();
     }
 
     fn sendHeaders(
@@ -1814,6 +1940,7 @@ pub const Server = struct {
                 .input = input,
                 .output = output,
                 .role = .server,
+                .request_path = options.path,
             },
             .path = options.path,
         };
@@ -2695,4 +2822,232 @@ test "header validation rejects malformed fields" {
         error.ProtocolViolation,
         validateTrailers(&bad_trailer),
     );
+}
+
+test "discarded HEADERS on a closed stream keep HPACK aligned" {
+    var input = std.Io.Reader.fixed(&.{});
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &output.writer,
+        .role = .server,
+    };
+
+    const request = [_]u8{
+        0x82, 0x87, 0x84, 0x41, 0x01, 'a',
+    };
+    try connection.handleFrame(.{
+        .frame_type = frame.type_headers,
+        .flags = frame.flag_end_headers,
+        .stream_id = 1,
+        .payload = @constCast(&request),
+    });
+    // Close stream 1 before its dynamic-table insertion is used.
+    var rst = [_]u8{ 0, 0, 0, 0 };
+    try connection.handleFrame(.{
+        .frame_type = frame.type_rst_stream,
+        .flags = 0,
+        .stream_id = 1,
+        .payload = &rst,
+    });
+
+    const inserted = [_]u8{
+        0x40, 0x08, 'x', '-', 'p', 'o', 'i', 's', 'o', 'n',
+        0x06, 'p',  'o', 'i', 's', 'o', 'n',
+    };
+    try connection.handleFrame(.{
+        .frame_type = frame.type_headers,
+        .flags = frame.flag_end_headers,
+        .stream_id = 1,
+        .payload = @constCast(&inserted),
+    });
+
+    // Index 62 is the dynamic entry inserted by the discarded block.
+    var next_request = [_]u8{
+        0x82, 0x87, 0x84, 0x01, 0x01, 'a', 0xbe,
+    };
+    try connection.handleFrame(.{
+        .frame_type = frame.type_headers,
+        .flags = frame.flag_end_headers,
+        .stream_id = 3,
+        .payload = &next_request,
+    });
+
+    const headers = connection.streamHeaders(3);
+    const poison = for (headers) |header| {
+        if (std.mem.eql(u8, header.name, "x-poison")) break header.value;
+    } else null;
+    try std.testing.expectEqualStrings("poison", poison.?);
+}
+
+test "an oversized header list closes the connection" {
+    var input = std.Io.Reader.fixed(&.{});
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &output.writer,
+        .role = .server,
+    };
+    var block: [16 * 1024]u8 = undefined;
+    var pos: usize = 0;
+    var value: [8192]u8 = @splat('x');
+    try hpack.encodeHeader(&block, &pos, "x", &value);
+    try std.testing.expectError(
+        error.ProtocolViolation,
+        connection.handleFrame(.{
+            .frame_type = frame.type_headers,
+            .flags = frame.flag_end_headers,
+            .stream_id = 1,
+            .payload = block[0..pos],
+        }),
+    );
+    try std.testing.expect(connection.canceled.load(.acquire));
+    try std.testing.expect(connection.goaway_sent);
+}
+
+test "a stream WINDOW_UPDATE overflow resets the stream" {
+    var input = std.Io.Reader.fixed(&.{});
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &output.writer,
+        .role = .server,
+    };
+    var request = [_]u8{ 0x82, 0x87, 0x84, 0x41, 0x01, 'a' };
+    try connection.handleFrame(.{
+        .frame_type = frame.type_headers,
+        .flags = frame.flag_end_headers,
+        .stream_id = 1,
+        .payload = &request,
+    });
+    var update = [_]u8{ 0x7f, 0xff, 0xff, 0xff };
+    try connection.handleFrame(.{
+        .frame_type = frame.type_window_update,
+        .flags = 0,
+        .stream_id = 1,
+        .payload = &update,
+    });
+    try std.testing.expect(!connection.goaway_sent);
+}
+
+test "a bad PRIORITY length resets the stream" {
+    var input = std.Io.Reader.fixed(&.{});
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &output.writer,
+        .role = .server,
+    };
+    var request = [_]u8{ 0x82, 0x87, 0x84, 0x41, 0x01, 'a' };
+    try connection.handleFrame(.{
+        .frame_type = frame.type_headers,
+        .flags = frame.flag_end_headers,
+        .stream_id = 1,
+        .payload = &request,
+    });
+    var priority = [_]u8{ 0, 0, 0, 0 };
+    try connection.handleFrame(.{
+        .frame_type = frame.type_priority,
+        .flags = 0,
+        .stream_id = 1,
+        .payload = &priority,
+    });
+    try std.testing.expect(!connection.goaway_sent);
+}
+
+test "the configured server path is enforced" {
+    var input = std.Io.Reader.fixed(&.{});
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &output.writer,
+        .role = .server,
+        .request_path = "/tunnel",
+    };
+    // :method GET, :scheme https, :path /evil, :authority a
+    var request = [_]u8{ 0x82, 0x87, 0x44, 0x05, '/', 'e', 'v', 'i', 'l', 0x41, 0x01, 'a' };
+    try connection.handleFrame(.{
+        .frame_type = frame.type_headers,
+        .flags = frame.flag_end_headers,
+        .stream_id = 1,
+        .payload = &request,
+    });
+    try std.testing.expectEqual(@as(usize, 0), connection.streamHeaders(1).len);
+}
+
+test "accept stops after GOAWAY" {
+    var input = std.Io.Reader.fixed(&.{});
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &output.writer,
+        .role = .server,
+    };
+    try connection.closeGracefully();
+    try std.testing.expectError(error.Closed, connection.acceptNext());
+}
+
+test "aborted stream data is credited back to the connection window" {
+    var input = std.Io.Reader.fixed(&.{});
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &output.writer,
+        .role = .server,
+    };
+    var request = [_]u8{ 0x82, 0x87, 0x84, 0x41, 0x01, 'a' };
+    try connection.handleFrame(.{
+        .frame_type = frame.type_headers,
+        .flags = frame.flag_end_headers,
+        .stream_id = 1,
+        .payload = &request,
+    });
+    var data: [8192]u8 = @splat('x');
+    try connection.handleFrame(.{
+        .frame_type = frame.type_data,
+        .flags = 0,
+        .stream_id = 1,
+        .payload = &data,
+    });
+    try std.testing.expect(connection.conn_recv_window < connection_recv_window);
+    connection.abortStream(1);
+    try std.testing.expectEqual(connection_recv_window, connection.conn_recv_window);
+}
+
+test "a seventeenth concurrent stream is refused without GOAWAY" {
+    var input = std.Io.Reader.fixed(&.{});
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &output.writer,
+        .role = .server,
+    };
+    var request = [_]u8{ 0x82, 0x87, 0x84, 0x41, 0x01, 'a' };
+    var id: u32 = 1;
+    while (id <= 2 * max_concurrent_streams + 1) : (id += 2) {
+        try connection.handleFrame(.{
+            .frame_type = frame.type_headers,
+            .flags = frame.flag_end_headers,
+            .stream_id = id,
+            .payload = &request,
+        });
+    }
+    try std.testing.expect(!connection.goaway_sent);
+    try std.testing.expectEqual(@as(usize, 0), connection.streamHeaders(id - 2).len);
 }

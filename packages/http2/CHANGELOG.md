@@ -44,6 +44,20 @@
   32 bits instead of overflowing `usize` on 32-bit targets.
 - Frame, header, DATA, trailer, and HPACK buffers are zeroized on deinit and
   on stream abort/reuse.
+- HEADERS/CONTINUATION field blocks on closed, refused, or otherwise discarded
+  streams are still fully decompressed before RST/GOAWAY, keeping the
+  connection-level HPACK table aligned. A block that exceeds the header-list
+  or storage bound closes the connection with COMPRESSION_ERROR instead of
+  continuing with a half-updated decoder.
+- DATA discarded on a closed stream, and queued DATA dropped by a local
+  reset/abort or GOAWAY, is credited back to the connection receive window with
+  WINDOW_UPDATE so long-lived connections do not leak flow-control credit.
+- A seventeenth concurrent stream, a stream-level WINDOW_UPDATE overflow, and a
+  malformed PRIORITY length are stream errors (RST_STREAM), not connection
+  GOAWAYs. `ServerOptions.path` is now enforced, and a client resets a stream
+  that receives DATA before the final response.
+- The HPACK header array allows 256 fields so a legal 8 KiB list of small
+  fields is not rejected by a lower count cap.
 - `write` pumps incoming frames while waiting for flow-control credit so a
   single-threaded embedder does not deadlock on WINDOW_UPDATE.
 
@@ -54,9 +68,15 @@
 - HPACK encoding has no Huffman or dynamic-table insertion. Decoding supports
   both.
 - The stream table and all queues are fixed inline storage (16 streams, 8 KiB
-  per-stream window/header list); sizing is not configurable yet.
-- No external audit. Tests: 36 package tests. Differential checks against
-  Python h2/hpack and curl are local, not part of CI.
+  per-stream receive window/header list); sizing is not configurable yet. The
+  8 KiB stream receive window is a throughput regression for high-RTT single
+  stream users compared with the previous 1 MiB window.
+- The server cannot send 1xx responses; only the receive side accepts them.
+  Borrowed `headers()`/`trailers()` slices are only valid until the next frame
+  pump/reset.
+- No external audit. Tests: 44 package tests. Differential checks against
+  Python h2/hpack and curl are local, not part of CI; a stateful connection
+  fuzz target is not yet in the shared harness.
 
 ## 0.0.1 - 2026-11-19
 

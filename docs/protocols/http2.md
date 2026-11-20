@@ -25,17 +25,25 @@ locally against Python `h2` 4.4.1, Python `hpack` 4.2.0, and curl 8.7.1
   frames for concurrent readers and writers.
 - Flow control in both directions. The initial stream receive window is 8 KiB
   and the connection window is 128 KiB. WINDOW_UPDATE is sent as DATA is
-  consumed; padding is credited when the frame is parsed. A violation sends
-  GOAWAY with `FLOW_CONTROL_ERROR`.
+  consumed; padding is credited when the frame is parsed. DATA discarded on a
+  closed stream, or queued DATA dropped by reset/abort/GOAWAY, is credited back
+  to the connection window. A connection-level violation sends GOAWAY with
+  `FLOW_CONTROL_ERROR`; stream-level violations send RST_STREAM.
+- Field blocks on closed/refused streams are fully decompressed before being
+  discarded so the connection-level HPACK state stays aligned. A block beyond
+  the header-list/storage bound closes the connection with COMPRESSION_ERROR
+  rather than continuing with a half-updated decoder. Up to 256 fields are
+  accepted within the 8 KiB accounting limit.
 - Strict header validation: pseudo headers must precede regular fields, be
   unique, known, and lowercase; field names are token-checked; values reject
   CR/LF/NUL/controls and leading/trailing whitespace; connection-specific
   headers are rejected; `TE` may only be `trailers`; CONNECT omits
   `:scheme`/`:path` and requires `:authority` (or `Host`); `:status` is a
   three-digit 100-599 value.
-- gRPC-enabling semantics: 1xx informational responses before the final
-  response, a second HEADERS block as trailers with END_STREAM, and separate
-  accessors for initial headers, trailers, and the last 1xx status.
+- gRPC-enabling semantics: 1xx informational responses are accepted before the
+  final response, a second HEADERS block is decoded as trailers with
+  END_STREAM, and separate accessors expose initial headers, trailers, and the
+  last 1xx status. Sending 1xx from the server is not implemented yet.
 - GOAWAY/RST_STREAM behavior: local connection errors send GOAWAY with the
   matching code and cancel the connection; stream errors send RST_STREAM and
   leave other streams usable. Graceful close sends GOAWAY with `NO_ERROR` and
@@ -63,6 +71,8 @@ from `Server` with `--http2-prior-knowledge`. The harness is not committed.
 - gRPC message framing is application-level and out of scope.
 - Root `Config`/`Instance` wiring, protocol-level VLESS/VMess H2 transport, and
   the root `h2_*` adapters are unchanged; the package remains transport-only.
+- The server cannot send 1xx responses. The fixed 8 KiB per-stream receive
+  window is a throughput trade-off for high-RTT single-stream use.
 - A blocked writer pumps frames itself; with many streams and an application
   that never reads, flow control eventually stalls that stream by design.
 - No external audit. Parser fuzz targets remain `http2_frame` and

@@ -95,9 +95,11 @@ and behavior may change between minor releases.
   [packages/tls13/CHANGELOG.md](packages/tls13/CHANGELOG.md).
 - HTTP/2: not wired into `Config`/`Instance`; `H2Stream`/`H2Dialer` are
   programmatic adapters only. The package supports 16 concurrent streams and
-  1xx/trailers, but no server push/PRIORITY, h2c upgrade, HTTP/2 WebSocket, or
-  gRPC message framing; HPACK encoding has no Huffman/dynamic-table insertion.
-  See [packages/http2/CHANGELOG.md](packages/http2/CHANGELOG.md).
+  accepts 1xx/trailers, but cannot send 1xx; no server push/PRIORITY, h2c
+  upgrade, HTTP/2 WebSocket, or gRPC message framing; HPACK encoding has no
+  Huffman/dynamic-table insertion. The 8 KiB stream receive window is a
+  throughput trade-off. See
+  [packages/http2/CHANGELOG.md](packages/http2/CHANGELOG.md).
 - WebSocket: not wired into `Config`/`Instance`; `WsStream`/`WsDialer` are
   programmatic adapters only. No Origin/auth handling, redirects/proxy auth,
   true half-close, or HTTP/2 WebSocket. A connection reserves 1 MiB before the
@@ -110,7 +112,7 @@ and behavior may change between minor releases.
 
 ### Tests
 
-- 257 tests: 61 root unit, 4 public API, 29 integration, 47 tls13, 36 http2,
+- 265 tests: 61 root unit, 4 public API, 29 integration, 47 tls13, 44 http2,
   66 ws, and 14 fuzz corpus tests, passing in Debug and ReleaseSafe.
 - Local interoperability checks pass for Shadowsocks 2022 (AES-128/256,
   TCP/UDP), VLESS (TCP, simple UoT, XUDP, TCP+UDP) and Trojan (TCP/UDP), in

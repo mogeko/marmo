@@ -4,7 +4,7 @@ const std = @import("std");
 const huffman_table = @import("huffman_table.zig");
 
 pub const max_header_list = 8 * 1024;
-pub const max_headers = 128;
+pub const max_headers = 256;
 pub const max_dynamic_size = 4096;
 pub const max_dynamic_entries = 128;
 pub const max_name = 256;
