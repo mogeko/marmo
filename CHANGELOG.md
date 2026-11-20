@@ -3,6 +3,12 @@
 All notable changes to marmo are recorded here. The project is pre-1.0; APIs
 and behavior may change between minor releases.
 
+> **Scope:** this file records embedder-visible changes to the root `marmo`
+> library (`src/`, `Instance`, config, adapters, examples). The first-party
+> packages under `packages/` are independently consumable and keep their own
+> changelogs; root entries mention package changes only when they affect the
+> root API, defaults, or integration.
+
 ## Unreleased
 
 > Version not bumped yet. When releasing, replace "Unreleased" with the
@@ -11,81 +17,23 @@ and behavior may change between minor releases.
 
 ### Security
 
-- Seventh re-audit (2026-11-20): TLS validates the trust anchor's validity
-  window, so an expired root can no longer anchor a chain. WebSocket
-  fragmented messages over 1 MiB now send Close 1009, and the empty-frame
-  regression test appends a valid frame so removing the bound is detected.
-- Sixth re-audit (2026-11-20): TLS rejects the legacy `2.5.29.7` subjectAltName
-  alias that std still parses but OpenSSL ignores, closing a pre-chain
-  out-of-bounds path; TLS client/server handshakes fall back to inline
-  execution when timer concurrency is unavailable. The ADR-0015 reaper aborts
-  `abort_stream` with non-blocking `.both` instead of `.send`, so a wrapped
-  TLS/WS/H2 stream can no longer block the global scan on a write lock.
-- Fifth re-audit (2026-11-20): TLS rejects v1/v2 certificates that carry
-  extensions and rejects issuer/subject unique identifiers, so the SAN can no
-  longer be hidden from std's host-name verifier. HTTP/2 keeps delivering a
-  DATA frame when its WINDOW_UPDATE write fails and marks the server's first
-  HEADERS block as seen so trailers cannot overwrite request headers.
-  WebSocket fixes the empty-frame regression test and zeroizes the handshake
-  buffers on failure.
-- Fourth re-audit (2026-11-20): TLS now rejects non-canonical `[3]` extension
-  wrappers or validates their SAN payload, and rejects RSA moduli whose bit
-  length would trip the std PSS assertion. The ADR-0015 reaper holds the peer
-  lock across the non-blocking abort, and registry removal is uncancelable, so
-  a stopping connection cannot leave a dangling peer entry. HTTP/2 pumps flow
-  control only after the peer half-closes (avoiding DATA double-consumption),
-  stops sending WINDOW_UPDATE after END_STREAM, and rejects a second HEADERS
-  block. WebSocket reads accept standard-client single frames up to the 1 MiB
-  message limit, bound the number of frames processed per read, and fall back
-  to an inline handshake when no timer concurrency is available.
-- Third re-audit (2026-11-20): TLS now validates the full certificate shape
-  (TBSCertificate fields, SAN/GeneralName bounds, BIT STRING lengths, RSA SPKI)
-  before std parsing, and rejects RSA-PSS signatures whose length differs from
-  the certificate modulus. The ADR-0015 reaper no longer takes a writer lock
-  or emits protocol close frames while aborting peers, relay exits clear the
-  peer stream, HTTP/2 processes flow-control frames while a writer waits for
-  window (including after the peer half-closes) and strips DATA padding, and
-  the WS adapter uses one timer task instead of two while the server default
-  defers handshake deadlines to the instance reaper.
-- Second re-audit (2026-11-20): TLS certificate DER is prevalidated before
-  `std.crypto.Certificate` parsing (empty/truncated certificates no longer
-  abort), pathLen/name constraints cover IP and trust anchors, and intermediate
-  EKUs are checked. HTTP/2 sends SETTINGS as the server preface, accepts
-  headers before the client ACK, keeps TCP write open after a local
-  END_STREAM, accepts legal server ENABLE_PUSH=0, maps truncation to errors,
-  and validates request headers/status. WebSocket writes use continuation
-  frames, oversized frames get close 1009, and control-frame limits no longer
-  kill keepalives. ADR-0015 now uses independent idle/grace deadlines, treats
-  zero grace as immediate, aborts both relay directions, and exposes the
-  remaining residual items in `docs/security/audit.md`.
-- TLS client certificate paths now require issuer `basicConstraints CA:TRUE`
-  and `keyUsage keyCertSign`; a CA:FALSE intermediate is rejected. Host-name
-  verification is independent of chain verification. Post-handshake plaintext
-  alerts are rejected, and missing `close_notify` is a truncation error by
-  default. ALPN extension length arithmetic is bounded.
-- HTTP/2 accepts client `ENABLE_PUSH`, treats `END_STREAM` as a half-close,
-  rejects HEADERS for other streams, reports RST/truncating GOAWAY as resets,
-  limits CONTINUATION frames, and sizes the HPACK dynamic table by bytes.
-- WebSocket preserves frames coalesced with the opening handshake and checks
-  close state under the write lock.
-- Stream adapters track in-flight operations so `close` unblocks I/O and waits
-  before freeing connection state.
-- ADR-0015 global `limits`: TCP connection cap, handshake deadline, relay idle
-  timeout, and uplink/downlink half-close grace. A per-Instance reaper enforces
-  deadlines over a bounded guard registry; metrics expose rejected
-  connections, handshake timeouts, and idle timeouts.
-- TLS certificate paths also enforce `pathLenConstraint`, DNS name
-  constraints, and strict supported-version/extension parsing; TLS ALPN is
-  configurable through `tls.alpn`/`tls.required_alpn`; secret stack copies are
-  zeroized.
-- HTTP/2 serializes writers, validates flow-control arithmetic, enforces
-  optional server paths and request pseudo-headers, bounds literal headers,
-  rejects invalid header encoding/order, sends client `ENABLE_PUSH=0`, zeroes
-  header storage on release, and adds `tls_server_hello` fuzzing.
-- WebSocket validates close codes/UTF-8 reasons, rejects strict-handshake
-  violations, caps messages at 1 MiB/1024 fragments and control frames per
-  read, uses a 4 KiB masking scratch buffer, and adds stateful connection and
-  handshake fuzz targets.
+- Global connection limits/timeouts (ADR-0015): 1024 TCP connections, 10 s
+  handshake deadline, 300 s idle timeout, and 1 s half-close grace, enforced by
+  one reaper per `Instance` over a bounded guard registry. Metrics expose
+  rejected connections, handshake timeouts, and idle timeouts; UDP is excluded
+  from `max_connections`.
+- Relay teardown clears the peer reference, aborts with the non-blocking
+  `.both` path, and removes the guard before closing the stream, so a timeout
+  cannot leave a dangling peer or stall the reaper on a writer lock.
+- TLS, HTTP/2, and WebSocket received seven hardening rounds. Root-visible
+  effects: stricter certificate validation (malformed DER, SAN, legacy OIDs,
+  v1/unique-ID, RSA-PSS, expired anchors), HTTP/2 half-close/flow-control and
+  padding/trailer handling, and WebSocket 1 MiB reads, continuation writes,
+  Close 1009, and a bounded frame budget. Package details are in
+  [packages/tls13/CHANGELOG.md](packages/tls13/CHANGELOG.md),
+  [packages/http2/CHANGELOG.md](packages/http2/CHANGELOG.md), and
+  [packages/ws/CHANGELOG.md](packages/ws/CHANGELOG.md); audit history is in
+  [docs/security/audit.md](docs/security/audit.md).
 
 ### Added
 
@@ -112,13 +60,6 @@ and behavior may change between minor releases.
 - Local interop checks against self-hosted Xray-core 26.11.9 and trojan-gfw
   1.16.0 cover TCP and UDP in both directions; the harness is not committed.
 
-### Fixed
-
-- The TLS client reader now waits for a complete record instead of reporting a
-  partial record as EOF. The bug lost split replies and was found during
-  trojan-gfw UDP interop; `packages/tls13/src/reader.zig` has a regression
-  test.
-
 ### Changed
 
 - The TLS client is now the in-tree TLS 1.3 implementation. TLS 1.2-only
@@ -136,25 +77,19 @@ and behavior may change between minor releases.
 
 ### Known limitations
 
-- TLS has no client authentication, PSK, session tickets, 0-RTT, KeyUpdate,
-  TLS 1.2, or revocation checking. It supports only X25519 and
-  `TLS_AES_128_GCM_SHA256`; servers pinned to AES-256-GCM, ChaCha20-Poly1305,
-  secp256r1, or HelloRetryRequest cannot interoperate.
-- TLS certificate policy is stricter than std but still differs from OpenSSL:
-  no-SAN certificates fall back to CN, leaf `keyUsage` is not checked, and
-  trust-anchor `pathLen`/`keyUsage` constraints are not enforced.
-- HTTP/2 is one stream per connection and is not wired into `Config` or
-  `Instance`; `H2Stream`/`H2Dialer` are programmatic adapters only. There is
-  no multiplexing, gRPC, 1xx/trailers, CONNECT/extended CONNECT, server push,
-  HTTP/1.1 upgrade, or graceful GOAWAY/RST sending. HPACK encoding has no
-  Huffman or dynamic-table insertion, receive flow control is not enforced,
-  and data/control frames share one write lock.
-- WebSocket is not wired into `Config` or `Instance`; `WsStream`/`WsDialer`
-  are programmatic adapters only. There is no permessage-deflate, subprotocol
-  negotiation, Origin/auth handling, true half-close, or HTTP/2 WebSocket.
-  Text frames are not UTF-8 validated, most frame violations do not send Close
-  1002, and a connection reserves 1 MiB before the handshake once wired to an
-  inbound.
+- TLS: no client authentication, PSK, session tickets, 0-RTT, KeyUpdate,
+  TLS 1.2, or CRL/OCSP, and only X25519 + AES-128-GCM. Certificate policy
+  still falls back to CN and does not check leaf `keyUsage`. See
+  [packages/tls13/CHANGELOG.md](packages/tls13/CHANGELOG.md).
+- HTTP/2: one stream per connection and not wired into `Config`/`Instance`;
+  `H2Stream`/`H2Dialer` are programmatic adapters only. No multiplexing,
+  gRPC, 1xx/trailers, CONNECT, server push, or graceful GOAWAY. See
+  [packages/http2/CHANGELOG.md](packages/http2/CHANGELOG.md).
+- WebSocket: not wired into `Config`/`Instance`; `WsStream`/`WsDialer` are
+  programmatic adapters only. No compression, subprotocol negotiation,
+  Origin/auth handling, true half-close, or HTTP/2 WebSocket. A connection
+  reserves 1 MiB before the handshake. See
+  [packages/ws/CHANGELOG.md](packages/ws/CHANGELOG.md).
 - VLESS/VMess over WebSocket or HTTP/2 is not implemented; only TCP/TLS
   transports are configurable. QUIC, gRPC, TUIC, and Hysteria2 remain Phase 3.
 - The library remains not production-ready, has no external cryptographic or
