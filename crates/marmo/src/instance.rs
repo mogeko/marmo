@@ -13,7 +13,9 @@ use std::time::Duration;
 
 use marmo_net::{Endpoint, Network};
 use marmo_proto::shadowsocks::{Key, Method};
+use marmo_proto::trojan::PasswordHash;
 use marmo_transport::BoxStream;
+use marmo_transport::tls::{TlsClient, TlsClientOptions, TlsServer, TlsServerOptions};
 use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::runtime::Handle;
@@ -36,7 +38,7 @@ pub struct Instance {
     limits: Limits,
     supervisor: Arc<Supervisor>,
     router: Arc<Router>,
-    outbounds: Vec<OutboundKind>,
+    outbounds: Vec<OutboundSpec>,
     inbounds: Vec<InboundSpec>,
 }
 
@@ -59,7 +61,8 @@ impl Instance {
         }
     }
 
-    /// Binds every inbound and returns the running-bound state.
+    /// Binds every inbound, builds TLS configurations, and returns the
+    /// running-bound state. This is the only startup step that performs I/O.
     pub async fn bind(self) -> Result<BoundInstance, BindError> {
         let Self {
             runtime,
@@ -70,8 +73,14 @@ impl Instance {
             inbounds,
         } = self;
 
+        let mut kinds = Vec::with_capacity(outbounds.len());
+        for spec in outbounds {
+            kinds.push(spec.build()?);
+        }
+
         let mut bound = Vec::with_capacity(inbounds.len());
         for spec in inbounds {
+            let kind = spec.config.build(&spec.tag)?;
             let listener =
                 TcpListener::bind(spec.listen)
                     .await
@@ -85,7 +94,7 @@ impl Instance {
                 address: spec.listen.to_string(),
                 source,
             })?;
-            let udp = if matches!(spec.kind, InboundKind::Shadowsocks { .. }) {
+            let udp = if matches!(kind, InboundKind::Shadowsocks { .. }) {
                 let socket =
                     UdpSocket::bind(local_addr)
                         .await
@@ -100,7 +109,7 @@ impl Instance {
             };
             bound.push(BoundInbound {
                 tag: spec.tag,
-                kind: spec.kind,
+                kind,
                 listener,
                 local_addr,
                 udp,
@@ -112,7 +121,7 @@ impl Instance {
             limits,
             supervisor,
             router,
-            outbounds,
+            outbounds: kinds,
             inbounds: bound,
         })
     }
@@ -170,9 +179,9 @@ impl InstanceBuilder {
 
         let mut inbounds = Vec::with_capacity(self.config.inbounds.len());
         for inbound in &self.config.inbounds {
-            let kind = match inbound.protocol {
-                InboundProtocol::Socks5 => InboundKind::Socks5,
-                InboundProtocol::Http => InboundKind::Http,
+            let config = match inbound.protocol {
+                InboundProtocol::Socks5 => InboundConfig::Socks5,
+                InboundProtocol::Http => InboundConfig::Http,
                 InboundProtocol::Shadowsocks => {
                     let (method, key) =
                         credentials(inbound.method.as_deref(), inbound.password.as_deref())
@@ -180,7 +189,37 @@ impl InstanceBuilder {
                                 tag: inbound.tag.clone(),
                                 reason: error.to_string(),
                             })?;
-                    InboundKind::Shadowsocks { method, key }
+                    InboundConfig::Shadowsocks { method, key }
+                }
+                InboundProtocol::Trojan => {
+                    let Some(tls) = inbound.tls.as_ref() else {
+                        return Err(BuildError::InboundOption {
+                            tag: inbound.tag.clone(),
+                            reason: "tls is required for trojan".into(),
+                        });
+                    };
+                    let Some(password) = inbound.password.as_deref() else {
+                        return Err(BuildError::InboundOption {
+                            tag: inbound.tag.clone(),
+                            reason: "password is required for trojan".into(),
+                        });
+                    };
+                    let fallback = match inbound.fallback.as_deref() {
+                        Some(text) => {
+                            let endpoint =
+                                Endpoint::parse(text).map_err(|_| BuildError::InboundOption {
+                                    tag: inbound.tag.clone(),
+                                    reason: format!("invalid fallback '{text}'"),
+                                })?;
+                            Some(endpoint)
+                        }
+                        None => None,
+                    };
+                    InboundConfig::Trojan {
+                        password: Arc::new(PasswordHash::derive(password)),
+                        tls: InboundTlsConfig::new(tls),
+                        fallback,
+                    }
                 }
                 protocol => {
                     return Err(BuildError::UnsupportedInbound {
@@ -202,15 +241,15 @@ impl InstanceBuilder {
             };
             inbounds.push(InboundSpec {
                 tag: Arc::from(inbound.tag.as_str()),
-                kind,
+                config,
                 listen,
             });
         }
 
         let mut outbounds = Vec::with_capacity(self.config.outbounds.len());
         for outbound in &self.config.outbounds {
-            match outbound.protocol {
-                OutboundProtocol::Direct => outbounds.push(OutboundKind::Direct),
+            let config = match outbound.protocol {
+                OutboundProtocol::Direct => OutboundConfig::Direct,
                 OutboundProtocol::Http => {
                     let Some(server) = outbound.server.as_deref() else {
                         return Err(BuildError::OutboundEndpoint {
@@ -223,7 +262,7 @@ impl InstanceBuilder {
                             tag: outbound.tag.clone(),
                             value: server.to_string(),
                         })?;
-                    outbounds.push(OutboundKind::Http { server });
+                    OutboundConfig::Http { server }
                 }
                 OutboundProtocol::Shadowsocks => {
                     let Some(server) = outbound.server.as_deref() else {
@@ -243,11 +282,57 @@ impl InstanceBuilder {
                                 tag: outbound.tag.clone(),
                                 reason: error.to_string(),
                             })?;
-                    outbounds.push(OutboundKind::Shadowsocks {
+                    OutboundConfig::Shadowsocks {
                         server,
                         method,
                         key,
-                    });
+                    }
+                }
+                OutboundProtocol::Trojan => {
+                    let Some(server) = outbound.server.as_deref() else {
+                        return Err(BuildError::OutboundEndpoint {
+                            tag: outbound.tag.clone(),
+                            value: String::new(),
+                        });
+                    };
+                    let server =
+                        Endpoint::parse(server).map_err(|_| BuildError::OutboundEndpoint {
+                            tag: outbound.tag.clone(),
+                            value: server.to_string(),
+                        })?;
+                    let Some(password) = outbound.password.as_deref() else {
+                        return Err(BuildError::OutboundOption {
+                            tag: outbound.tag.clone(),
+                            reason: "password is required for trojan".into(),
+                        });
+                    };
+                    let Some(tls) = outbound.tls.as_ref() else {
+                        return Err(BuildError::OutboundOption {
+                            tag: outbound.tag.clone(),
+                            reason: "tls is required for trojan".into(),
+                        });
+                    };
+                    let server_name = tls
+                        .sni
+                        .clone()
+                        .or_else(|| server.domain().map(str::to_owned))
+                        .or_else(|| server.ip().map(|ip| ip.to_string()))
+                        .ok_or_else(|| BuildError::OutboundOption {
+                            tag: outbound.tag.clone(),
+                            reason: "tls.sni is required".into(),
+                        })?;
+                    OutboundConfig::Trojan {
+                        server,
+                        password: Arc::new(PasswordHash::derive(password)),
+                        tls: OutboundTlsConfig {
+                            server_name,
+                            alpn: tls.alpn.clone().unwrap_or_default(),
+                            required_alpn: tls.required_alpn.clone(),
+                            insecure: tls.insecure,
+                            client_certificate: tls.client_certificate.clone(),
+                            client_private_key: tls.client_private_key.clone(),
+                        },
+                    }
                 }
                 protocol => {
                     return Err(BuildError::UnsupportedOutbound {
@@ -255,7 +340,11 @@ impl InstanceBuilder {
                         protocol,
                     });
                 }
-            }
+            };
+            outbounds.push(OutboundSpec {
+                tag: Arc::from(outbound.tag.as_str()),
+                config,
+            });
         }
 
         let supervisor = Arc::new(Supervisor::new(limits.max_connections));
@@ -445,6 +534,15 @@ impl Context {
                 Some(OutboundKind::Http { server }) => {
                     http_connect::connect(server, target).await.map(boxed)
                 }
+                Some(OutboundKind::Trojan {
+                    server,
+                    password,
+                    tls,
+                }) => {
+                    let (stream, bound) =
+                        outbound::trojan::connect(server, tls, password, target).await?;
+                    Ok((stream, bound))
+                }
                 Some(OutboundKind::Shadowsocks {
                     server,
                     method,
@@ -484,7 +582,7 @@ impl Context {
                 }) => Ok(Some(UdpOutbound::Shadowsocks(
                     SsUdpClient::connect(server, *method, Arc::clone(key)).await?,
                 ))),
-                Some(OutboundKind::Http { .. }) => Ok(None),
+                Some(OutboundKind::Http { .. } | OutboundKind::Trojan { .. }) => Ok(None),
                 None => Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "outbound id is out of range",
@@ -511,19 +609,179 @@ pub(crate) enum OutboundKind {
         method: Method,
         key: Arc<Key>,
     },
+    Trojan {
+        server: Endpoint,
+        password: Arc<PasswordHash>,
+        tls: Arc<TlsClient>,
+    },
 }
 
 #[derive(Clone)]
 enum InboundKind {
     Socks5,
     Http,
-    Shadowsocks { method: Method, key: Arc<Key> },
+    Shadowsocks {
+        method: Method,
+        key: Arc<Key>,
+    },
+    Trojan {
+        password: Arc<PasswordHash>,
+        tls: Arc<TlsServer>,
+        fallback: Option<Endpoint>,
+    },
 }
 
 struct InboundSpec {
     tag: Arc<str>,
-    kind: InboundKind,
+    config: InboundConfig,
     listen: SocketAddr,
+}
+
+enum InboundConfig {
+    Socks5,
+    Http,
+    Shadowsocks {
+        method: Method,
+        key: Arc<Key>,
+    },
+    Trojan {
+        password: Arc<PasswordHash>,
+        tls: InboundTlsConfig,
+        fallback: Option<Endpoint>,
+    },
+}
+
+struct InboundTlsConfig {
+    certificate: String,
+    private_key: String,
+    alpn: Vec<String>,
+    client_ca: Option<String>,
+    client_auth: crate::config::ClientAuth,
+}
+
+impl InboundTlsConfig {
+    fn new(tls: &crate::config::InboundTls) -> Self {
+        Self {
+            certificate: tls.certificate.clone(),
+            private_key: tls.private_key.clone(),
+            alpn: tls.alpn.clone().unwrap_or_default(),
+            client_ca: tls.client_ca.clone(),
+            client_auth: tls.client_auth,
+        }
+    }
+}
+
+impl InboundConfig {
+    fn build(self, tag: &str) -> Result<InboundKind, BindError> {
+        Ok(match self {
+            Self::Socks5 => InboundKind::Socks5,
+            Self::Http => InboundKind::Http,
+            Self::Shadowsocks { method, key } => InboundKind::Shadowsocks { method, key },
+            Self::Trojan {
+                password,
+                tls,
+                fallback,
+            } => {
+                let options = TlsServerOptions {
+                    certificate: &tls.certificate,
+                    private_key: &tls.private_key,
+                    alpn: &tls.alpn,
+                    client_ca: tls.client_ca.as_deref(),
+                    client_auth: transport_client_auth(tls.client_auth),
+                };
+                let server = TlsServer::new(&options).map_err(|error| BindError::Tls {
+                    tag: tag.to_owned(),
+                    reason: error.to_string(),
+                })?;
+                InboundKind::Trojan {
+                    password,
+                    tls: Arc::new(server),
+                    fallback,
+                }
+            }
+        })
+    }
+}
+
+struct OutboundSpec {
+    tag: Arc<str>,
+    config: OutboundConfig,
+}
+
+enum OutboundConfig {
+    Direct,
+    Http {
+        server: Endpoint,
+    },
+    Shadowsocks {
+        server: Endpoint,
+        method: Method,
+        key: Arc<Key>,
+    },
+    Trojan {
+        server: Endpoint,
+        password: Arc<PasswordHash>,
+        tls: OutboundTlsConfig,
+    },
+}
+
+struct OutboundTlsConfig {
+    server_name: String,
+    alpn: Vec<String>,
+    required_alpn: Option<String>,
+    insecure: bool,
+    client_certificate: Option<String>,
+    client_private_key: Option<String>,
+}
+
+impl OutboundSpec {
+    fn build(self) -> Result<OutboundKind, BindError> {
+        let Self { tag, config } = self;
+        Ok(match config {
+            OutboundConfig::Direct => OutboundKind::Direct,
+            OutboundConfig::Http { server } => OutboundKind::Http { server },
+            OutboundConfig::Shadowsocks {
+                server,
+                method,
+                key,
+            } => OutboundKind::Shadowsocks {
+                server,
+                method,
+                key,
+            },
+            OutboundConfig::Trojan {
+                server,
+                password,
+                tls,
+            } => {
+                let options = TlsClientOptions {
+                    server_name: &tls.server_name,
+                    alpn: &tls.alpn,
+                    required_alpn: tls.required_alpn.as_deref(),
+                    insecure: tls.insecure,
+                    client_certificate: tls.client_certificate.as_deref(),
+                    client_private_key: tls.client_private_key.as_deref(),
+                };
+                let client = TlsClient::new(&options).map_err(|error| BindError::Tls {
+                    tag: tag.to_string(),
+                    reason: error.to_string(),
+                })?;
+                OutboundKind::Trojan {
+                    server,
+                    password,
+                    tls: Arc::new(client),
+                }
+            }
+        })
+    }
+}
+
+fn transport_client_auth(auth: crate::config::ClientAuth) -> marmo_transport::tls::ClientAuth {
+    match auth {
+        crate::config::ClientAuth::None => marmo_transport::tls::ClientAuth::None,
+        crate::config::ClientAuth::Optional => marmo_transport::tls::ClientAuth::Optional,
+        crate::config::ClientAuth::Required => marmo_transport::tls::ClientAuth::Required,
+    }
 }
 
 struct BoundInbound {
@@ -607,6 +865,21 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                             )
                             .await;
                         }
+                        InboundKind::Trojan {
+                            password,
+                            tls,
+                            fallback,
+                        } => {
+                            inbound::trojan::handle(
+                                stream,
+                                task_context,
+                                tag,
+                                tls,
+                                password,
+                                fallback,
+                            )
+                            .await;
+                        }
                     }
                 }, &runtime);
             }
@@ -670,6 +943,22 @@ pub enum BuildError {
         /// Configured server string.
         value: String,
     },
+    /// An inbound option could not be used.
+    #[error("inbound '{tag}' has an invalid option: {reason}")]
+    InboundOption {
+        /// Inbound tag.
+        tag: String,
+        /// Why the option was rejected.
+        reason: String,
+    },
+    /// An outbound option could not be used.
+    #[error("outbound '{tag}' has an invalid option: {reason}")]
+    OutboundOption {
+        /// Outbound tag.
+        tag: String,
+        /// Why the option was rejected.
+        reason: String,
+    },
     /// The configured credentials could not be used.
     #[error("'{tag}' has invalid credentials: {reason}")]
     Credentials {
@@ -684,6 +973,14 @@ pub enum BuildError {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum BindError {
+    /// A TLS configuration was rejected while binding.
+    #[error("'{tag}' TLS setup failed: {reason}")]
+    Tls {
+        /// Inbound or outbound tag.
+        tag: String,
+        /// Why the TLS configuration was rejected.
+        reason: String,
+    },
     /// One inbound could not bind.
     #[error("inbound '{inbound}' failed to bind {address}: {source}")]
     Inbound {

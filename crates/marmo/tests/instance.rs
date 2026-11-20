@@ -259,10 +259,10 @@ async fn rejects_unsupported_protocols() {
         r#"{
           "inbounds": [
             {
-              "tag": "tj",
-              "protocol": "trojan",
+              "tag": "vl",
+              "protocol": "vless",
               "listen": "127.0.0.1:0",
-              "password": "secret",
+              "uuid": "00000000-0000-0000-0000-000000000001",
               "tls": { "certificate": "cert.pem", "private_key": "key.pem" }
             }
           ],
