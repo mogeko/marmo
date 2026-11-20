@@ -487,3 +487,28 @@ the WS client handshake still uses one timer task; outbound connect/DNS cannot
 be canceled by a handshake deadline; TLS still falls back to CN when no SAN is
 present and does not check leaf keyUsage; H2 remains single-stream and shares
 one write lock between data and control frames.
+
+## 12. Post-audit implementation update (2026-11-21)
+
+The high-priority functional gaps identified in the release review were
+implemented in three isolated worktrees and merged after package and root
+tests:
+
+- TLS: client authentication (`none`/`optional`/`required`), AES-256-GCM and
+  ChaCha20-Poly1305, X25519/P-256 ECDHE, and KeyUpdate. Root config adds the
+  client certificate/key and inbound client-CA policy. PSK/resumption/tickets/
+  0-RTT, TLS 1.2, revocation, ECH, record padding, SNI multi-certificate
+  selection, and RSA/Ed25519 credentials remain out of scope.
+- HTTP/2: bounded 16-stream multiplexing, per-stream flow control, 1xx and
+  trailers, GOAWAY/RST_STREAM, strict header validation, HPACK integer and
+  header-list fixes, and buffer zeroization. Config/Instance wiring, server
+  push/PRIORITY, h2c, HTTP/2 WebSocket, and gRPC framing remain out of scope.
+- WebSocket: RFC 7692 permessage-deflate and subprotocol negotiation, plus
+  incremental text UTF-8 validation and correct Close codes. Config/Instance
+  wiring, Origin/auth, redirects, HTTP/2 WebSocket, true half-close, and lazy
+  compression/frame memory remain out of scope.
+
+The full suite is now 251 tests (61 root, 4 public API, 29 integration, 47
+tls13, 36 http2, 60 ws, 14 fuzz). TLS, HTTP/2, and WebSocket interop was
+rechecked locally against OpenSSL 4.1, curl/nghttp2, Python `h2`/`hpack`,
+Python `websockets`, and Node `ws`.

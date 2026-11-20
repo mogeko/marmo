@@ -17,11 +17,13 @@ transport packages, and global connection limits/timeouts (ADR-0015).
 
 **Transport status:** plaintext TCP, TCP/TLS, and the in-tree TLS 1.3
 client/server are wired in. TLS, HTTP/2, and WebSocket live in independent
-packages (ADR-0010, ADR-0013, ADR-0014). TLS supports X25519,
-AES-128-GCM/SHA-256, ALPN, and ECDSA/Ed25519/RSA server certificates. The
+packages (ADR-0010, ADR-0013, ADR-0014). TLS supports X25519/P-256 ECDHE,
+AES-128-GCM/AES-256-GCM/ChaCha20-Poly1305, ALPN, mTLS, KeyUpdate, and
+ECDSA/Ed25519/RSA server certificates. The
 HTTP/2 transport multiplexes up to 16 streams per connection and exposes
-1xx/trailers for gRPC-style callers; WebSocket implements RFC 6455 without
-extensions. QUIC and gRPC are not implemented (ADR-0007).
+1xx/trailers for gRPC-style callers; WebSocket implements RFC 6455 with
+permessage-deflate and subprotocol negotiation. QUIC and gRPC are not
+implemented (ADR-0007).
 
 - [Architecture](docs/architecture.md)
 - [Architecture decisions](docs/decisions/)

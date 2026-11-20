@@ -7,9 +7,9 @@ root package through path dependencies declared in the root `build.zig.zon`.
 
 | Package | Purpose |
 | --- | --- |
-| [tls13](tls13/) | In-tree TLS 1.3 client/server and ALPN |
+| [tls13](tls13/) | In-tree TLS 1.3 client/server, ALPN, mTLS, three suites, KeyUpdate |
 | [http2](http2/) | HTTP/2 framing, HPACK, and bounded multiplexed transport |
-| [ws](ws/) | RFC 6455 WebSocket handshake and framing |
+| [ws](ws/) | RFC 6455 handshake/framing, permessage-deflate, subprotocols |
 
 ## Required layout
 

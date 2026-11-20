@@ -20,8 +20,10 @@ repository ships the library only: no CLI, daemon, or `app` layer.
   manual, round-robin, random, fallback, and least-latency, plus active TCP
   health probes, VLESS outbound and inbound over TLS (TCP, simple UoT, and
   XUDP), Trojan inbound and outbound over TLS (TCP/UDP, optional routed
-  fallback per ADR-0011), a TLS 1.3 client/server with ALPN (ADR-0012), and
-  HTTP/2 and WebSocket transport packages (ADR-0013, ADR-0014). `http_head`,
+  fallback per ADR-0011), a TLS 1.3 client/server with ALPN, mTLS, three AEAD
+  suites, X25519/P-256 and KeyUpdate (ADR-0012), and HTTP/2 and WebSocket
+  transport packages with multiplexing/1xx/trailers and
+  compression/subprotocols (ADR-0013, ADR-0014). `http_head`,
   jitter, and exponential backoff remain, along with VMess, other TLS
   inbounds, protocol-level WS/H2 wiring, sniffing, rule sets, process rules,
   and DNS cache/DoH.
@@ -185,8 +187,8 @@ Adapted from TigerBeetle's
 ## Commands and tests
 
 - `zig build test` runs the root unit, public API, and integration tests, the
-  package tests, and the deterministic fuzz corpus smoke (183 today: 60 root
-  unit, 4 public API, 28 integration, 34 tls13, 23 http2, 22 ws, 12 fuzz).
+  package tests, and the deterministic fuzz corpus smoke (251 today: 61 root
+  unit, 4 public API, 29 integration, 47 tls13, 36 http2, 60 ws, 14 fuzz).
   `zig build check` adds the formatting check, and `zig build examples` builds
   all examples. CI runs `zig build check` and
   `zig build test -Doptimize=ReleaseSafe`.

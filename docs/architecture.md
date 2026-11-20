@@ -60,8 +60,8 @@ handling, and configuration storage.
   threads, an event loop, or a global allocator. The embedder owns the runtime.
 - **std gaps that must be filled in-tree** (ADR-0007):
   - TLS: the client and TLS 1.3 server are in-tree in `packages/tls13`
-    (X25519, AES-128-GCM/SHA-256, ALPN, ECDSA/Ed25519/RSA server
-    certificates).
+    (X25519/P-256 ECDHE, AES-128-GCM/AES-256-GCM/ChaCha20-Poly1305, ALPN,
+    mTLS, KeyUpdate, ECDSA/Ed25519/RSA server certificates).
   - HTTP/2 and WebSocket: in-tree in `packages/http2` and `packages/ws`.
   - QUIC: none; implemented in-tree.
   - DNS: system resolver via `IpAddress.resolve`, no DoH/DoT client.
@@ -467,18 +467,20 @@ re-check every transport on each Zig upgrade and migrate to `std` as soon as it
 provides the same primitive, deleting the in-tree version.
 
 - **TLS 1.3 client and server**: in-tree in `packages/tls13` on `std.crypto`;
-  X25519, AES-128-GCM/SHA-256, ALPN, and caller-provided server certificates
-  (ECDSA P-256/P-384, Ed25519, or RSA). The client verifies chains through the
-  system CA bundle. No client auth, PSK, tickets, KeyUpdate, or 0-RTT.
+  X25519/P-256 ECDHE, AES-128-GCM/AES-256-GCM/ChaCha20-Poly1305, ALPN, mTLS,
+  KeyUpdate, and caller-provided server certificates (ECDSA P-256/P-384,
+  Ed25519, or RSA). The client verifies chains through the system CA bundle.
+  No PSK, tickets, 0-RTT, TLS 1.2, or revocation.
   `src/transport/tls_{client,server,dialer}.zig` are thin `Stream` adapters.
   `Instance` wraps accepted TCP streams for the VLESS and Trojan inbounds;
   credentials are PEM/DER files loaded by `src/transport/tls_credentials.zig`.
 - **WebSocket**: in-tree in `packages/ws`; bounded RFC 6455 opening handshake,
-  masking, continuation, ping/pong, and close. `src/transport/ws_*.zig`
-  expose `Stream` and a dialer. No extensions or compression.
+  masking, continuation, ping/pong, close, permessage-deflate, and subprotocol
+  negotiation. `src/transport/ws_*.zig` expose `Stream` and a dialer.
 - **HTTP/2**: in-tree in `packages/http2`, limited to transport needs: framing,
-  HPACK (including Huffman decode), SETTINGS, flow control, GOAWAY. One active
-  stream per connection; `src/transport/h2_*.zig` expose `Stream` and a dialer.
+  HPACK (including Huffman decode), SETTINGS, flow control, GOAWAY, 1xx and
+  trailers. Bounded 16-stream multiplexing; `src/transport/h2_*.zig` expose
+  `Stream` and a dialer.
 - **gRPC**: Phase 3, built on the HTTP/2 package.
 - **QUIC**: in-tree, Phase 3; QUIC v1, stream multiplexing, datagrams, and
   pluggable congestion control (NewReno, Brutal). No 0-RTT in v1.
