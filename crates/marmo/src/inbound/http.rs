@@ -57,7 +57,7 @@ async fn prepare(
     client: &mut TcpStream,
     context: &Context,
     inbound: &str,
-) -> io::Result<Option<TcpStream>> {
+) -> io::Result<Option<BoxStream>> {
     let (buffer, head_len) = match read_head(client).await {
         Ok(Some(head)) => head,
         Ok(None) => return Ok(None),
@@ -131,7 +131,7 @@ async fn connect_tunnel(
     inbound: &str,
     target_text: &str,
     leftover: &[u8],
-) -> io::Result<Option<TcpStream>> {
+) -> io::Result<Option<BoxStream>> {
     let Ok(destination) = Endpoint::parse(target_text) else {
         let _ = respond(client, "400 Bad Request").await;
         return Ok(None);
@@ -140,7 +140,7 @@ async fn connect_tunnel(
         return Ok(None);
     };
     let mut remote = match context.connect(action, &destination).await {
-        Ok(remote) => remote,
+        Ok((remote, _bound)) => remote,
         Err(_) => {
             let _ = respond(client, "502 Bad Gateway").await;
             return Ok(None);
@@ -170,7 +170,7 @@ async fn forward(
     target_text: &str,
     headers: &[httparse::Header<'_>],
     leftover: &[u8],
-) -> io::Result<Option<TcpStream>> {
+) -> io::Result<Option<BoxStream>> {
     let target = match parse_absolute(target_text) {
         Ok(target) => target,
         Err(AbsoluteError::UnsupportedScheme) => {
@@ -198,7 +198,7 @@ async fn forward(
         return Ok(None);
     };
     let mut remote = match context.connect(action, &target.endpoint).await {
-        Ok(remote) => remote,
+        Ok((remote, _bound)) => remote,
         Err(_) => {
             let _ = respond(client, "502 Bad Gateway").await;
             return Ok(None);

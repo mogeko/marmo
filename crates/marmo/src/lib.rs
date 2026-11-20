@@ -12,6 +12,7 @@ mod instance;
 mod limits;
 mod outbound;
 mod routing;
+mod shadowsocks;
 mod supervisor;
 mod validate;
 

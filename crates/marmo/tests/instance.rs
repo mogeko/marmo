@@ -259,11 +259,11 @@ async fn rejects_unsupported_protocols() {
         r#"{
           "inbounds": [
             {
-              "tag": "ss",
-              "protocol": "shadowsocks",
+              "tag": "tj",
+              "protocol": "trojan",
               "listen": "127.0.0.1:0",
-              "method": "2022-blake3-aes-128-gcm",
-              "password": "MDEyMzQ1Njc4OWFiY2RlZg=="
+              "password": "secret",
+              "tls": { "certificate": "cert.pem", "private_key": "key.pem" }
             }
           ],
           "route": { "final": "direct" }

@@ -74,7 +74,7 @@ async fn connect_target(
     context: &Context,
     inbound: &str,
     destination: Endpoint,
-) -> io::Result<Option<TcpStream>> {
+) -> io::Result<Option<marmo_transport::BoxStream>> {
     let domain = destination.domain().map(str::to_owned);
     let source = client.peer_addr()?.into();
     let metadata = Metadata {
@@ -87,8 +87,7 @@ async fn connect_target(
     let action = context.router.route(&metadata);
 
     match context.connect(action, &destination).await {
-        Ok(remote) => {
-            let bound = remote.local_addr().ok();
+        Ok((remote, bound)) => {
             if send_reply(client, ReplyStatus::Succeeded, bound)
                 .await
                 .is_err()
