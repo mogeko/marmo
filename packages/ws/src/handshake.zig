@@ -239,6 +239,7 @@ fn applyDeflateParameter(
 
 fn parseWindowBits(text: []const u8) Error!u4 {
     if (text.len == 0 or text.len > 2) return error.HandshakeFailed;
+    if (text.len == 2 and text[0] == '0') return error.HandshakeFailed;
     for (text) |byte| {
         if (!std.ascii.isDigit(byte)) return error.HandshakeFailed;
     }
@@ -283,6 +284,11 @@ pub fn parseProtocolList(
             return error.HandshakeFailed;
         }
         if (count == out.len) return error.HandshakeFailed;
+        for (out[0..count]) |existing| {
+            if (std.mem.eql(u8, existing, protocol)) {
+                return error.HandshakeFailed;
+            }
+        }
         out[count] = protocol;
         count += 1;
     }
@@ -495,4 +501,24 @@ test "arbitrary extension strings fail without panicking" {
         var protocols: [max_subprotocols][]const u8 = undefined;
         _ = parseProtocolList(input[0..len], &protocols) catch continue;
     }
+}
+
+test "window bits must not have leading zeroes" {
+    try std.testing.expectError(
+        error.HandshakeFailed,
+        parseWindowBits("08"),
+    );
+    try std.testing.expectError(
+        error.HandshakeFailed,
+        parseWindowBits("09"),
+    );
+    try std.testing.expectEqual(@as(u4, 8), try parseWindowBits("8"));
+}
+
+test "duplicate subprotocols in one offer are rejected" {
+    var protocols: [max_subprotocols][]const u8 = undefined;
+    try std.testing.expectError(
+        error.HandshakeFailed,
+        parseProtocolList("chat, chat", &protocols),
+    );
 }

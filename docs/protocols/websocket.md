@@ -17,12 +17,14 @@ WebSocket Protocol) and [RFC 7692](https://www.rfc-editor.org/rfc/rfc7692)
   options, the server selects the first configured protocol that the client
   offered, and both expose the selection. A non-empty server list rejects a
   request with no match; the client rejects a protocol it did not offer.
-  Duplicate protocol headers and non-token values are rejected.
+  Duplicate protocol headers, duplicate tokens within one offer, and non-token
+  values are rejected.
 - `permessage-deflate` (RFC 7692) negotiation of
   `server_no_context_takeover`, `client_no_context_takeover`,
   `server_max_window_bits`, and `client_max_window_bits`. Unknown parameters,
-  duplicate parameters, values outside 8..15, and extensions the client did not
-  offer are rejected. The server declines offers it cannot accept and never
+  duplicate parameters, values outside 8..15, leading-zero values, malformed
+  extension headers (even for disabled extensions), and extensions the client
+  did not offer are rejected. The server declines offers it cannot accept and never
   echoes an unrequested extension.
 - RFC 6455 frames: FIN/opcode/mask, 7/16/64-bit lengths, client masking,
   binary/text, continuation, ping/pong, and close. Control frames must be
@@ -43,19 +45,22 @@ WebSocket Protocol) and [RFC 7692](https://www.rfc-editor.org/rfc/rfc7692)
   negotiated window bits (8..15) as a maximum match distance.
 - Text messages are validated incrementally across fragments, including a
   multi-byte sequence split between frames. Invalid UTF-8 closes with 1007.
-  Writes remain binary.
-- Close handling echoes valid close frames, answers invalid codes with 1002,
-  invalid UTF-8 with 1007, and oversized frames/messages with 1009. Invalid
+  Writes remain binary. Inflated messages that set BFINAL are rejected rather
+  than silently truncated.
+- Close handling echoes valid close frames (including 1001/1008/3000), answers
+  invalid codes with 1002, invalid UTF-8 with 1007, and oversized
+  frames/messages with 1009. Invalid
   compressed data is a protocol error (1002). `closeWithCode` sends
   application policy codes such as 1008.
 - A reader detecting a protocol error never blocks on the writer lock: it
   queues the close code and attempts a non-blocking send; a concurrent writer
-  flushes the close at its next frame boundary. Pongs are best-effort and
-  dropped under writer contention. No data or pong follows a close.
+  flushes the close at its next frame boundary. Pings are answered by a
+  bounded queue drained by the writer when the lock is busy. No data or pong
+  follows a close.
 - Message, fragment, per-read control, and per-read frame limits are bounded
   (1 MiB, 1024, 1024, and 4096); hits are treated as protocol violations.
   Each connection reserves a 1 MiB frame buffer and a 1.125 MiB compressed
-  message accumulator.
+  message accumulator. Non-minimal length encodings are rejected.
 
 ## Known gaps
 
@@ -74,9 +79,8 @@ WebSocket Protocol) and [RFC 7692](https://www.rfc-editor.org/rfc/rfc7692)
   the ADR-0015 reaper. Standalone embedders that need a self-contained deadline
   set `handshake_timeout_ns` on the root adapter (one sleeping task per
   handshake).
-- No external audit. The package has a deterministic hostile-input inflater
-  smoke test; a dedicated `ws_deflate`/extension-parser fuzz target is deferred
-  because the root harness is outside this change's scope.
+- No external audit. The package has deterministic hostile-input tests plus
+  `ws_deflate` and `ws_connection_deflate` fuzz targets.
 
 ## Interop evidence
 

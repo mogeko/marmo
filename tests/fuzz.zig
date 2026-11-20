@@ -217,6 +217,38 @@ fn fuzzWsFrame(_: Context, smith: *std.testing.Smith) anyerror!void {
     };
 }
 
+fn fuzzWsDeflate(_: Context, smith: *std.testing.Smith) anyerror!void {
+    var input: [64 * 1024 + 4]u8 = undefined;
+    const len = smith.slice(input[0 .. 64 * 1024]);
+    var output: [ws.max_message]u8 = undefined;
+    var inflater = ws.deflate.Inflater.init();
+    _ = inflater.decompress(&input, len, &output) catch |err| switch (err) {
+        error.InvalidData, error.MessageTooBig => return,
+    };
+}
+
+fn fuzzWsConnectionDeflate(ctx: Context, smith: *std.testing.Smith) anyerror!void {
+    var input_buffer: [64 * 1024]u8 = undefined;
+    const len = smith.slice(&input_buffer);
+    var input = std.Io.Reader.fixed(input_buffer[0..len]);
+    var output_buffer: [4096]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    var connection: ws.Connection = .{
+        .io = ctx.io,
+        .input = &input,
+        .output = &output,
+        .role = .server,
+        .deflate = .{ .enabled = true },
+    };
+    var buffer: [1024]u8 = undefined;
+    var buffers = [_][]u8{&buffer};
+    var iterations: usize = 0;
+    while (iterations < 256) : (iterations += 1) {
+        const read_len = connection.read(&buffers) catch return;
+        if (read_len == 0) return;
+    }
+}
+
 fn fuzzWsHandshake(_: Context, smith: *std.testing.Smith) anyerror!void {
     var input: [ws.max_handshake]u8 = undefined;
     const len = smith.slice(&input);
@@ -988,6 +1020,8 @@ pub const targets = [_]Target{
     .{ .name = "ws_frame", .max_input = ws.max_frame_payload, .run = fuzzWsFrame },
     .{ .name = "ws_handshake", .max_input = ws.max_handshake, .run = fuzzWsHandshake },
     .{ .name = "ws_connection", .max_input = 64 * 1024, .run = fuzzWsConnection },
+    .{ .name = "ws_connection_deflate", .max_input = 64 * 1024, .run = fuzzWsConnectionDeflate },
+    .{ .name = "ws_deflate", .max_input = 64 * 1024, .run = fuzzWsDeflate },
     .{ .name = "ws_handshake_validate", .max_input = ws.max_handshake, .run = fuzzWsHandshakeValidate },
     .{ .name = "http2_frame", .max_input = http2.max_frame_size + http2.frame.header_len, .run = fuzzHttp2Frame },
     .{ .name = "http2_hpack", .max_input = http2.max_header_block, .run = fuzzHttp2Hpack },
@@ -1146,6 +1180,12 @@ test "fuzz corpus: WebSocket and HTTP/2 parsers" {
     });
     try std.testing.fuzz(testContext(), fuzzWsHandshakeValidate, .{
         .corpus = &.{"GET / HTTP/1.1\r\nHost: x\r\n\r\n"},
+    });
+    try std.testing.fuzz(testContext(), fuzzWsDeflate, .{
+        .corpus = &.{ "", "\x03\x00", "\x00" },
+    });
+    try std.testing.fuzz(testContext(), fuzzWsConnectionDeflate, .{
+        .corpus = &.{ "", "\xc2\x05hello" },
     });
     try std.testing.fuzz(testContext(), fuzzHttp2Frame, .{
         .corpus = &.{ "\x00\x00\x03\x00\x01\x00\x00\x00\x01abc", "" },

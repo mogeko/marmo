@@ -7,6 +7,7 @@ const std = @import("std");
 
 pub const handshake = @import("handshake.zig");
 pub const frame = @import("frame.zig");
+pub const deflate = @import("deflate.zig");
 const connection = @import("connection.zig");
 pub const Connection = connection.Connection;
 pub const clientHandshake = @import("connection.zig").clientHandshake;

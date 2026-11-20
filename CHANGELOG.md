@@ -79,6 +79,10 @@ and behavior may change between minor releases.
 - Per-connection peer failures are logged at debug level instead of warn, so
   normal protocol violations, resets, and truncation cannot flood embedder
   logs. `accept failed` and `spawn failed` remain warn-level.
+- WebSocket audit follow-ups: pings queue instead of dropping when a data
+  writer holds the lock, valid close codes are echoed, non-minimal frame
+  lengths/BFINAL/malformed extensions/duplicate subprotocols are rejected, and
+  `ws_deflate` plus compressed-connection fuzz targets were added.
 - WebSocket reads accept standard-client single frames up to 1 MiB; writes
   still fragment at 64 KiB.
 
@@ -106,8 +110,8 @@ and behavior may change between minor releases.
 
 ### Tests
 
-- 251 tests: 61 root unit, 4 public API, 29 integration, 47 tls13, 36 http2,
-  60 ws, and 14 fuzz corpus tests, passing in Debug and ReleaseSafe.
+- 257 tests: 61 root unit, 4 public API, 29 integration, 47 tls13, 36 http2,
+  66 ws, and 14 fuzz corpus tests, passing in Debug and ReleaseSafe.
 - Local interoperability checks pass for Shadowsocks 2022 (AES-128/256,
   TCP/UDP), VLESS (TCP, simple UoT, XUDP, TCP+UDP) and Trojan (TCP/UDP), in
   both directions against shadowsocks-rust 1.25.0 and Xray-core 26.11.9.

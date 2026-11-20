@@ -302,9 +302,12 @@ pub const Inflater = struct {
         const result = self.inner.reader.streamRemaining(&writer);
         const written = writer.buffered().len;
         if (result) |_| {
-            // A final block ends the peer's deflate stream; a later message
-            // cannot reuse its history.
-            self.ready = false;
+            // RFC 7692 messages must not terminate the DEFLATE stream with
+            // BFINAL; doing so would make the remaining blocks disappear.
+            if (std.meta.activeTag(self.inner.state) == .end) {
+                self.ready = false;
+                return error.InvalidData;
+            }
             return written;
         } else |err| switch (err) {
             error.WriteFailed => {
@@ -583,4 +586,14 @@ test "context takeover reuses the previous message" {
     encoder.resetContext();
     try encoder.encode(&sink, message);
     try std.testing.expectEqual(first_len, sink.len);
+}
+
+test "a final DEFLATE block is rejected for a message" {
+    var input = [_]u8{ 0x03, 0x00, 0, 0, 0, 0 };
+    var output: [16]u8 = undefined;
+    var inflater = Inflater.init();
+    try std.testing.expectError(
+        error.InvalidData,
+        inflater.decompress(&input, 2, &output),
+    );
 }

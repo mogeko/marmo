@@ -95,11 +95,13 @@ pub fn readFrame(
         var extended: [2]u8 = undefined;
         try readExact(input, &extended, false);
         payload_len = std.mem.readInt(u16, &extended, .big);
+        if (payload_len < 126) return error.ProtocolViolation;
     } else if (payload_len == 127) {
         var extended: [8]u8 = undefined;
         try readExact(input, &extended, false);
         payload_len = std.mem.readInt(u64, &extended, .big);
         if (payload_len >> 63 != 0) return error.ProtocolViolation;
+        if (payload_len < 65536) return error.ProtocolViolation;
     }
     if (payload_len > max_read_payload) return error.MessageTooBig;
     if (opcode >= opcode_close) {
@@ -397,5 +399,26 @@ test "writer sets RSV1 only on allowed data frames" {
             &.{},
             .{ .rsv1 = true },
         ),
+    );
+}
+
+test "non-minimal length encodings are rejected" {
+    var short = [_]u8{
+        0x82, 0xFE, 0x00, 0x05, 0, 0, 0, 0, 'h', 'e', 'l', 'l', 'o',
+    };
+    var short_reader = std.Io.Reader.fixed(&short);
+    var payload: [16]u8 = undefined;
+    try std.testing.expectError(
+        error.ProtocolViolation,
+        read(&short_reader, .server, &payload),
+    );
+
+    var long = [_]u8{
+        0x82, 0xFF, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0, 0, 0, 0,
+    };
+    var long_reader = std.Io.Reader.fixed(&long);
+    try std.testing.expectError(
+        error.ProtocolViolation,
+        read(&long_reader, .server, &payload),
     );
 }

@@ -28,12 +28,17 @@
 - Close handling validates codes and UTF-8 reasons (1002/1007), rejects
   1-byte close payloads, and preserves frames coalesced with the handshake.
 - The opening handshake rejects obs-fold, whitespace before the colon,
-  duplicate required headers, body-bearing upgrades, duplicate/unknown
-  extension parameters, and unrequested subprotocols/extensions.
+  duplicate required headers, body-bearing upgrades, malformed extension
+  headers (even when that extension is disabled), duplicate/unknown extension
+  parameters, leading-zero window bits, duplicate subprotocols within one
+  offer, and unrequested subprotocols/extensions.
 - Empty/zero-length frame floods are bounded per read (4096 frames), and
   control/fragment counts are bounded.
 - Protocol failures queue their Close code and send it with a non-blocking
   lock attempt, so a reader cannot deadlock behind a blocked data writer.
+- Pings are answered even while a data writer holds the lock: the reader queues
+  a bounded pong and the writer drains it at the next frame boundary. Pongs are
+  no longer silently dropped during long writes.
 - Handshake-failure buffers are zeroized, and close state is checked under the
   write lock so no data or pong is sent after a close.
 
@@ -44,8 +49,12 @@
   buffer.
 - Control frames per read allow 1024 (up from 32), and a 1 MiB message may use
   up to 1024 fragments.
-- Pongs are dropped when a data writer holds the lock instead of blocking the
-  reader.
+- Non-minimal frame-length encodings (126 with a value below 126, 127 with a
+  value below 65536) are rejected per RFC 6455 section 5.2.
+- The inflater rejects a message whose DEFLATE stream sets BFINAL, because
+  trailing blocks would otherwise be silently ignored.
+- Valid received close codes are echoed instead of always answered with 1000.
+- Tests: 66 package tests.
 
 ### Known limitations
 
@@ -60,7 +69,8 @@
   budget or lazy allocation (recorded later optimization).
 - The inflater accepts any conforming raw-DEFLATE stream; a peer using extreme
   dynamic-Huffman expansion can be rejected at the compressed-input bound.
-- Tests: 60 package tests.
+- Tests: 66 package tests; the `ws_deflate` and compressed-connection fuzz
+  targets cover the decoder and negotiation path.
 
 ## 0.0.1 - 2026-11-19
 

@@ -89,9 +89,16 @@ pub const Connection = struct {
     utf8_pending_len: usize = 0,
     /// Written by the reader and read by the writer without the write lock.
     eof: std.atomic.Value(bool) = .init(false),
-    close_sent: bool = false,
+    close_sent: std.atomic.Value(bool) = .init(false),
     /// A close frame waiting for the write lock; a reader never blocks here.
     close_pending: std.atomic.Value(u16) = .init(0),
+    /// Pongs queued when a data writer holds the lock. The writer drains this
+    /// bounded ring at frame boundaries; readers never block on the write lock.
+    pong_lock: std.Io.Mutex = .init,
+    pong_queue: [8][frame.max_control_payload]u8 = undefined,
+    pong_lens: [8]u8 = @splat(0),
+    pong_head: usize = 0,
+    pong_count: usize = 0,
 
     pub fn read(self: *Connection, buffers: [][]u8) Error!usize {
         if (totalCapacity(buffers) == 0) return error.Unexpected;
@@ -145,8 +152,9 @@ pub const Connection = struct {
     pub fn write(self: *Connection, buffers: []const []const u8) Error!usize {
         self.write_lock.lock(self.io) catch return error.Canceled;
         defer self.write_lock.unlock(self.io);
-        if (self.close_sent) return error.Closed;
+        if (self.close_sent.load(.acquire)) return error.Closed;
         try self.checkPendingCloseLocked();
+        try self.drainPendingPongsLocked();
         if (self.eof.load(.acquire)) return error.Closed;
 
         var total: usize = 0;
@@ -163,7 +171,7 @@ pub const Connection = struct {
     pub fn end(self: *Connection) Error!void {
         self.write_lock.lock(self.io) catch return error.Canceled;
         defer self.write_lock.unlock(self.io);
-        if (self.close_sent) return;
+        if (self.close_sent.load(.acquire)) return;
         const pending = self.close_pending.swap(0, .acq_rel);
         try self.sendCloseLocked(if (pending != 0) pending else 1000);
     }
@@ -174,7 +182,7 @@ pub const Connection = struct {
         if (!validCloseCode(code)) return error.ProtocolViolation;
         self.write_lock.lock(self.io) catch return error.Canceled;
         defer self.write_lock.unlock(self.io);
-        if (self.close_sent) return;
+        if (self.close_sent.load(.acquire)) return;
         try self.sendCloseLocked(code);
     }
 
@@ -195,7 +203,10 @@ pub const Connection = struct {
         std.crypto.secureZero(u8, &self.write_scratch);
         std.crypto.secureZero(u8, &self.mask_buffer);
         std.crypto.secureZero(u8, &self.deflate_encoder.history);
+        std.crypto.secureZero(u32, &self.deflate_encoder.head);
         std.crypto.secureZero(u8, &self.inflater.window);
+        std.crypto.secureZero(u8, &self.utf8_pending);
+        std.crypto.secureZero(u8, std.mem.asBytes(&self.pong_queue));
     }
 
     fn copyPending(self: *Connection, buffers: [][]u8) usize {
@@ -386,6 +397,7 @@ pub const Connection = struct {
         var offset: usize = 0;
         while (offset < bytes.len) {
             try self.checkPendingCloseLocked();
+            try self.drainPendingPongsLocked();
             const chunk_len = @min(bytes.len - offset, frame.max_payload);
             const chunk = bytes[offset..][0..chunk_len];
             const fin = offset + chunk_len == bytes.len;
@@ -398,20 +410,58 @@ pub const Connection = struct {
         }
     }
 
-    /// Pongs are best-effort: dropping one under writer contention is allowed
-    /// and keeps a reader from blocking behind a long data write. A write error
-    /// is left for the next caller to observe; the pong is not retried.
+    /// Answers a ping immediately when the write lock is free; otherwise
+    /// queues the payload for the writer to drain at its next frame boundary.
+    /// The queue is bounded, so a ping flood can still evict older pongs, but
+    /// a normal long data write does not drop keepalives.
     fn sendPong(self: *Connection, payload: []const u8) void {
-        if (!self.write_lock.tryLock()) return;
-        defer self.write_lock.unlock(self.io);
-        if (self.close_sent or self.eof.load(.acquire)) return;
-        self.writeFrameLocked(
-            frame.opcode_pong,
-            true,
-            payload,
-            .{},
-        ) catch return;
-        self.output.flush() catch return;
+        if (payload.len > frame.max_control_payload) return;
+        if (self.write_lock.tryLock()) {
+            defer self.write_lock.unlock(self.io);
+            if (self.close_sent.load(.acquire) or self.eof.load(.acquire)) return;
+            self.writeFrameLocked(
+                frame.opcode_pong,
+                true,
+                payload,
+                .{},
+            ) catch return;
+            self.output.flush() catch return;
+            return;
+        }
+        self.pong_lock.lock(self.io) catch return;
+        defer self.pong_lock.unlock(self.io);
+        if (self.eof.load(.acquire) or self.close_sent.load(.acquire)) return;
+        if (self.pong_count == self.pong_queue.len) {
+            self.pong_head = (self.pong_head + 1) % self.pong_queue.len;
+            self.pong_count -= 1;
+        }
+        const index = (self.pong_head + self.pong_count) % self.pong_queue.len;
+        @memcpy(self.pong_queue[index][0..payload.len], payload);
+        self.pong_lens[index] = @intCast(payload.len);
+        self.pong_count += 1;
+    }
+
+    fn drainPendingPongsLocked(self: *Connection) Error!void {
+        if (self.eof.load(.acquire) or self.close_sent.load(.acquire)) return;
+        while (true) {
+            var payload: [frame.max_control_payload]u8 = undefined;
+            var len: usize = 0;
+            self.pong_lock.lock(self.io) catch return error.Canceled;
+            {
+                defer self.pong_lock.unlock(self.io);
+                if (self.pong_count == 0) return;
+                len = self.pong_lens[self.pong_head];
+                @memcpy(payload[0..len], self.pong_queue[self.pong_head][0..len]);
+                self.pong_head = (self.pong_head + 1) % self.pong_queue.len;
+                self.pong_count -= 1;
+            }
+            try self.writeFrameLocked(
+                frame.opcode_pong,
+                true,
+                payload[0..len],
+                .{},
+            );
+        }
     }
 
     fn writeFrameLocked(
@@ -439,7 +489,7 @@ pub const Connection = struct {
     }
 
     fn sendCloseLocked(self: *Connection, code: u16) Error!void {
-        if (self.close_sent) return;
+        if (self.close_sent.load(.acquire)) return;
         var payload = [_]u8{
             @intCast(code >> 8),
             @intCast(code & 0xff),
@@ -450,7 +500,7 @@ pub const Connection = struct {
             &payload,
             .{},
         );
-        self.close_sent = true;
+        self.close_sent.store(true, .release);
         self.eof.store(true, .release);
         self.output.flush() catch return error.Unexpected;
     }
@@ -475,7 +525,7 @@ pub const Connection = struct {
             }
             defer self.write_lock.unlock(self.io);
             const code = self.close_pending.swap(0, .acq_rel);
-            if (code == 0 or self.close_sent) return;
+            if (code == 0 or self.close_sent.load(.acquire)) return;
             // A failed best-effort close means the transport is already gone.
             self.sendCloseLocked(code) catch return;
             return;
@@ -506,25 +556,32 @@ pub const Connection = struct {
         std.debug.assert(payload.len <= frame.max_control_payload);
         if (payload.len == 1) return self.failWith(1002);
         var status: u16 = 1000;
+        var protocol_error = false;
         if (payload.len >= 2) {
             const code = std.mem.readInt(u16, payload[0..2], .big);
-            if (!validCloseCode(code)) status = 1002;
+            if (validCloseCode(code)) {
+                status = code;
+            } else {
+                status = 1002;
+                protocol_error = true;
+            }
         }
         if (payload.len > 2 and
             !std.unicode.utf8ValidateSlice(payload[2..]))
         {
             status = 1007;
+            protocol_error = true;
         }
 
         self.eof.store(true, .release);
         self.in_message = false;
-        if (self.close_sent) {
-            if (status != 1000) return error.ProtocolViolation;
+        if (self.close_sent.load(.acquire)) {
+            if (protocol_error) return error.ProtocolViolation;
             return;
         }
         self.close_pending.store(status, .release);
         self.trySendPendingClose();
-        if (status != 1000) return error.ProtocolViolation;
+        if (protocol_error) return error.ProtocolViolation;
     }
 };
 
@@ -543,6 +600,12 @@ const CompressedSink = struct {
 
     fn emit(self: *CompressedSink, fin: bool) deflate.Error!void {
         self.connection.checkPendingCloseLocked() catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            error.Closed => return error.Closed,
+            error.ProtocolViolation => return error.ProtocolViolation,
+            else => return error.Unexpected,
+        };
+        self.connection.drainPendingPongsLocked() catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             error.Closed => return error.Closed,
             error.ProtocolViolation => return error.ProtocolViolation,
@@ -841,13 +904,14 @@ fn acceptDeflateOffer(
     head: []const u8,
     options: DeflateOptions,
 ) Error!?ServerDeflate {
-    if (!options.enabled) return null;
     var values: [handshake.max_extension_values][]const u8 = undefined;
-    const count = handshake.collectExtensions(head, &values) catch return null;
+    // RFC 6455 section 9.1: a malformed extension header fails the opening
+    // handshake even when the server does not enable that extension.
+    const count = try handshake.collectExtensions(head, &values);
     for (values[0..count]) |value| {
         var extension: handshake.Extension = undefined;
-        // Malformed or unsupported offers are declined, not fatal.
-        handshake.parseExtension(value, &extension) catch continue;
+        try handshake.parseExtension(value, &extension);
+        if (!options.enabled) continue;
         if (!std.mem.eql(
             u8,
             extension.name,
@@ -1483,7 +1547,7 @@ test "a fragmented message over 1 MiB sends close 1009" {
             break;
         };
     }
-    try std.testing.expect(connection.close_sent);
+    try std.testing.expect(connection.close_sent.load(.acquire));
     const written = output.written();
     try std.testing.expect(written.len >= 4);
     try std.testing.expectEqualSlices(
@@ -1756,7 +1820,7 @@ test "compressed expansion over the message limit sends close 1009" {
         error.ProtocolViolation,
         connection.read(&buffers),
     );
-    try std.testing.expect(connection.close_sent);
+    try std.testing.expect(connection.close_sent.load(.acquire));
     try expectLastClose(output.written(), 1009);
 }
 
@@ -2365,7 +2429,7 @@ test "server honors a client no-context-takeover offer" {
     ) != null);
 }
 
-test "server declines a malformed deflate offer without failing" {
+test "server rejects a malformed deflate offer" {
     const request =
         "GET /ws HTTP/1.1\r\n" ++
         "Host: example.com\r\n" ++
@@ -2379,17 +2443,53 @@ test "server declines a malformed deflate offer without failing" {
     var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
     var connection: Connection = undefined;
-    try serverHandshake(
-        std.testing.io,
-        &input,
-        &output.writer,
-        &connection,
-        .{ .path = "/ws", .deflate = .{ .enabled = true } },
+    try std.testing.expectError(
+        error.HandshakeFailed,
+        serverHandshake(
+            std.testing.io,
+            &input,
+            &output.writer,
+            &connection,
+            .{ .path = "/ws", .deflate = .{ .enabled = true } },
+        ),
     );
-    try std.testing.expect(!connection.compressionEnabled());
-    try std.testing.expect(std.mem.indexOf(
+}
+
+test "a valid close code is echoed" {
+    const allocator = std.testing.allocator;
+    var storage: std.Io.Writer.Allocating = .init(allocator);
+    defer storage.deinit();
+    var input = std.Io.Reader.fixed(&.{});
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &storage.writer,
+        .role = .server,
+    };
+    const payload = [_]u8{ 0x03, 0xe9 }; // 1001
+    try connection.receiveClose(&payload);
+    try expectLastClose(storage.written(), 1001);
+}
+
+test "a pong is queued while a data writer holds the lock" {
+    const allocator = std.testing.allocator;
+    var storage: std.Io.Writer.Allocating = .init(allocator);
+    defer storage.deinit();
+    var input = std.Io.Reader.fixed(&.{});
+    var connection: Connection = .{
+        .io = std.testing.io,
+        .input = &input,
+        .output = &storage.writer,
+        .role = .server,
+    };
+    try connection.write_lock.lock(std.testing.io);
+    connection.sendPong("p");
+    connection.write_lock.unlock(std.testing.io);
+    try std.testing.expectEqual(@as(usize, 1), connection.pong_count);
+    _ = try connection.write(&.{"a"});
+    try std.testing.expectEqualSlices(
         u8,
-        output.written(),
-        "Sec-WebSocket-Extensions",
-    ) == null);
+        &.{ 0x8a, 0x01, 'p', 0x82, 0x01, 'a' },
+        storage.written(),
+    );
 }
