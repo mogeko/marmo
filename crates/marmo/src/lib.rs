@@ -6,6 +6,7 @@
 //! `docs/architecture.md` §14.
 #![forbid(unsafe_code)]
 
+mod config;
 mod direct;
 mod limits;
 mod supervisor;
@@ -13,4 +14,5 @@ mod supervisor;
 #[allow(dead_code)]
 mod tcp_forward;
 
+pub use config::{Config, ConfigError};
 pub use limits::Limits;
