@@ -244,6 +244,124 @@ pub fn encode_reply(
     }
 }
 
+/// A parsed SOCKS5 UDP request datagram.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UdpRequest<'a> {
+    /// Destination address and port.
+    pub destination: Endpoint,
+    /// Payload after the SOCKS5 UDP header.
+    pub payload: &'a [u8],
+}
+
+/// Parses a SOCKS5 UDP datagram (`RSV`, `FRAG`, address, port, payload).
+pub fn parse_udp(input: &[u8]) -> Result<UdpRequest<'_>, Socks5Error> {
+    if input.len() < 4 {
+        return Err(Socks5Error::Truncated);
+    }
+    if input[0] != 0 || input[1] != 0 {
+        return Err(Socks5Error::InvalidReserved);
+    }
+    if input[2] != 0 {
+        return Err(Socks5Error::Fragmented);
+    }
+
+    match input[3] {
+        ATYP_IPV4 => {
+            if input.len() < 10 {
+                return Err(Socks5Error::Truncated);
+            }
+            let address = Ipv4Addr::from([input[4], input[5], input[6], input[7]]);
+            let port = u16::from_be_bytes([input[8], input[9]]);
+            Ok(UdpRequest {
+                destination: Endpoint::from_ip(IpAddr::V4(address), port),
+                payload: &input[10..],
+            })
+        }
+        ATYP_IPV6 => {
+            if input.len() < 22 {
+                return Err(Socks5Error::Truncated);
+            }
+            let mut octets = [0_u8; 16];
+            octets.copy_from_slice(&input[4..20]);
+            let port = u16::from_be_bytes([input[20], input[21]]);
+            Ok(UdpRequest {
+                destination: Endpoint::from_ip(IpAddr::V6(Ipv6Addr::from(octets)), port),
+                payload: &input[22..],
+            })
+        }
+        ATYP_DOMAIN => {
+            if input.len() < 5 {
+                return Err(Socks5Error::Truncated);
+            }
+            let length = usize::from(input[4]);
+            if length == 0 {
+                return Err(Socks5Error::InvalidDomain);
+            }
+            let header = 7 + length;
+            if input.len() < header {
+                return Err(Socks5Error::Truncated);
+            }
+            let name =
+                str::from_utf8(&input[5..5 + length]).map_err(|_| Socks5Error::InvalidDomain)?;
+            let port = u16::from_be_bytes([input[5 + length], input[6 + length]]);
+            let destination =
+                Endpoint::from_domain(name, port).map_err(|_| Socks5Error::InvalidDomain)?;
+            Ok(UdpRequest {
+                destination,
+                payload: &input[header..],
+            })
+        }
+        other => Err(Socks5Error::UnsupportedAddressType(other)),
+    }
+}
+
+/// Encodes a SOCKS5 UDP datagram into `out`.
+pub fn encode_udp(
+    destination: &Endpoint,
+    payload: &[u8],
+    out: &mut [u8],
+) -> Result<usize, Socks5Error> {
+    let header = match destination.ip() {
+        Some(IpAddr::V4(_)) => 10,
+        Some(IpAddr::V6(_)) => 22,
+        None => {
+            let domain = destination.domain().ok_or(Socks5Error::InvalidDomain)?;
+            7 + domain.len()
+        }
+    };
+    let total = header + payload.len();
+    if out.len() < total {
+        return Err(Socks5Error::OutputTooSmall);
+    }
+
+    out[0] = 0;
+    out[1] = 0;
+    out[2] = 0;
+    match destination.ip() {
+        Some(IpAddr::V4(address)) => {
+            out[3] = ATYP_IPV4;
+            out[4..8].copy_from_slice(&address.octets());
+            out[8..10].copy_from_slice(&destination.port().to_be_bytes());
+        }
+        Some(IpAddr::V6(address)) => {
+            out[3] = ATYP_IPV6;
+            out[4..20].copy_from_slice(&address.octets());
+            out[20..22].copy_from_slice(&destination.port().to_be_bytes());
+        }
+        None => {
+            let domain = destination.domain().ok_or(Socks5Error::InvalidDomain)?;
+            let length = u8::try_from(domain.len()).map_err(|_| Socks5Error::InvalidDomain)?;
+            out[3] = ATYP_DOMAIN;
+            out[4] = length;
+            out[5..5 + domain.len()].copy_from_slice(domain.as_bytes());
+            out[5 + domain.len()..7 + domain.len()]
+                .copy_from_slice(&destination.port().to_be_bytes());
+        }
+    }
+    out[header..total].copy_from_slice(payload);
+    Ok(total)
+}
+
 /// Why a SOCKS5 message was rejected.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 #[non_exhaustive]
@@ -275,6 +393,9 @@ pub enum Socks5Error {
     /// The output buffer was too small.
     #[error("output buffer is too small")]
     OutputTooSmall,
+    /// SOCKS5 UDP fragmentation is not supported.
+    #[error("fragmented UDP datagram")]
+    Fragmented,
 }
 
 #[cfg(test)]
@@ -452,5 +573,84 @@ mod tests {
         assert_eq!(ReplyStatus::TtlExpired.code(), 0x06);
         assert_eq!(ReplyStatus::CommandNotSupported.code(), 0x07);
         assert_eq!(ReplyStatus::AddressNotSupported.code(), 0x08);
+    }
+    #[test]
+    fn parses_udp_ipv4() {
+        let mut packet = vec![0, 0, 0, ATYP_IPV4, 127, 0, 0, 1, 0, 53];
+        packet.extend_from_slice(b"dns");
+        let request = parse_udp(&packet).expect("udp");
+        assert_eq!(
+            request.destination.ip(),
+            Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)))
+        );
+        assert_eq!(request.destination.port(), 53);
+        assert_eq!(request.payload, b"dns");
+    }
+
+    #[test]
+    fn parses_udp_domain_and_ipv6() {
+        let mut packet = vec![0, 0, 0, ATYP_DOMAIN, 11];
+        packet.extend_from_slice(b"example.com");
+        packet.extend_from_slice(&443_u16.to_be_bytes());
+        packet.extend_from_slice(b"payload");
+        let request = parse_udp(&packet).expect("domain udp");
+        assert_eq!(request.destination.domain(), Some("example.com"));
+        assert_eq!(request.payload, b"payload");
+
+        let mut packet = vec![0, 0, 0, ATYP_IPV6];
+        packet.extend_from_slice(&Ipv6Addr::LOCALHOST.octets());
+        packet.extend_from_slice(&5353_u16.to_be_bytes());
+        let request = parse_udp(&packet).expect("ipv6 udp");
+        assert_eq!(
+            request.destination.ip(),
+            Some(IpAddr::V6(Ipv6Addr::LOCALHOST))
+        );
+        assert!(request.payload.is_empty());
+    }
+
+    #[test]
+    fn rejects_malformed_udp() {
+        assert_eq!(parse_udp(&[]), Err(Socks5Error::Truncated));
+        assert_eq!(
+            parse_udp(&[1, 0, 0, ATYP_IPV4, 0, 0, 0, 0, 0, 0]),
+            Err(Socks5Error::InvalidReserved)
+        );
+        assert_eq!(
+            parse_udp(&[0, 0, 1, ATYP_IPV4, 0, 0, 0, 0, 0, 0]),
+            Err(Socks5Error::Fragmented)
+        );
+        assert_eq!(
+            parse_udp(&[0, 0, 0, ATYP_IPV4, 0, 0, 0]),
+            Err(Socks5Error::Truncated)
+        );
+        assert_eq!(
+            parse_udp(&[0, 0, 0, 0x02, 0]),
+            Err(Socks5Error::UnsupportedAddressType(0x02))
+        );
+        assert_eq!(
+            parse_udp(&[0, 0, 0, ATYP_DOMAIN, 0, 0, 80]),
+            Err(Socks5Error::InvalidDomain)
+        );
+    }
+
+    #[test]
+    fn encodes_udp_round_trip() {
+        let endpoint = Endpoint::from_ip(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 53);
+        let mut out = [0_u8; 64];
+        let length = encode_udp(&endpoint, b"data", &mut out).expect("encode");
+        let parsed = parse_udp(&out[..length]).expect("parse");
+        assert_eq!(parsed.destination, endpoint);
+        assert_eq!(parsed.payload, b"data");
+
+        let endpoint = Endpoint::from_domain("example.com", 443).expect("domain");
+        let length = encode_udp(&endpoint, b"x", &mut out).expect("encode domain");
+        let parsed = parse_udp(&out[..length]).expect("parse domain");
+        assert_eq!(parsed.destination, endpoint);
+        assert_eq!(parsed.payload, b"x");
+
+        assert_eq!(
+            encode_udp(&endpoint, b"x", &mut [0_u8; 4]),
+            Err(Socks5Error::OutputTooSmall)
+        );
     }
 }

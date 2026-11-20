@@ -1,65 +1,80 @@
-//! SOCKS5 CONNECT inbound: greeting, request, route, connect, relay.
+//! SOCKS5 inbound: CONNECT tunnels and UDP ASSOCIATE relays.
 
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use marmo_net::Network;
+use marmo_net::{Endpoint, Network};
 use marmo_proto::socks5::{
-    Greeting, METHOD_NO_ACCEPTABLE, METHOD_NO_AUTH, ReplyStatus, Request, VERSION,
-    encode_method_selection, encode_reply,
+    Command, Greeting, METHOD_NO_ACCEPTABLE, METHOD_NO_AUTH, ReplyStatus, Request, VERSION,
+    encode_method_selection, encode_reply, encode_udp, parse_udp,
 };
 use marmo_transport::{BoxStream, RelayOptions, relay};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 
+use crate::direct;
 use crate::instance::Context;
 use crate::routing::Metadata;
 
 const ATYP_IPV4: u8 = 0x01;
 const ATYP_DOMAIN: u8 = 0x03;
 const ATYP_IPV6: u8 = 0x04;
+const UDP_BUFFER: usize = 65_535;
+const UDP_REPLY_BUFFER: usize = 65_535 + 262;
 
 /// Handles one accepted SOCKS5 connection.
 pub(crate) async fn handle(mut client: TcpStream, context: Arc<Context>, inbound: Arc<str>) {
     let token = context.supervisor.token();
     let handshake = tokio::select! {
         _ = token.cancelled() => return,
-        result = timeout(
-            context.limits.handshake_timeout,
-            negotiate(&mut client, &context, &inbound),
-        ) => result,
+        result = timeout(context.limits.handshake_timeout, handshake(&mut client)) => result,
     };
-    let Ok(Ok(Some(remote))) = handshake else {
+    let Ok(Ok(Some(request))) = handshake else {
         return;
     };
 
-    let options = RelayOptions {
-        idle_timeout: context.limits.idle_timeout,
-        uplink_grace: context.limits.uplink_grace,
-        downlink_grace: context.limits.downlink_grace,
-    };
-    tokio::select! {
-        _ = token.cancelled() => {}
-        _ = relay(
-            Box::new(client) as BoxStream,
-            Box::new(remote) as BoxStream,
-            options,
-        ) => {}
+    match request.command {
+        Command::Connect => {
+            let connect = tokio::select! {
+                _ = token.cancelled() => return,
+                result = timeout(
+                    context.limits.handshake_timeout,
+                    connect_target(&mut client, &context, &inbound, request.destination),
+                ) => result,
+            };
+            let Ok(Ok(Some(remote))) = connect else {
+                return;
+            };
+            let options = RelayOptions {
+                idle_timeout: context.limits.idle_timeout,
+                uplink_grace: context.limits.uplink_grace,
+                downlink_grace: context.limits.downlink_grace,
+            };
+            tokio::select! {
+                _ = token.cancelled() => {}
+                _ = relay(
+                    Box::new(client) as BoxStream,
+                    Box::new(remote) as BoxStream,
+                    options,
+                ) => {}
+            }
+        }
+        Command::UdpAssociate => {
+            udp_associate(client, context, inbound, token).await;
+        }
+        Command::Bind => {}
     }
 }
 
-async fn negotiate(
+async fn connect_target(
     client: &mut TcpStream,
     context: &Context,
     inbound: &str,
+    destination: Endpoint,
 ) -> io::Result<Option<TcpStream>> {
-    let Some(request) = handshake(client).await? else {
-        return Ok(None);
-    };
-
-    let destination = request.destination;
     let domain = destination.domain().map(str::to_owned);
     let source = client.peer_addr()?.into();
     let metadata = Metadata {
@@ -103,7 +118,7 @@ async fn handshake(client: &mut TcpStream) -> io::Result<Option<Request>> {
         let _ = send_reply(client, ReplyStatus::GeneralFailure, None).await;
         return Ok(None);
     }
-    if header[1] != 0x01 {
+    if header[1] != 0x01 && header[1] != 0x03 {
         let _ = send_reply(client, ReplyStatus::CommandNotSupported, None).await;
         return Ok(None);
     }
@@ -199,4 +214,166 @@ fn reply_status(error: &io::Error) -> ReplyStatus {
 
 fn codec_error(error: marmo_proto::socks5::Socks5Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
+}
+
+enum UdpEvent {
+    Cancel,
+    Control(io::Result<usize>),
+    Client(io::Result<(usize, SocketAddr)>),
+    Upstream(io::Result<(usize, SocketAddr)>),
+}
+
+async fn udp_event(
+    token: &CancellationToken,
+    client: &mut TcpStream,
+    client_socket: &UdpSocket,
+    upstream: &UdpSocket,
+    client_buffer: &mut [u8],
+    upstream_buffer: &mut [u8],
+    control_buffer: &mut [u8],
+) -> UdpEvent {
+    tokio::select! {
+        _ = token.cancelled() => UdpEvent::Cancel,
+        result = client.read(control_buffer) => UdpEvent::Control(result),
+        result = client_socket.recv_from(client_buffer) => UdpEvent::Client(result),
+        result = upstream.recv_from(upstream_buffer) => UdpEvent::Upstream(result),
+    }
+}
+
+async fn udp_associate(
+    mut client: TcpStream,
+    context: Arc<Context>,
+    inbound: Arc<str>,
+    token: CancellationToken,
+) {
+    let Ok(tcp_local) = client.local_addr() else {
+        return;
+    };
+    let ipv4 = tcp_local.is_ipv4();
+    let bind = if ipv4 {
+        SocketAddr::from(([0, 0, 0, 0], 0))
+    } else {
+        SocketAddr::from(([0_u16; 8], 0))
+    };
+    let Ok(client_socket) = UdpSocket::bind(bind).await else {
+        let _ = send_reply(&mut client, ReplyStatus::GeneralFailure, None).await;
+        return;
+    };
+    let Ok(upstream) = UdpSocket::bind(bind).await else {
+        let _ = send_reply(&mut client, ReplyStatus::GeneralFailure, None).await;
+        return;
+    };
+    let Ok(local) = client_socket.local_addr() else {
+        let _ = send_reply(&mut client, ReplyStatus::GeneralFailure, None).await;
+        return;
+    };
+    let relay_address = SocketAddr::new(tcp_local.ip(), local.port());
+    if send_reply(&mut client, ReplyStatus::Succeeded, Some(relay_address))
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    let tcp_peer_ip = client.peer_addr().ok().map(|address| address.ip());
+    let mut client_address = None;
+    let mut client_buffer = vec![0_u8; UDP_BUFFER];
+    let mut upstream_buffer = vec![0_u8; UDP_BUFFER];
+    let mut reply_buffer = vec![0_u8; UDP_REPLY_BUFFER];
+    let mut control_buffer = [0_u8; 64];
+
+    loop {
+        let event = if let Some(idle) = context.limits.idle_timeout {
+            match timeout(
+                idle,
+                udp_event(
+                    &token,
+                    &mut client,
+                    &client_socket,
+                    &upstream,
+                    &mut client_buffer,
+                    &mut upstream_buffer,
+                    &mut control_buffer,
+                ),
+            )
+            .await
+            {
+                Ok(event) => event,
+                Err(_) => break,
+            }
+        } else {
+            udp_event(
+                &token,
+                &mut client,
+                &client_socket,
+                &upstream,
+                &mut client_buffer,
+                &mut upstream_buffer,
+                &mut control_buffer,
+            )
+            .await
+        };
+
+        match event {
+            UdpEvent::Cancel => break,
+            UdpEvent::Control(result) => match result {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            },
+            UdpEvent::Client(result) => {
+                let Ok((length, source)) = result else {
+                    continue;
+                };
+                match client_address {
+                    None => {
+                        if let Some(expected) = tcp_peer_ip {
+                            if source.ip() != expected {
+                                continue;
+                            }
+                        }
+                        client_address = Some(source);
+                    }
+                    Some(known) if known != source => continue,
+                    Some(_) => {}
+                }
+
+                let Ok(request) = parse_udp(&client_buffer[..length]) else {
+                    continue;
+                };
+                let destination = request.destination;
+                let metadata = Metadata {
+                    network: Network::Udp,
+                    source: Endpoint::from(source),
+                    destination: destination.clone(),
+                    domain: destination.domain(),
+                    inbound: Some(&inbound),
+                };
+                let action = context.router.route(&metadata);
+                if !context.udp_direct(action) {
+                    continue;
+                }
+                let Ok(target) = direct::resolve_udp(&destination, ipv4).await else {
+                    continue;
+                };
+                let _ = upstream.send_to(request.payload, target).await;
+            }
+            UdpEvent::Upstream(result) => {
+                let Ok((length, source)) = result else {
+                    continue;
+                };
+                let Some(client_address) = client_address else {
+                    continue;
+                };
+                let source = Endpoint::from(source);
+                let Ok(encoded) =
+                    encode_udp(&source, &upstream_buffer[..length], &mut reply_buffer)
+                else {
+                    continue;
+                };
+                let _ = client_socket
+                    .send_to(&reply_buffer[..encoded], client_address)
+                    .await;
+            }
+        }
+    }
 }
