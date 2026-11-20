@@ -594,6 +594,388 @@ impl Window {
     }
 }
 
+/// A decoded TCP client request header.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ClientRequest<'a> {
+    /// Request salt (zero-padded).
+    pub salt: [u8; 32],
+    /// Salt length.
+    pub salt_len: u8,
+    /// Subkey for the request body.
+    pub recv_key: [u8; 32],
+    /// Requested target.
+    pub target: Endpoint,
+    /// Initial payload carried in the variable header.
+    pub initial_payload: &'a [u8],
+    /// Bytes consumed from the request buffer.
+    pub consumed: usize,
+}
+
+/// Encodes a TCP client request (salt, fixed header, variable header).
+#[allow(clippy::too_many_arguments)]
+pub fn encode_client_request(
+    method: Method,
+    psk: &[u8],
+    salt: &[u8],
+    target: &Endpoint,
+    timestamp: u64,
+    padding: &[u8],
+    initial_payload: &[u8],
+    out: &mut [u8],
+) -> Result<usize, SsError> {
+    if salt.len() != method.salt_len() || psk.len() < method.key_len() {
+        return Err(SsError::InvalidKey);
+    }
+
+    let mut variable = [0_u8; MAX_PAYLOAD];
+    let mut offset = 0;
+    offset += encode_address(target, &mut variable[offset..])?;
+    let padding_len = u16::try_from(padding.len()).map_err(|_| SsError::NoSpace)?;
+    if variable.len() < offset + 2 + padding.len() + initial_payload.len() {
+        return Err(SsError::NoSpace);
+    }
+    variable[offset..offset + 2].copy_from_slice(&padding_len.to_be_bytes());
+    offset += 2;
+    variable[offset..offset + padding.len()].copy_from_slice(padding);
+    offset += padding.len();
+    variable[offset..offset + initial_payload.len()].copy_from_slice(initial_payload);
+    offset += initial_payload.len();
+    let variable_len = u16::try_from(offset).map_err(|_| SsError::NoSpace)?;
+
+    let total = salt.len() + 11 + TAG_LENGTH + offset + TAG_LENGTH;
+    if out.len() < total {
+        return Err(SsError::NoSpace);
+    }
+    out[..salt.len()].copy_from_slice(salt);
+
+    let mut fixed = [0_u8; 11];
+    fixed[0] = 0;
+    fixed[1..9].copy_from_slice(&timestamp.to_be_bytes());
+    fixed[9..11].copy_from_slice(&variable_len.to_be_bytes());
+
+    let mut subkey = derive_subkey(method, psk, salt);
+    let mut position = salt.len();
+    position += seal(
+        method,
+        &subkey,
+        nonce_from_counter(0),
+        &fixed,
+        &mut out[position..],
+    )?;
+    position += seal(
+        method,
+        &subkey,
+        nonce_from_counter(1),
+        &variable[..offset],
+        &mut out[position..],
+    )?;
+    subkey.zeroize();
+    Ok(position)
+}
+
+/// Decodes and authenticates a TCP client request.
+pub fn decode_client_request<'a>(
+    method: Method,
+    psk: &[u8],
+    bytes: &[u8],
+    plaintext: &'a mut [u8],
+    now: u64,
+) -> Result<ClientRequest<'a>, SsError> {
+    let salt_len = method.salt_len();
+    if bytes.len() < salt_len + 11 + TAG_LENGTH || psk.len() < method.key_len() {
+        return Err(SsError::MalformedPacket);
+    }
+    let salt = &bytes[..salt_len];
+    let mut subkey = derive_subkey(method, psk, salt);
+
+    let mut fixed = [0_u8; 11];
+    let fixed_len = open(
+        method,
+        &subkey,
+        nonce_from_counter(0),
+        &bytes[salt_len..salt_len + 11 + TAG_LENGTH],
+        &mut fixed,
+    )?;
+    if fixed_len != 11 || fixed[0] != 0 {
+        return Err(SsError::ProtocolViolation);
+    }
+    let timestamp = u64::from_be_bytes(
+        fixed[1..9]
+            .try_into()
+            .map_err(|_| SsError::MalformedPacket)?,
+    );
+    if !validate_timestamp(timestamp, now) {
+        return Err(SsError::ProtocolViolation);
+    }
+    let variable_len = usize::from(u16::from_be_bytes([fixed[9], fixed[10]]));
+    if variable_len == 0 {
+        return Err(SsError::ProtocolViolation);
+    }
+
+    let variable_start = salt_len + 11 + TAG_LENGTH;
+    let total = variable_start + variable_len + TAG_LENGTH;
+    if bytes.len() < total || plaintext.len() < variable_len {
+        return Err(SsError::MalformedPacket);
+    }
+    let plain_len = open(
+        method,
+        &subkey,
+        nonce_from_counter(1),
+        &bytes[variable_start..total],
+        &mut plaintext[..variable_len],
+    )?;
+    if plain_len != variable_len {
+        return Err(SsError::ProtocolViolation);
+    }
+
+    let (target, mut offset) = decode_address(&plaintext[..variable_len], 0)?;
+    if offset + 2 > variable_len {
+        return Err(SsError::ProtocolViolation);
+    }
+    let padding_len = usize::from(read_u16(&plaintext[offset..offset + 2]));
+    offset += 2;
+    if padding_len > MAX_PADDING || offset + padding_len > variable_len {
+        return Err(SsError::ProtocolViolation);
+    }
+    offset += padding_len;
+    let initial_payload = &plaintext[offset..variable_len];
+    if initial_payload.is_empty() && padding_len == 0 {
+        return Err(SsError::ProtocolViolation);
+    }
+
+    let mut salt_copy = [0_u8; 32];
+    salt_copy[..salt_len].copy_from_slice(salt);
+    let mut recv_key = [0_u8; 32];
+    recv_key[..method.key_len()].copy_from_slice(&subkey[..method.key_len()]);
+    subkey.zeroize();
+
+    Ok(ClientRequest {
+        salt: salt_copy,
+        salt_len: salt_len as u8,
+        recv_key,
+        target,
+        initial_payload,
+        consumed: total,
+    })
+}
+
+/// A decoded TCP server response header.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ServerResponse<'a> {
+    /// Response salt (zero-padded).
+    pub salt: [u8; 32],
+    /// Salt length.
+    pub salt_len: u8,
+    /// Subkey for the response body.
+    pub send_key: [u8; 32],
+    /// First payload chunk.
+    pub first_payload: &'a [u8],
+    /// Bytes consumed from the response buffer.
+    pub consumed: usize,
+}
+
+/// Encodes a TCP server response (salt, fixed header, first payload).
+pub fn encode_server_response(
+    method: Method,
+    psk: &[u8],
+    request_salt: &[u8],
+    salt: &[u8],
+    timestamp: u64,
+    first_payload: &[u8],
+    out: &mut [u8],
+) -> Result<usize, SsError> {
+    if salt.len() != method.salt_len()
+        || request_salt.len() != method.salt_len()
+        || psk.len() < method.key_len()
+        || first_payload.is_empty()
+    {
+        return Err(SsError::InvalidKey);
+    }
+    let fixed_len = 11 + request_salt.len();
+    let total = salt.len() + fixed_len + TAG_LENGTH + first_payload.len() + TAG_LENGTH;
+    if out.len() < total {
+        return Err(SsError::NoSpace);
+    }
+    let first_len = u16::try_from(first_payload.len()).map_err(|_| SsError::NoSpace)?;
+    let mut fixed = [0_u8; 43];
+    fixed[0] = 1;
+    fixed[1..9].copy_from_slice(&timestamp.to_be_bytes());
+    fixed[9..9 + request_salt.len()].copy_from_slice(request_salt);
+    fixed[9 + request_salt.len()..fixed_len].copy_from_slice(&first_len.to_be_bytes());
+
+    out[..salt.len()].copy_from_slice(salt);
+    let mut subkey = derive_subkey(method, psk, salt);
+    let mut position = salt.len();
+    position += seal(
+        method,
+        &subkey,
+        nonce_from_counter(0),
+        &fixed[..fixed_len],
+        &mut out[position..],
+    )?;
+    position += seal(
+        method,
+        &subkey,
+        nonce_from_counter(1),
+        first_payload,
+        &mut out[position..],
+    )?;
+    subkey.zeroize();
+    Ok(position)
+}
+
+/// Decodes and authenticates a TCP server response.
+pub fn decode_server_response<'a>(
+    method: Method,
+    psk: &[u8],
+    request_salt: &[u8],
+    bytes: &[u8],
+    plaintext: &'a mut [u8],
+    now: u64,
+) -> Result<ServerResponse<'a>, SsError> {
+    let salt_len = method.salt_len();
+    if request_salt.len() != salt_len || bytes.len() < salt_len + 11 + salt_len + TAG_LENGTH {
+        return Err(SsError::MalformedPacket);
+    }
+    let salt = &bytes[..salt_len];
+    let mut subkey = derive_subkey(method, psk, salt);
+    let fixed_len = 11 + salt_len;
+    let mut fixed = [0_u8; 43];
+    let opened = open(
+        method,
+        &subkey,
+        nonce_from_counter(0),
+        &bytes[salt_len..salt_len + fixed_len + TAG_LENGTH],
+        &mut fixed[..fixed_len],
+    )?;
+    if opened != fixed_len || fixed[0] != 1 {
+        return Err(SsError::ProtocolViolation);
+    }
+    let timestamp = u64::from_be_bytes(
+        fixed[1..9]
+            .try_into()
+            .map_err(|_| SsError::MalformedPacket)?,
+    );
+    if !validate_timestamp(timestamp, now) {
+        return Err(SsError::ProtocolViolation);
+    }
+    if &fixed[9..9 + salt_len] != request_salt {
+        return Err(SsError::ProtocolViolation);
+    }
+    let first_len = usize::from(u16::from_be_bytes([
+        fixed[9 + salt_len],
+        fixed[10 + salt_len],
+    ]));
+    if first_len == 0 || plaintext.len() < first_len {
+        return Err(SsError::ProtocolViolation);
+    }
+    let payload_start = salt_len + fixed_len + TAG_LENGTH;
+    let total = payload_start + first_len + TAG_LENGTH;
+    if bytes.len() < total {
+        return Err(SsError::MalformedPacket);
+    }
+    let opened = open(
+        method,
+        &subkey,
+        nonce_from_counter(1),
+        &bytes[payload_start..total],
+        &mut plaintext[..first_len],
+    )?;
+    if opened != first_len {
+        return Err(SsError::ProtocolViolation);
+    }
+
+    let mut salt_copy = [0_u8; 32];
+    salt_copy[..salt_len].copy_from_slice(salt);
+    let mut send_key = [0_u8; 32];
+    send_key[..method.key_len()].copy_from_slice(&subkey[..method.key_len()]);
+    subkey.zeroize();
+    Ok(ServerResponse {
+        salt: salt_copy,
+        salt_len: salt_len as u8,
+        send_key,
+        first_payload: &plaintext[..first_len],
+        consumed: total,
+    })
+}
+
+/// Encodes one TCP length/payload chunk.
+pub fn seal_chunk(
+    method: Method,
+    key: &[u8],
+    counter: &mut u64,
+    payload: &[u8],
+    out: &mut [u8],
+) -> Result<usize, SsError> {
+    let length = u16::try_from(payload.len()).map_err(|_| SsError::NoSpace)?;
+    if length == 0 {
+        return Err(SsError::ProtocolViolation);
+    }
+    let total = 2 + TAG_LENGTH + payload.len() + TAG_LENGTH;
+    if out.len() < total {
+        return Err(SsError::NoSpace);
+    }
+    let length_plain = length.to_be_bytes();
+    let mut position = seal(
+        method,
+        key,
+        nonce_from_counter(next_counter(counter)?),
+        &length_plain,
+        &mut out[..2 + TAG_LENGTH],
+    )?;
+    position += seal(
+        method,
+        key,
+        nonce_from_counter(next_counter(counter)?),
+        payload,
+        &mut out[position..],
+    )?;
+    Ok(position)
+}
+
+/// Decodes one TCP length/payload chunk into `plaintext`.
+pub fn open_chunk(
+    method: Method,
+    key: &[u8],
+    counter: &mut u64,
+    bytes: &[u8],
+    plaintext: &mut [u8],
+) -> Result<(usize, usize), SsError> {
+    if bytes.len() < 2 + TAG_LENGTH {
+        return Err(SsError::MalformedPacket);
+    }
+    let mut length_plain = [0_u8; 2];
+    let opened = open(
+        method,
+        key,
+        nonce_from_counter(next_counter(counter)?),
+        &bytes[..2 + TAG_LENGTH],
+        &mut length_plain,
+    )?;
+    if opened != 2 {
+        return Err(SsError::ProtocolViolation);
+    }
+    let length = usize::from(u16::from_be_bytes(length_plain));
+    if length == 0 {
+        return Err(SsError::ProtocolViolation);
+    }
+    let total = 2 + TAG_LENGTH + length + TAG_LENGTH;
+    if bytes.len() < total || plaintext.len() < length {
+        return Err(SsError::MalformedPacket);
+    }
+    let opened = open(
+        method,
+        key,
+        nonce_from_counter(next_counter(counter)?),
+        &bytes[2 + TAG_LENGTH..total],
+        &mut plaintext[..length],
+    )?;
+    if opened != length {
+        return Err(SsError::ProtocolViolation);
+    }
+    Ok((length, total))
+}
+
 /// Why a Shadowsocks 2022 operation failed.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 #[non_exhaustive]
@@ -809,5 +1191,144 @@ mod tests {
         assert!(!window.accept(9));
         assert!(window.accept(100));
         assert!(!window.accept(20));
+    }
+    #[test]
+    fn tcp_requests_round_trip() {
+        for method in [Method::Aes128Gcm, Method::Aes256Gcm] {
+            let psk = key(method);
+            let salt = vec![9_u8; method.salt_len()];
+            let target = Endpoint::from_domain("example.com", 443).expect("domain");
+            let mut encoded = [0_u8; 1024];
+            let length = encode_client_request(
+                method,
+                &psk,
+                &salt,
+                &target,
+                1_000,
+                b"pad",
+                b"hello",
+                &mut encoded,
+            )
+            .expect("encode");
+            let mut plaintext = [0_u8; 1024];
+            let request =
+                decode_client_request(method, &psk, &encoded[..length], &mut plaintext, 1_000)
+                    .expect("decode");
+            assert_eq!(request.target, target);
+            assert_eq!(request.initial_payload, b"hello");
+            assert_eq!(request.consumed, length);
+            assert_eq!(&request.salt[..method.salt_len()], &salt[..]);
+
+            encoded[length - 1] ^= 1;
+            assert_eq!(
+                decode_client_request(method, &psk, &encoded[..length], &mut plaintext, 1_000,),
+                Err(SsError::AuthenticationFailed)
+            );
+        }
+    }
+
+    #[test]
+    fn tcp_requests_reject_stale_timestamps() {
+        let method = Method::Aes128Gcm;
+        let psk = key(method);
+        let salt = [8_u8; 16];
+        let target = Endpoint::from_ip(IpAddr::V4(Ipv4Addr::LOCALHOST), 80);
+        let mut encoded = [0_u8; 512];
+        let length =
+            encode_client_request(method, &psk, &salt, &target, 1_000, b"x", b"", &mut encoded)
+                .expect("encode");
+        let mut plaintext = [0_u8; 512];
+        assert_eq!(
+            decode_client_request(method, &psk, &encoded[..length], &mut plaintext, 1_031,),
+            Err(SsError::ProtocolViolation)
+        );
+    }
+
+    #[test]
+    fn tcp_responses_round_trip() {
+        let method = Method::Aes128Gcm;
+        let psk = key(method);
+        let request_salt = [1_u8; 16];
+        let salt = [2_u8; 16];
+        let mut encoded = [0_u8; 512];
+        let length = encode_server_response(
+            method,
+            &psk,
+            &request_salt,
+            &salt,
+            1_000,
+            b"first",
+            &mut encoded,
+        )
+        .expect("encode");
+        let mut plaintext = [0_u8; 512];
+        let response = decode_server_response(
+            method,
+            &psk,
+            &request_salt,
+            &encoded[..length],
+            &mut plaintext,
+            1_000,
+        )
+        .expect("decode");
+        assert_eq!(response.first_payload, b"first");
+        assert_eq!(response.consumed, length);
+
+        assert_eq!(
+            decode_server_response(
+                method,
+                &psk,
+                &[3_u8; 16],
+                &encoded[..length],
+                &mut plaintext,
+                1_000,
+            ),
+            Err(SsError::ProtocolViolation)
+        );
+    }
+
+    #[test]
+    fn tcp_chunks_round_trip() {
+        let method = Method::Aes128Gcm;
+        let psk = key(method);
+        let mut send_counter = 2;
+        let mut sealed = [0_u8; 256];
+        let length =
+            seal_chunk(method, &psk, &mut send_counter, b"data", &mut sealed).expect("seal");
+        assert_eq!(send_counter, 4);
+
+        let mut recv_counter = 2;
+        let mut plaintext = [0_u8; 64];
+        let (length_plain, consumed) = open_chunk(
+            method,
+            &psk,
+            &mut recv_counter,
+            &sealed[..length],
+            &mut plaintext,
+        )
+        .expect("open");
+        assert_eq!(length_plain, 4);
+        assert_eq!(consumed, length);
+        assert_eq!(&plaintext[..length_plain], b"data");
+        assert_eq!(recv_counter, 4);
+
+        sealed[length - 1] ^= 1;
+        let mut recv_counter = 2;
+        assert_eq!(
+            open_chunk(
+                method,
+                &psk,
+                &mut recv_counter,
+                &sealed[..length],
+                &mut plaintext,
+            ),
+            Err(SsError::AuthenticationFailed)
+        );
+
+        let mut counter = 0;
+        assert_eq!(
+            seal_chunk(method, &psk, &mut counter, b"", &mut sealed),
+            Err(SsError::ProtocolViolation)
+        );
     }
 }
