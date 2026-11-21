@@ -21,6 +21,10 @@ R4 reference interop found that this is not what deployed implementations do:
 - Xray 1.8.24 keeps the same HTTP transport family and can be used as an older
   reference if needed.
 
+The reference clients do not send `content-type` at all. A V2Ray 5.53 and an
+Xray 1.8.24 client against a logging HTTP/2 server both sent `PUT` with only
+`accept-encoding: identity` and `user-agent: Go-http-client/2.0`.
+
 The references also do not validate the media type. Probes with `curl --http2`
 against V2Ray 5.53 and Xray 1.8.24 HTTP/2 inbounds returned `200` for both
 `PUT` and `POST` and for every tested `content-type`: absent,
@@ -52,8 +56,10 @@ the parity matrix still claims HTTP/2 interop.
 Change the VLESS HTTP/2 transport to the reference-compatible method while
 keeping every other ADR-0016 rule.
 
-- **Client**: send `PUT` instead of `POST`. Keep the current
-  `content-type: application/octet-stream` header; reference servers accept it.
+- **Client**: send `PUT` instead of `POST`. Reference clients omit
+  `content-type`; our client keeps `application/octet-stream` because both
+  reference servers accept it and the header documents the tunnel type. It may
+  be dropped later without a wire-compatibility risk.
 - **Server**: accept both `PUT` and `POST`. Do not validate `content-type`:
   accept an absent header or any value, matching the references. The request
   path is still required to match, and anything else returns `400`.
