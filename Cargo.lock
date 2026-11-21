@@ -648,7 +648,6 @@ dependencies = [
  "bytes",
  "h2",
  "http",
- "marmo-testkit",
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",
