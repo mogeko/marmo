@@ -1,6 +1,6 @@
 # ADR-0021: WebSocket backend with permessage-deflate
 
-- Status: Proposed
+- Status: Accepted (2026-11-21)
 - Date: 2026-11-21
 - Deciders: @mogeko
 - Related: ADR-0014, ADR-0016, ADR-0018, ADR-0020
@@ -14,8 +14,8 @@ ADR-0018 selects `tokio-tungstenite` for WebSocket and states that it provides
 the Zig-era package make `transport.compression` a real config option, so R3f
 cannot claim parity while silently ignoring it.
 
-R3f (PR #27) implements the WebSocket transport with `tokio-tungstenite` and
-rejects `compression: true` at build time. Everything else — path, Host,
+The initial R3f implementation used `tokio-tungstenite` and rejected
+`compression: true` at build time. Everything else — path, Host,
 subprotocols, ALPN defaults, TCP/UoT/XUDP over WS — is complete and tested.
 
 The alternatives were checked before this ADR:
@@ -155,13 +155,13 @@ Testing and observation:
 - Keep `cargo +1.87.0 test --workspace`, `cargo audit`, and the copyleft gate
   green; record the new dependency tree in the adopting PR.
 
-Rollback: revert to the `tokio-tungstenite` adapter from PR #27; compression
-returns to a build error. No on-disk or public API change makes rollback
+Rollback: revert to the `tokio-tungstenite` adapter from the initial R3f
+implementation; compression returns to a build error. No on-disk or public API change makes rollback
 expensive.
 
 ## Approval
 
-- [ ] Accept the recommendation (`ws-net` 0.10 + tokio pump; compression
+- [x] Accept the recommendation (`ws-net` 0.10 + tokio pump; compression
       enabled).
 - [ ] Choose an alternative: keep `tokio-tungstenite` with `compression`
       rejected, or another backend.

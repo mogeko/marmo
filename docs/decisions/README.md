@@ -38,10 +38,10 @@ Statuses: `Proposed` → `Accepted` | `Rejected` | `Superseded by ADR-NNNN`.
 | [0015](0015-connection-limits-and-timeouts.md) | Connection limits and idle timeouts | Accepted | global limits 1024/10/300/1/1; per-Instance reaper; UDP excluded |
 | [0016](0016-protocol-transport-wiring.md) | Protocol transport composition wiring | Accepted | VLESS `transport` tcp/ws/h2; TLS ALPN defaults; WS compression/subprotocols; H2 one stream per Instance connection |
 | [0017](0017-language-and-runtime.md) | Language, runtime, and interface model | Accepted (2026-11-21) | Rust + tokio |
-| [0018](0018-dependencies-and-crypto.md) | Dependencies and crypto backend | Accepted (2026-11-21; amended) | in-tree transports deleted; `rustls` + `aws-lc-rs`; `cargo tree` copyleft check |
+| [0018](0018-dependencies-and-crypto.md) | Dependencies and crypto backend | Accepted (2026-11-21; amended) | in-tree transports deleted; `rustls` + `aws-lc-rs`; WebSocket crate superseded by ADR-0021; `cargo tree` copyleft check |
 | [0019](0019-workspace-and-packaging.md) | Workspace layout and packaging | Accepted (2026-11-21) | five crates |
 | [0020](0020-license.md) | License change | Accepted (2026-11-21; amended) | MIT OR Apache-2.0; `cargo tree` license review |
-| [0021](0021-websocket-backend.md) | WebSocket backend and permessage-deflate | Proposed | `ws-net` + tokio pump; compression enabled |
+| [0021](0021-websocket-backend.md) | WebSocket backend and permessage-deflate | Accepted (2026-11-21) | `ws-net` + tokio pump; compression enabled |
 
 ## Eras
 
@@ -90,11 +90,14 @@ ADR-0017–0020 were accepted on 2026-11-21:
 - **ADR-0017**: Rust, edition 2024, with tokio as the only supported runtime;
   traits and futures replace the vtable/`close` interface model.
 - **ADR-0018**: the in-tree TLS, HTTP/2, and WebSocket implementations are
-  deleted in favour of `rustls`, `h2`, and `tokio-tungstenite`; the crypto
-  provider is `aws-lc-rs`, and a C toolchain is an accepted build prerequisite.
+  deleted in favour of `rustls`, `h2`, and (originally) `tokio-tungstenite`;
+  the crypto provider is `aws-lc-rs`, and a C toolchain is an accepted build
+  prerequisite. The WebSocket crate was superseded by ADR-0021.
 - **ADR-0019**: a five-crate workspace (`marmo`, `marmo-proto`, `marmo-net`,
   `marmo-transport`, `marmo-testkit`).
 - **ADR-0020**: relicensed to MIT OR Apache-2.0.
+- **ADR-0021**: WebSocket runs on `ws-net` with a tokio pump, enabling RFC 7692
+  permessage-deflate; it supersedes ADR-0018's WebSocket crate choice.
 
 ADR-0001, 0003, 0007, 0010, 0013, and 0014 are superseded. ADR-0009 is
 superseded only in its license half; its clean-room protocol rule remains in

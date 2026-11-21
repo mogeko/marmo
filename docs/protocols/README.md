@@ -36,7 +36,7 @@ or Rust implementation. The implementation status lives in
 ## Archived transport notes
 
 The in-tree TLS, HTTP/2, and WebSocket implementations are deleted under
-ADR-0018 and replaced by `rustls`, `h2`, and `tokio-tungstenite`. Their
+ADR-0018 and replaced by `rustls`, `h2`, and `ws-net`. Their
 implementation notes are archived:
 
 - [tls.md](../archive/protocols/tls.md)
