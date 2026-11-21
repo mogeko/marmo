@@ -55,3 +55,38 @@ pub(crate) async fn resolve_udp(endpoint: &Endpoint, ipv4: bool) -> io::Result<S
         "no UDP address of the requested family",
     ))
 }
+
+/// The built-in direct dialer.
+pub(crate) struct DirectOutbound;
+
+impl crate::outbound::Outbound for DirectOutbound {
+    fn connect<'a>(
+        &'a self,
+        endpoint: &'a Endpoint,
+    ) -> marmo_transport::BoxFuture<'a, std::io::Result<crate::outbound::Connected>> {
+        Box::pin(async move {
+            let stream = connect(endpoint).await?;
+            let bound = stream.local_addr().ok();
+            Ok(crate::outbound::Connected::with_bound(
+                Box::new(stream) as marmo_transport::BoxStream,
+                bound,
+            ))
+        })
+    }
+
+    fn connect_datagram<'a>(
+        &'a self,
+        _target: &'a Endpoint,
+        ipv4: bool,
+    ) -> marmo_transport::BoxFuture<'a, std::io::Result<Option<crate::outbound::udp::UdpOutbound>>>
+    {
+        Box::pin(async move {
+            let socket = crate::outbound::udp::UdpOutbound::direct(ipv4).await?;
+            Ok(Some(socket))
+        })
+    }
+
+    fn is_direct(&self) -> bool {
+        true
+    }
+}

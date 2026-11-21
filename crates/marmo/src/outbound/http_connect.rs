@@ -1,7 +1,6 @@
 //! HTTP CONNECT outbound.
 
 use std::io;
-use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context as TaskContext, Poll, ready};
 
@@ -17,7 +16,7 @@ use tokio::net::TcpStream;
 pub(crate) async fn connect(
     server: &Endpoint,
     target: &Endpoint,
-) -> io::Result<(BoxStream, Option<SocketAddr>)> {
+) -> io::Result<(BoxStream, Option<std::net::SocketAddr>)> {
     let mut stream = crate::direct::connect(server).await?;
     let bound = stream.local_addr().ok();
     let request = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n");
@@ -29,6 +28,31 @@ pub(crate) async fn connect(
         inner: stream,
     });
     Ok((stream, bound))
+}
+
+/// An HTTP CONNECT outbound node.
+pub(crate) struct HttpOutbound {
+    pub(crate) server: Endpoint,
+}
+
+impl crate::outbound::Outbound for HttpOutbound {
+    fn connect<'a>(
+        &'a self,
+        target: &'a Endpoint,
+    ) -> marmo_transport::BoxFuture<'a, io::Result<crate::outbound::Connected>> {
+        Box::pin(async move {
+            let (stream, bound) = connect(&self.server, target).await?;
+            Ok(crate::outbound::Connected::with_bound(stream, bound))
+        })
+    }
+
+    fn connect_datagram<'a>(
+        &'a self,
+        _target: &'a Endpoint,
+        _ipv4: bool,
+    ) -> marmo_transport::BoxFuture<'a, io::Result<Option<crate::outbound::udp::UdpOutbound>>> {
+        Box::pin(async { Ok(None) })
+    }
 }
 
 async fn read_response(stream: &mut TcpStream) -> io::Result<Vec<u8>> {

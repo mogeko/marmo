@@ -15,12 +15,12 @@ use marmo_net::{Endpoint, Network};
 use marmo_proto::shadowsocks::{Key, Method};
 use marmo_proto::trojan::PasswordHash;
 use marmo_proto::vless::Uuid;
-use marmo_transport::BoxStream;
+use marmo_transport::Layer;
 use marmo_transport::h2::{H2Client, H2ClientOptions, H2Server, H2ServerOptions};
 use marmo_transport::tls::{TlsClient, TlsClientOptions, TlsServer, TlsServerOptions};
 use marmo_transport::ws::{WsClient, WsClientOptions, WsServer, WsServerOptions};
 use thiserror::Error;
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::net::{TcpListener, UdpSocket};
 use tokio::runtime::Handle;
 use tokio::task::JoinSet;
 use tokio::time::{interval, timeout};
@@ -28,12 +28,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::{Config, ConfigError, InboundProtocol, OutboundProtocol, StreamNetwork};
 use crate::deadline::Deadline;
-use crate::direct;
 use crate::inbound::{self, http, socks5};
 use crate::limits::Limits;
-use crate::outbound::{self, http_connect, udp::UdpOutbound};
+use crate::outbound::{self, Outbound, http_connect, udp::UdpOutbound};
 use crate::routing::{Action, Router, RoutingError};
-use crate::shadowsocks::{SsUdpClient, credentials};
+use crate::shadowsocks::credentials;
 use crate::supervisor::Supervisor;
 
 /// A built instance; no sockets are open yet.
@@ -486,7 +485,7 @@ pub struct BoundInstance {
     limits: Limits,
     supervisor: Arc<Supervisor>,
     router: Arc<Router>,
-    outbounds: Vec<OutboundKind>,
+    outbounds: Vec<Arc<dyn Outbound>>,
     inbounds: Vec<BoundInbound>,
 }
 
@@ -530,6 +529,7 @@ impl BoundInstance {
             runtime: runtime.clone(),
             supervisor: Arc::clone(&supervisor),
             router: self.router,
+            direct: Arc::new(crate::direct::DirectOutbound),
             outbounds: self.outbounds,
             limits,
         });
@@ -627,18 +627,19 @@ pub(crate) struct Context {
     pub(crate) runtime: Handle,
     pub(crate) supervisor: Arc<Supervisor>,
     pub(crate) router: Arc<Router>,
-    pub(crate) outbounds: Vec<OutboundKind>,
+    pub(crate) direct: Arc<dyn Outbound>,
+    pub(crate) outbounds: Vec<Arc<dyn Outbound>>,
     pub(crate) limits: Limits,
 }
 
 impl Context {
     pub(crate) fn udp_direct(&self, action: Action) -> bool {
         match action {
-            Action::Direct => true,
-            Action::Route(id) => matches!(
-                self.outbounds.get(id.index() as usize),
-                Some(OutboundKind::Direct)
-            ),
+            Action::Direct => self.direct.is_direct(),
+            Action::Route(id) => self
+                .outbounds
+                .get(id.index() as usize)
+                .is_some_and(|outbound| outbound.is_direct()),
             Action::Reject(_) => false,
         }
     }
@@ -647,50 +648,11 @@ impl Context {
         &self,
         action: Action,
         target: &Endpoint,
-    ) -> io::Result<(BoxStream, Option<SocketAddr>)> {
+    ) -> io::Result<outbound::Connected> {
         match action {
-            Action::Direct => direct::connect(target).await.map(boxed),
+            Action::Direct => self.direct.connect(target).await,
             Action::Route(id) => match self.outbounds.get(id.index() as usize) {
-                Some(OutboundKind::Direct) => direct::connect(target).await.map(boxed),
-                Some(OutboundKind::Http { server }) => http_connect::connect(server, target).await,
-                Some(OutboundKind::Trojan {
-                    server,
-                    password,
-                    tls,
-                }) => {
-                    let (stream, bound) =
-                        outbound::trojan::connect(server, tls, password, target).await?;
-                    Ok((stream, bound))
-                }
-                Some(OutboundKind::Vless {
-                    server,
-                    uuid,
-                    tls,
-                    ws,
-                    h2,
-                    ..
-                }) => {
-                    let (stream, bound) = outbound::vless::connect(
-                        server,
-                        tls.as_deref(),
-                        ws.as_deref(),
-                        h2.as_deref(),
-                        uuid,
-                        target,
-                    )
-                    .await?;
-                    Ok((stream, bound))
-                }
-                Some(OutboundKind::Shadowsocks {
-                    server,
-                    method,
-                    key,
-                }) => {
-                    let (stream, bound) =
-                        outbound::shadowsocks::connect(server, *method, Arc::clone(key), target)
-                            .await?;
-                    Ok((Box::new(stream), bound))
-                }
+                Some(outbound) => outbound.connect(target).await,
                 None => Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "outbound id is out of range",
@@ -714,58 +676,9 @@ impl Context {
         target: &Endpoint,
     ) -> io::Result<Option<UdpOutbound>> {
         match action {
-            Action::Direct => Ok(Some(UdpOutbound::direct(ipv4).await?)),
+            Action::Direct => self.direct.connect_datagram(target, ipv4).await,
             Action::Route(id) => match self.outbounds.get(id.index() as usize) {
-                Some(OutboundKind::Direct) => Ok(Some(UdpOutbound::direct(ipv4).await?)),
-                Some(OutboundKind::Shadowsocks {
-                    server,
-                    method,
-                    key,
-                }) => Ok(Some(UdpOutbound::Shadowsocks(
-                    SsUdpClient::connect(server, *method, Arc::clone(key)).await?,
-                ))),
-                Some(OutboundKind::Trojan {
-                    server,
-                    password,
-                    tls,
-                }) => Ok(Some(UdpOutbound::Trojan(
-                    outbound::trojan::connect_udp(server, tls, password, target).await?,
-                ))),
-                Some(OutboundKind::Vless {
-                    server,
-                    uuid,
-                    tls,
-                    xudp,
-                    ws,
-                    h2,
-                }) => {
-                    if *xudp {
-                        Ok(Some(UdpOutbound::VlessXudp(
-                            outbound::vless::connect_xudp(
-                                server,
-                                tls.as_deref(),
-                                ws.as_deref(),
-                                h2.as_deref(),
-                                uuid,
-                                target,
-                            )
-                            .await?,
-                        )))
-                    } else {
-                        Ok(Some(UdpOutbound::Vless(
-                            outbound::vless::connect_udp(
-                                server,
-                                tls.as_deref(),
-                                ws.as_deref(),
-                                h2.as_deref(),
-                                uuid,
-                                target,
-                            )
-                            .await?,
-                        )))
-                    }
-                }
-                Some(OutboundKind::Http { .. }) => Ok(None),
+                Some(outbound) => outbound.connect_datagram(target, ipv4).await,
                 None => Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "outbound id is out of range",
@@ -774,37 +687,6 @@ impl Context {
             Action::Reject(_) => Ok(None),
         }
     }
-}
-
-fn boxed(stream: TcpStream) -> (BoxStream, Option<SocketAddr>) {
-    let bound = stream.local_addr().ok();
-    (Box::new(stream), bound)
-}
-
-#[derive(Clone, Debug)]
-pub(crate) enum OutboundKind {
-    Direct,
-    Http {
-        server: Endpoint,
-    },
-    Shadowsocks {
-        server: Endpoint,
-        method: Method,
-        key: Arc<Key>,
-    },
-    Trojan {
-        server: Endpoint,
-        password: Arc<PasswordHash>,
-        tls: Arc<TlsClient>,
-    },
-    Vless {
-        server: Endpoint,
-        uuid: Arc<Uuid>,
-        tls: Option<Arc<TlsClient>>,
-        xudp: bool,
-        ws: Option<Arc<WsClient>>,
-        h2: Option<Arc<H2Client>>,
-    },
 }
 
 #[derive(Clone)]
@@ -822,9 +704,7 @@ enum InboundKind {
     },
     Vless {
         uuid: Arc<Uuid>,
-        tls: Arc<TlsServer>,
-        ws: Option<Arc<WsServer>>,
-        h2: Option<Arc<H2Server>>,
+        layers: Arc<[Arc<dyn Layer>]>,
     },
 }
 
@@ -891,12 +771,20 @@ impl InboundConfig {
                 tls: build_tls_server(&tls, tag)?,
                 fallback,
             },
-            Self::Vless { uuid, tls, ws, h2 } => InboundKind::Vless {
-                uuid,
-                tls: build_tls_server(&tls, tag)?,
-                ws: ws.map(|options| Arc::new(WsServer::new(options))),
-                h2: h2.map(|options| Arc::new(H2Server::new(options))),
-            },
+            Self::Vless { uuid, tls, ws, h2 } => {
+                let mut layers: Vec<Arc<dyn Layer>> = Vec::new();
+                layers.push(build_tls_server(&tls, tag)?);
+                if let Some(options) = ws {
+                    layers.push(Arc::new(WsServer::new(options)));
+                }
+                if let Some(options) = h2 {
+                    layers.push(Arc::new(H2Server::new(options)));
+                }
+                InboundKind::Vless {
+                    uuid,
+                    layers: Arc::from(layers),
+                }
+            }
         })
     }
 }
@@ -942,29 +830,29 @@ struct OutboundTlsConfig {
 }
 
 impl OutboundSpec {
-    fn build(self) -> Result<OutboundKind, BindError> {
+    fn build(self) -> Result<Arc<dyn Outbound>, BindError> {
         let Self { tag, config } = self;
         Ok(match config {
-            OutboundConfig::Direct => OutboundKind::Direct,
-            OutboundConfig::Http { server } => OutboundKind::Http { server },
+            OutboundConfig::Direct => Arc::new(crate::direct::DirectOutbound),
+            OutboundConfig::Http { server } => Arc::new(http_connect::HttpOutbound { server }),
             OutboundConfig::Shadowsocks {
                 server,
                 method,
                 key,
-            } => OutboundKind::Shadowsocks {
+            } => Arc::new(outbound::shadowsocks::ShadowsocksOutbound {
                 server,
                 method,
                 key,
-            },
+            }),
             OutboundConfig::Trojan {
                 server,
                 password,
                 tls,
-            } => OutboundKind::Trojan {
+            } => Arc::new(outbound::trojan::TrojanOutbound {
                 server,
                 password,
                 tls: build_tls_client(&tls, &tag)?,
-            },
+            }),
             OutboundConfig::Vless {
                 server,
                 uuid,
@@ -972,17 +860,24 @@ impl OutboundSpec {
                 xudp,
                 ws,
                 h2,
-            } => OutboundKind::Vless {
-                server,
-                uuid,
-                tls: tls
-                    .as_ref()
-                    .map(|tls| build_tls_client(tls, &tag))
-                    .transpose()?,
-                xudp,
-                ws: ws.map(|options| Arc::new(WsClient::new(options))),
-                h2: h2.map(|options| Arc::new(H2Client::new(options))),
-            },
+            } => {
+                let mut layers: Vec<Arc<dyn Layer>> = Vec::new();
+                if let Some(tls) = tls.as_ref() {
+                    layers.push(build_tls_client(tls, &tag)?);
+                }
+                if let Some(options) = ws {
+                    layers.push(Arc::new(WsClient::new(options)));
+                }
+                if let Some(options) = h2 {
+                    layers.push(Arc::new(H2Client::new(options)));
+                }
+                Arc::new(outbound::vless::VlessOutbound {
+                    server,
+                    uuid,
+                    xudp,
+                    layers,
+                })
+            }
         })
     }
 }
@@ -1187,20 +1082,13 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                             )
                             .await;
                         }
-                        InboundKind::Vless {
-                            uuid,
-                            tls,
-                            ws,
-                            h2,
-                        } => {
+                        InboundKind::Vless { uuid, layers } => {
                             inbound::vless::handle(
                                 stream,
                                 task_context,
                                 tag,
                                 uuid,
-                                tls,
-                                ws,
-                                h2,
+                                layers,
                                 deadline,
                             )
                             .await;

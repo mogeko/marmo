@@ -9,10 +9,7 @@ use marmo_proto::vless::{
     Uuid, is_mux_target, request_progress,
 };
 use marmo_proto::xudp::{STATUS_END, STATUS_KEEP, STATUS_KEEPALIVE, STATUS_NEW};
-use marmo_transport::h2::H2Server;
-use marmo_transport::tls::TlsServer;
-use marmo_transport::ws::WsServer;
-use marmo_transport::{BoxStream, RelayOptions, relay};
+use marmo_transport::{BoxStream, Layer, RelayOptions, relay};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::{Notify, mpsc};
@@ -20,7 +17,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::deadline::{Deadline, wait_for_activity};
 use crate::instance::Context;
-use crate::outbound::trojan::tls_error;
 use crate::outbound::udp::UdpOutbound;
 use crate::routing::{Action, Metadata};
 use crate::vless::{UotReader, write_udp_frame};
@@ -37,16 +33,14 @@ pub(crate) async fn handle(
     context: Arc<Context>,
     inbound: Arc<str>,
     uuid: Arc<Uuid>,
-    tls: Arc<TlsServer>,
-    ws: Option<Arc<WsServer>>,
-    h2: Option<Arc<H2Server>>,
+    layers: Arc<[Arc<dyn Layer>]>,
     deadline: Deadline,
 ) {
     let token = context.supervisor.token();
     let source = client.peer_addr().ok().map(Endpoint::from);
     let prepared = tokio::select! {
         _ = token.cancelled() => return,
-        result = deadline.run(prepare(client, &tls, ws.as_deref(), h2.as_deref(), &uuid)) => result,
+        result = deadline.run(prepare(client, &layers, &uuid)) => result,
     };
     let (
         Ok(Ok(Prepared::Request {
@@ -95,17 +89,12 @@ enum Prepared {
 
 async fn prepare(
     client: TcpStream,
-    tls: &TlsServer,
-    ws: Option<&WsServer>,
-    h2: Option<&H2Server>,
+    layers: &[Arc<dyn Layer>],
     uuid: &Uuid,
 ) -> io::Result<Prepared> {
-    let accepted = tls.accept(Box::new(client)).await.map_err(tls_error)?;
-    let mut stream = accepted.stream;
-    if let Some(ws) = ws {
-        stream = ws.accept(stream).await.map_err(io::Error::other)?.stream;
-    } else if let Some(h2) = h2 {
-        stream = h2.accept(stream).await.map_err(io::Error::other)?;
+    let mut stream: BoxStream = Box::new(client);
+    for layer in layers {
+        stream = layer.accept(stream).await.map_err(io::Error::other)?;
     }
     let mut buffer = [0_u8; REQUEST_HEADER_MAX];
     let mut filled = 0;
@@ -161,9 +150,10 @@ async fn connect_relay(
         _ = token.cancelled() => return,
         result = deadline.run(context.connect(action, &target)) => result,
     };
-    let Ok(Ok((mut remote, _bound))) = connected else {
+    let Ok(Ok(connected)) = connected else {
         return;
     };
+    let mut remote = connected.stream;
     if stream.write_all(&RESPONSE).await.is_err() {
         return;
     }

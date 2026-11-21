@@ -46,7 +46,7 @@ pub(crate) async fn handle(
         _ = token.cancelled() => return,
         result = deadline.run(context.connect(action, &target)) => result,
     };
-    let Ok(Ok((remote, _bound))) = connected else {
+    let Ok(Ok(connected)) = connected else {
         return;
     };
 
@@ -59,7 +59,7 @@ pub(crate) async fn handle(
         _ = token.cancelled() => {}
         _ = relay(
             Box::new(stream) as BoxStream,
-            remote,
+            connected.stream,
             options,
         ) => {}
     }

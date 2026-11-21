@@ -176,9 +176,10 @@ async fn connect_relay(
         _ = token.cancelled() => return,
         result = deadline.run(context.connect(action, &target)) => result,
     };
-    let Ok(Ok((mut remote, _bound))) = connected else {
+    let Ok(Ok(connected)) = connected else {
         return;
     };
+    let mut remote = connected.stream;
     if !leftover.is_empty() && remote.write_all(&leftover).await.is_err() {
         return;
     }
@@ -313,9 +314,10 @@ async fn fallback_relay(
         _ = token.cancelled() => return,
         result = deadline.run(context.connect(action, &target)) => result,
     };
-    let Ok(Ok((mut remote, _bound))) = connected else {
+    let Ok(Ok(connected)) = connected else {
         return;
     };
+    let mut remote = connected.stream;
     if remote.write_all(&prefix).await.is_err() {
         return;
     }

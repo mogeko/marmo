@@ -141,7 +141,7 @@ async fn connect_tunnel(
         return Ok(None);
     };
     let mut remote = match context.connect(action, &destination).await {
-        Ok((remote, _bound)) => remote,
+        Ok(connected) => connected.stream,
         Err(_) => {
             let _ = respond(client, "502 Bad Gateway").await;
             return Ok(None);
@@ -199,7 +199,7 @@ async fn forward(
         return Ok(None);
     };
     let mut remote = match context.connect(action, &target.endpoint).await {
-        Ok((remote, _bound)) => remote,
+        Ok(connected) => connected.stream,
         Err(_) => {
             let _ = respond(client, "502 Bad Gateway").await;
             return Ok(None);

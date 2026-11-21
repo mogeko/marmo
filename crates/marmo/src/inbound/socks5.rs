@@ -92,14 +92,14 @@ async fn connect_target(
     let action = context.router.route(&metadata);
 
     match context.connect(action, &destination).await {
-        Ok((remote, bound)) => {
-            if send_reply(client, ReplyStatus::Succeeded, bound)
+        Ok(connected) => {
+            if send_reply(client, ReplyStatus::Succeeded, connected.bound)
                 .await
                 .is_err()
             {
                 return Ok(None);
             }
-            Ok(Some(remote))
+            Ok(Some(connected.stream))
         }
         Err(error) => {
             let _ = send_reply(client, reply_status(&error), None).await;
