@@ -597,7 +597,6 @@ version = "0.0.2"
 dependencies = [
  "base64",
  "getrandom 0.4.3",
- "httparse",
  "marmo-net",
  "marmo-proto",
  "marmo-transport",
@@ -627,6 +626,7 @@ dependencies = [
  "aes-gcm",
  "base64",
  "blake3",
+ "httparse",
  "marmo-net",
  "sha2",
  "subtle",

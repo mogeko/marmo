@@ -13,6 +13,7 @@ aes.workspace = true
 aes-gcm.workspace = true
 base64.workspace = true
 blake3.workspace = true
+httparse.workspace = true
 marmo-net.workspace = true
 sha2.workspace = true
 subtle.workspace = true

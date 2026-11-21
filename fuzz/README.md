@@ -5,6 +5,7 @@ stays on stable.
 
 ```sh
 cargo +nightly fuzz run ss2022_tcp -- -runs=20000 -max_len=4096
+cargo +nightly fuzz run http -- -runs=20000 -max_len=8192
 cargo +nightly fuzz run ss2022_udp -- -runs=20000 -max_len=4096
 cargo +nightly fuzz run socks5 -- -runs=20000 -max_len=4096
 cargo +nightly fuzz run trojan -- -runs=20000 -max_len=4096
@@ -24,6 +25,7 @@ because a `schedule` would only run from the repository default branch.
 
 | Target | Decoders |
 | --- | --- |
+| `http` | request head, absolute-form target, CONNECT response head |
 | `ss2022_tcp` | client request (whole and fixed/variable), server response, length/payload chunks |
 | `ss2022_udp` | UDP packet in both directions, packet-id replay window |
 | `socks5` | greeting, request, UDP datagram |

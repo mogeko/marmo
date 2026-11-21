@@ -5,7 +5,7 @@ Five crates, one dependency direction, no optional transport backends.
 | Crate | Purpose | Published |
 | --- | --- | --- |
 | `marmo` | `Instance`, config, routing, inbounds, outbounds, metrics, public API | yes |
-| `marmo-proto` | SOCKS5, SS2022, Trojan, VLESS, XUDP codecs; no I/O, no tokio | yes |
+| `marmo-proto` | HTTP/1, SOCKS5, SS2022, Trojan, VLESS, XUDP codecs; no I/O, no tokio | yes |
 | `marmo-net` | `Endpoint`, CIDR, `Network`; no protocols | yes |
 | `marmo-transport` | stream traits, `Layer` adapters (TLS/WS/H2), relay | yes |
 | `marmo-testkit` | fake streams, fixture loaders, loopback helpers | no |
@@ -41,10 +41,9 @@ dependencies. `cargo-fuzz` runs on nightly only.
 - Errors are `thiserror` enums, `#[non_exhaustive]`; `anyhow` stays in examples
   and tests. Config is schema version 2; TLS credentials are inline PEM
   (ADR-0023).
-- Every `marmo-proto` decoder has a fuzz target and a synthetic fixture. The
-  minimal HTTP/1 inbound in `marmo` is still parsed in the facade and is not
-  yet fuzzed; moving it to `marmo-proto` is follow-up work. Every bug fix adds a
-  regression test.
+- Every `marmo-proto` decoder has a fuzz target and a synthetic fixture,
+  including the HTTP/1 request and CONNECT response parser. Every bug fix adds
+  a regression test.
 - Public items need documentation. `missing_docs` is denied by CI.
 - License is MIT OR Apache-2.0. Dependency changes record a
   `cargo tree --format '{l}'` review; CI rejects GPL/AGPL/MPL. Apache-2.0-only

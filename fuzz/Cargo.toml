@@ -15,6 +15,13 @@ libfuzzer-sys = "0.4"
 marmo-proto = { path = "../crates/marmo-proto" }
 
 [[bin]]
+name = "http"
+path = "fuzz_targets/http.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "ss2022_tcp"
 path = "fuzz_targets/ss2022_tcp.rs"
 test = false
