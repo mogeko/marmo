@@ -3,7 +3,7 @@
 All notable changes to marmo are recorded here. The project is pre-1.0; APIs
 and behavior may change between minor releases.
 
-## Unreleased
+## 0.0.3 - 2026-11-21
 
 - Rust workspace: `marmo`, `marmo-proto`, `marmo-net`, `marmo-transport`, and
   `marmo-testkit` (ADR-0019).

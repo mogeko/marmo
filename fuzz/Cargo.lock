@@ -297,14 +297,14 @@ dependencies = [
 
 [[package]]
 name = "marmo-net"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "marmo-proto"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "aes",
  "aes-gcm",

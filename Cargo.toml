@@ -4,7 +4,7 @@ members = ["crates/*"]
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.0.2"
+version = "0.0.3"
 edition = "2024"
 rust-version = "1.87"
 license = "MIT OR Apache-2.0"
@@ -12,10 +12,10 @@ repository = "https://github.com/mogeko/marmo"
 authors = ["Zheng Junyi"]
 
 [workspace.dependencies]
-marmo-net = { path = "crates/marmo-net", version = "=0.0.2" }
-marmo-proto = { path = "crates/marmo-proto", version = "=0.0.2" }
-marmo-transport = { path = "crates/marmo-transport", version = "=0.0.2" }
-marmo-testkit = { path = "crates/marmo-testkit", version = "=0.0.2" }
+marmo-net = { path = "crates/marmo-net", version = "=0.0.3" }
+marmo-proto = { path = "crates/marmo-proto", version = "=0.0.3" }
+marmo-transport = { path = "crates/marmo-transport", version = "=0.0.3" }
+marmo-testkit = { path = "crates/marmo-testkit", version = "=0.0.3" }
 rustls = { version = "0.23", default-features = false, features = [
     "aws_lc_rs",
     "logging",
