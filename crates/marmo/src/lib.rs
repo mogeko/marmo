@@ -1,8 +1,9 @@
 //! Public facade for marmo.
 //!
-//! `Config` is the strict v1 schema and `Instance` is the composition root:
-//! build, bind, serve, and shut down. R2d supports direct outbounds and the
-//! SOCKS5 CONNECT inbound; later phases add the remaining protocols.
+//! `Config` is the strict version 2 schema and `Instance` is the composition
+//! root: build, bind, serve, and shut down. R4 adds the `Outbound` and `Layer`
+//! boundaries, selectors and health probes, metrics, and inline TLS
+//! credentials.
 #![forbid(unsafe_code)]
 
 mod config;

@@ -1,9 +1,9 @@
 //! Strict JSON configuration.
 //!
-//! R2a is the data model and parser only: unknown fields, duplicate fields,
+//! This module is the data model and parser: unknown fields, duplicate fields,
 //! bad enum tags, and oversized documents are rejected here. Semantic
-//! validation (tag references, selector graphs, credential shapes) lands in
-//! R2b.
+//! validation (tag references, selector graphs, credential shapes) lives in
+//! `validate`.
 
 use std::fmt;
 use std::str::FromStr;
@@ -207,7 +207,7 @@ pub enum StreamNetwork {
     Tcp,
     /// RFC 6455 WebSocket.
     Ws,
-    /// HTTP/2 POST stream.
+    /// HTTP/2 stream (PUT on the client per ADR-0022).
     H2,
 }
 
