@@ -43,6 +43,7 @@ Statuses: `Proposed` → `Accepted` | `Rejected` | `Superseded by ADR-NNNN`.
 | [0020](0020-license.md) | License change | Accepted (2026-11-21; amended) | MIT OR Apache-2.0; `cargo tree` license review |
 | [0021](0021-websocket-backend.md) | WebSocket backend and permessage-deflate | Accepted (2026-11-21) | `ws-net` + tokio pump; compression enabled |
 | [0022](0022-vless-http2-method.md) | VLESS HTTP/2 transport method | Accepted (2026-11-21) | `PUT` client, no content type; `POST`/`PUT` server |
+| [0023](0023-tls-credentials-inline.md) | TLS credentials as inline configuration | Proposed | inline PEM; no filesystem I/O in build/bind; schema v2 |
 
 ## Eras
 
