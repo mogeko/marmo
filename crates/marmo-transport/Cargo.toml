@@ -1,6 +1,6 @@
 [package]
 name = "marmo-transport"
-description = "Stream and datagram adapters, TLS/WS/H2/QUIC layers, and relay for marmo"
+description = "Stream adapters, TLS/WS/H2 layers, and relay for marmo"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
