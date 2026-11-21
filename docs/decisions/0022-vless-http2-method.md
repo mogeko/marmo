@@ -1,6 +1,6 @@
 # ADR-0022: VLESS HTTP/2 transport method
 
-- Status: Proposed
+- Status: Accepted (2026-11-21)
 - Date: 2026-11-21
 - Deciders: @mogeko
 - Related: ADR-0016, ADR-0018
@@ -56,16 +56,14 @@ the parity matrix still claims HTTP/2 interop.
 Change the VLESS HTTP/2 transport to the reference-compatible method while
 keeping every other ADR-0016 rule.
 
-- **Client**: send `PUT` instead of `POST`. Reference clients omit
-  `content-type`; our client keeps `application/octet-stream` because both
-  reference servers accept it and the header documents the tunnel type. It may
-  be dropped later without a wire-compatibility risk.
+- **Client**: send `PUT` instead of `POST`, and do **not** send
+  `content-type`, matching the reference clients.
 - **Server**: accept both `PUT` and `POST`. Do not validate `content-type`:
   accept an absent header or any value, matching the references. The request
   path is still required to match, and anything else returns `400`.
 - **Unchanged**: TLS is required for h2; ALPN `h2` is offered and required as
-  before; `transport.host` still supplies `:authority`; no h2c, no
-  request body media-type semantics, no change to WebSocket or TCP.
+  before; `transport.host` still supplies `:authority`; no h2c, no request
+  body media-type semantics, no change to WebSocket or TCP.
 - The h2 stream still carries the VLESS byte stream over the request body, and
   the response body carries the reverse direction.
 
@@ -97,7 +95,7 @@ force.
 Positive:
 
 - HTTP/2 works in both directions against V2Ray 5.53 and Xray 1.8-era peers.
-- The change is wire-local: one method token and a relaxed content-type check;
+- The change is wire-local: one method token and no content-type header;
   no framing, TLS, ALPN, or config-schema change.
 - Mixed marmo versions keep working because the server accepts both methods.
 
@@ -126,11 +124,11 @@ Testing and observation:
 - On acceptance, update `docs/protocols/vless.md` (it currently says POST) and
   the ADR index.
 
-Rollback: revert to `POST` and the required content type. Older reference
+Rollback: revert to `POST` with the required content type. Older reference
 servers that accepted POST would work again; V2Ray 5.53 would not.
 
 ## Approval
 
-- [ ] Accept the recommendation (`PUT` client, `POST`/`PUT` server, optional
-      content type).
+- [x] Accept the recommendation (`PUT` client without content type,
+      `POST`/`PUT` server, no content-type validation).
 - [ ] Choose an alternative: keep `POST`, or another approach.
