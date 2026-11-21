@@ -205,10 +205,7 @@ pub fn parse_absolute(uri: &str) -> Result<AbsoluteTarget<'_>, HttpError> {
 
 /// Rewrites a forward request from absolute form to origin form.
 pub fn build_forward_head(
-    method: &str,
-    version: u8,
-    target: &AbsoluteTarget<'_>,
-    headers: &[Header<'_>],
+    method: &str, version: u8, target: &AbsoluteTarget<'_>, headers: &[Header<'_>],
 ) -> Result<Vec<u8>, HttpError> {
     if !is_token(method) || version > 1 {
         return Err(HttpError::BadRequest);

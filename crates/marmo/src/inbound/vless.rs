@@ -29,12 +29,8 @@ const RESPONSE: [u8; 2] = [0, 0];
 
 /// Handles one accepted VLESS connection.
 pub(crate) async fn handle(
-    client: TcpStream,
-    context: Arc<Context>,
-    inbound: Arc<str>,
-    uuid: Arc<Uuid>,
-    layers: Arc<[Arc<dyn Layer>]>,
-    deadline: Deadline,
+    client: TcpStream, context: Arc<Context>, inbound: Arc<str>, uuid: Arc<Uuid>,
+    layers: Arc<[Arc<dyn Layer>]>, deadline: Deadline,
 ) {
     let token = context.supervisor.token();
     let source = client.peer_addr().ok().map(Endpoint::from);
@@ -88,9 +84,7 @@ enum Prepared {
 }
 
 async fn prepare(
-    client: TcpStream,
-    layers: &[Arc<dyn Layer>],
-    uuid: &Uuid,
+    client: TcpStream, layers: &[Arc<dyn Layer>], uuid: &Uuid,
 ) -> io::Result<Prepared> {
     let mut stream: BoxStream = Box::new(client);
     for layer in layers {
@@ -135,14 +129,8 @@ async fn prepare(
 
 #[allow(clippy::too_many_arguments)]
 async fn connect_relay(
-    mut stream: BoxStream,
-    context: &Context,
-    inbound: &str,
-    source: Endpoint,
-    target: Endpoint,
-    leftover: Vec<u8>,
-    token: CancellationToken,
-    deadline: Deadline,
+    mut stream: BoxStream, context: &Context, inbound: &str, source: Endpoint, target: Endpoint,
+    leftover: Vec<u8>, token: CancellationToken, deadline: Deadline,
 ) {
     let Some(action) = route(context, inbound, source, &target, Network::Tcp) else {
         return;
@@ -166,14 +154,8 @@ async fn connect_relay(
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_udp(
-    mut stream: BoxStream,
-    context: Arc<Context>,
-    inbound: Arc<str>,
-    source: Endpoint,
-    target: Endpoint,
-    leftover: Vec<u8>,
-    token: CancellationToken,
-    deadline: Deadline,
+    mut stream: BoxStream, context: Arc<Context>, inbound: Arc<str>, source: Endpoint,
+    target: Endpoint, leftover: Vec<u8>, token: CancellationToken, deadline: Deadline,
 ) {
     let ipv4 = source.ip().is_none_or(|ip| ip.is_ipv4());
     let Some(action) = route(&context, &inbound, source, &target, Network::Udp) else {
@@ -233,13 +215,8 @@ async fn handle_udp(
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_xudp(
-    mut stream: BoxStream,
-    context: Arc<Context>,
-    inbound: Arc<str>,
-    source: Endpoint,
-    leftover: Vec<u8>,
-    token: CancellationToken,
-    deadline: Deadline,
+    mut stream: BoxStream, context: Arc<Context>, inbound: Arc<str>, source: Endpoint,
+    leftover: Vec<u8>, token: CancellationToken, deadline: Deadline,
 ) {
     let ipv4 = source.ip().is_none_or(|ip| ip.is_ipv4());
     let Ok(mut frames) = XudpReader::new(&leftover) else {
@@ -329,12 +306,8 @@ async fn handle_xudp(
 }
 
 async fn reply_loop(
-    mut writer: WriteHalf<BoxStream>,
-    mut receiver: mpsc::Receiver<Vec<u8>>,
-    mut outbound: UdpOutbound,
-    target: Endpoint,
-    token: CancellationToken,
-    xudp: bool,
+    mut writer: WriteHalf<BoxStream>, mut receiver: mpsc::Receiver<Vec<u8>>,
+    mut outbound: UdpOutbound, target: Endpoint, token: CancellationToken, xudp: bool,
     activity: Arc<Notify>,
 ) {
     let mut buffer = vec![0_u8; MAX_UDP_PAYLOAD];
@@ -368,11 +341,7 @@ async fn reply_loop(
 }
 
 fn route(
-    context: &Context,
-    inbound: &str,
-    source: Endpoint,
-    target: &Endpoint,
-    network: Network,
+    context: &Context, inbound: &str, source: Endpoint, target: &Endpoint, network: Network,
 ) -> Option<Action> {
     let domain = target.domain().map(str::to_owned);
     let metadata = Metadata {
@@ -386,10 +355,7 @@ fn route(
 }
 
 async fn relay_streams(
-    client: BoxStream,
-    remote: BoxStream,
-    context: &Context,
-    token: CancellationToken,
+    client: BoxStream, remote: BoxStream, context: &Context, token: CancellationToken,
 ) {
     context.relay_streams(client, remote, &token).await;
 }

@@ -57,10 +57,7 @@ impl NodeHealth {
 
 impl SelectorOutbound {
     pub(crate) fn new(
-        tag: String,
-        metrics: Arc<Metrics>,
-        nodes: Vec<Arc<dyn Outbound>>,
-        strategy: Strategy,
+        tag: String, metrics: Arc<Metrics>, nodes: Vec<Arc<dyn Outbound>>, strategy: Strategy,
         health_check: Option<HealthCheck>,
     ) -> Self {
         let health = Arc::new((0..nodes.len()).map(|_| NodeHealth::new()).collect());
@@ -139,9 +136,7 @@ impl Outbound for SelectorOutbound {
     }
 
     fn connect_datagram<'a>(
-        &'a self,
-        target: &'a Endpoint,
-        ipv4: bool,
+        &'a self, target: &'a Endpoint, ipv4: bool,
     ) -> BoxFuture<'a, std::io::Result<Option<UdpOutbound>>> {
         Box::pin(async move {
             let start = self.start();
@@ -226,8 +221,7 @@ mod tests {
 
     impl Outbound for Fake {
         fn connect<'a>(
-            &'a self,
-            _target: &'a Endpoint,
+            &'a self, _target: &'a Endpoint,
         ) -> BoxFuture<'a, std::io::Result<Connected>> {
             Box::pin(async move {
                 self.seen.lock().expect("seen").push(self.index);
@@ -240,9 +234,7 @@ mod tests {
         }
 
         fn connect_datagram<'a>(
-            &'a self,
-            _target: &'a Endpoint,
-            _ipv4: bool,
+            &'a self, _target: &'a Endpoint, _ipv4: bool,
         ) -> BoxFuture<'a, std::io::Result<Option<UdpOutbound>>> {
             Box::pin(async { Ok(None) })
         }

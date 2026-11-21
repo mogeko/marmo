@@ -41,9 +41,7 @@ pub(crate) trait Outbound: Send + Sync {
 
     /// Opens a datagram path, or `None` when the outbound has no UDP.
     fn connect_datagram<'a>(
-        &'a self,
-        target: &'a Endpoint,
-        ipv4: bool,
+        &'a self, target: &'a Endpoint, ipv4: bool,
     ) -> BoxFuture<'a, io::Result<Option<UdpOutbound>>>;
 
     /// Whether this outbound is the direct dialer.
@@ -58,9 +56,7 @@ pub(crate) trait Outbound: Send + Sync {
 
     /// Starts an optional health-probe task owned by the instance.
     fn start_health(
-        &self,
-        _runtime: &Handle,
-        _token: &CancellationToken,
+        &self, _runtime: &Handle, _token: &CancellationToken,
     ) -> Option<JoinHandle<()>> {
         None
     }

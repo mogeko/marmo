@@ -13,11 +13,7 @@ use tokio::net::TcpStream;
 
 /// Handles one accepted Shadowsocks 2022 connection.
 pub(crate) async fn handle(
-    client: TcpStream,
-    context: Arc<Context>,
-    inbound: Arc<str>,
-    method: Method,
-    key: Arc<Key>,
+    client: TcpStream, context: Arc<Context>, inbound: Arc<str>, method: Method, key: Arc<Key>,
     deadline: Deadline,
 ) {
     let token = context.supervisor.token();

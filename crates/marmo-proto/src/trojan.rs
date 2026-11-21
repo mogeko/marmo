@@ -190,9 +190,7 @@ pub fn request_progress(bytes: &[u8]) -> RequestProgress {
 
 /// Encodes a request header after the authentication line.
 pub fn encode_request(
-    target: &Endpoint,
-    command: u8,
-    out: &mut [u8],
+    target: &Endpoint, command: u8, out: &mut [u8],
 ) -> Result<usize, TrojanError> {
     if command != COMMAND_CONNECT && command != COMMAND_UDP_ASSOCIATE {
         return Err(TrojanError::CommandUnsupported);
@@ -206,10 +204,7 @@ pub fn encode_request(
 
 /// Encodes the full request header, including the authentication line.
 pub fn encode_request_header(
-    hash: &PasswordHash,
-    target: &Endpoint,
-    command: u8,
-    out: &mut [u8],
+    hash: &PasswordHash, target: &Endpoint, command: u8, out: &mut [u8],
 ) -> Result<usize, TrojanError> {
     if out.len() < AUTH_PREFIX_LEN + 2 {
         return Err(TrojanError::NoSpace);
@@ -227,9 +222,7 @@ pub fn encode_request_header(
 
 /// Encodes one UDP frame header; the payload follows.
 pub fn encode_udp_header(
-    endpoint: &Endpoint,
-    payload_len: usize,
-    out: &mut [u8],
+    endpoint: &Endpoint, payload_len: usize, out: &mut [u8],
 ) -> Result<usize, TrojanError> {
     if payload_len > MAX_UDP_PAYLOAD {
         return Err(TrojanError::MessageTooBig);

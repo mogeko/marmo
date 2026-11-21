@@ -15,8 +15,7 @@ use tokio::net::TcpStream;
 /// Any bytes the proxy sends after its `200` response head are tunnel data and
 /// are replayed before the socket, so a target that speaks first still works.
 pub(crate) async fn connect(
-    server: &Endpoint,
-    target: &Endpoint,
+    server: &Endpoint, target: &Endpoint,
 ) -> io::Result<(BoxStream, Option<std::net::SocketAddr>)> {
     let mut stream = crate::direct::connect(server).await?;
     let bound = stream.local_addr().ok();
@@ -38,8 +37,7 @@ pub(crate) struct HttpOutbound {
 
 impl crate::outbound::Outbound for HttpOutbound {
     fn connect<'a>(
-        &'a self,
-        target: &'a Endpoint,
+        &'a self, target: &'a Endpoint,
     ) -> marmo_transport::BoxFuture<'a, io::Result<crate::outbound::Connected>> {
         Box::pin(async move {
             let (stream, bound) = connect(&self.server, target).await?;
@@ -48,9 +46,7 @@ impl crate::outbound::Outbound for HttpOutbound {
     }
 
     fn connect_datagram<'a>(
-        &'a self,
-        _target: &'a Endpoint,
-        _ipv4: bool,
+        &'a self, _target: &'a Endpoint, _ipv4: bool,
     ) -> marmo_transport::BoxFuture<'a, io::Result<Option<crate::outbound::udp::UdpOutbound>>> {
         Box::pin(async { Ok(None) })
     }
@@ -105,9 +101,7 @@ struct PrefixedStream<S> {
 
 impl<S: AsyncRead + Unpin> AsyncRead for PrefixedStream<S> {
     fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        buf: &mut ReadBuf<'_>,
+        self: Pin<&mut Self>, cx: &mut TaskContext<'_>, buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let me = self.get_mut();
         if me.offset < me.prefix.len() {
@@ -123,9 +117,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for PrefixedStream<S> {
 
 impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedStream<S> {
     fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        buf: &[u8],
+        self: Pin<&mut Self>, cx: &mut TaskContext<'_>, buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
     }

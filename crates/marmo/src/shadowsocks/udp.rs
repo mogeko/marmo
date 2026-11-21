@@ -37,9 +37,7 @@ pub(crate) struct SsUdpClient {
 impl SsUdpClient {
     /// Resolves the server and binds a client socket of the same family.
     pub(crate) async fn connect(
-        server: &Endpoint,
-        method: Method,
-        key: Arc<Key>,
+        server: &Endpoint, method: Method, key: Arc<Key>,
     ) -> io::Result<Self> {
         let target = resolve_server(server).await?;
         let bind = if target.is_ipv4() {

@@ -22,10 +22,7 @@ use crate::routing::{Action, Metadata};
 
 /// Handles one accepted HTTP proxy connection.
 pub(crate) async fn handle(
-    mut client: TcpStream,
-    context: Arc<Context>,
-    inbound: Arc<str>,
-    deadline: Deadline,
+    mut client: TcpStream, context: Arc<Context>, inbound: Arc<str>, deadline: Deadline,
 ) {
     let token = context.supervisor.token();
     let handshake = tokio::select! {
@@ -46,9 +43,7 @@ pub(crate) async fn handle(
 }
 
 async fn prepare(
-    client: &mut TcpStream,
-    context: &Context,
-    inbound: &str,
+    client: &mut TcpStream, context: &Context, inbound: &str,
 ) -> io::Result<Option<BoxStream>> {
     let (buffer, head_len) = match read_head(client).await {
         Ok(Some(head)) => head,
@@ -85,11 +80,7 @@ async fn prepare(
 }
 
 async fn connect_tunnel(
-    client: &mut TcpStream,
-    context: &Context,
-    inbound: &str,
-    target_text: &str,
-    leftover: &[u8],
+    client: &mut TcpStream, context: &Context, inbound: &str, target_text: &str, leftover: &[u8],
 ) -> io::Result<Option<BoxStream>> {
     let Ok(destination) = Endpoint::parse(target_text) else {
         let _ = respond(client, "400 Bad Request").await;
@@ -120,10 +111,7 @@ async fn connect_tunnel(
 }
 
 async fn forward(
-    client: &mut TcpStream,
-    context: &Context,
-    inbound: &str,
-    request: &RequestHead<'_>,
+    client: &mut TcpStream, context: &Context, inbound: &str, request: &RequestHead<'_>,
     leftover: &[u8],
 ) -> io::Result<Option<BoxStream>> {
     let target = match parse_absolute(request.target) {
@@ -169,10 +157,7 @@ async fn forward(
 }
 
 async fn route(
-    client: &mut TcpStream,
-    context: &Context,
-    inbound: &str,
-    destination: &Endpoint,
+    client: &mut TcpStream, context: &Context, inbound: &str, destination: &Endpoint,
 ) -> io::Result<Option<Action>> {
     let domain = destination.domain().map(str::to_owned);
     let source = client.peer_addr()?.into();

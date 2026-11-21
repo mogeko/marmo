@@ -743,9 +743,7 @@ impl Context {
     }
 
     pub(crate) async fn connect(
-        &self,
-        action: Action,
-        target: &Endpoint,
+        &self, action: Action, target: &Endpoint,
     ) -> io::Result<outbound::Connected> {
         match action {
             Action::Direct => self.direct.connect(target).await,
@@ -765,10 +763,7 @@ impl Context {
 
     /// Relays a TCP pair with the instance limits and cancellation.
     pub(crate) async fn relay_streams(
-        &self,
-        client: BoxStream,
-        remote: BoxStream,
-        token: &CancellationToken,
+        &self, client: BoxStream, remote: BoxStream, token: &CancellationToken,
     ) {
         let options = RelayOptions {
             idle_timeout: self.limits.idle_timeout,
@@ -802,10 +797,7 @@ impl Context {
     /// `target` seeds protocols whose association header carries a
     /// destination, such as Trojan UDP ASSOCIATE.
     pub(crate) async fn udp_outbound(
-        &self,
-        action: Action,
-        ipv4: bool,
-        target: &Endpoint,
+        &self, action: Action, ipv4: bool, target: &Endpoint,
     ) -> io::Result<Option<UdpOutbound>> {
         match action {
             Action::Direct => self.direct.connect_datagram(target, ipv4).await,
@@ -1026,9 +1018,7 @@ impl OutboundSpec {
     }
 
     fn build_selector(
-        self,
-        built: &std::collections::HashMap<String, Arc<dyn Outbound>>,
-        metrics: Arc<Metrics>,
+        self, built: &std::collections::HashMap<String, Arc<dyn Outbound>>, metrics: Arc<Metrics>,
     ) -> Result<Arc<dyn Outbound>, BindError> {
         let Self { tag, config } = self;
         let OutboundConfig::Selector {
@@ -1060,11 +1050,8 @@ impl OutboundSpec {
 }
 
 fn transport_host(
-    transport: &crate::config::StreamTransport,
-    tls: Option<&crate::config::Tls>,
-    server: &Endpoint,
-    tag: &str,
-    kind: &str,
+    transport: &crate::config::StreamTransport, tls: Option<&crate::config::Tls>,
+    server: &Endpoint, tag: &str, kind: &str,
 ) -> Result<String, BuildError> {
     transport
         .host
@@ -1086,9 +1073,7 @@ fn host_from_ip(ip: std::net::IpAddr) -> String {
 }
 
 fn build_tls_server(
-    tls: &InboundTlsConfig,
-    tag: &str,
-    metrics: &Arc<Metrics>,
+    tls: &InboundTlsConfig, tag: &str, metrics: &Arc<Metrics>,
 ) -> Result<Arc<TlsServer>, BindError> {
     let options = TlsServerOptions {
         certificate: &tls.certificate,
@@ -1111,9 +1096,7 @@ fn build_tls_server(
 }
 
 fn build_tls_client(
-    tls: &OutboundTlsConfig,
-    tag: &str,
-    metrics: &Arc<Metrics>,
+    tls: &OutboundTlsConfig, tag: &str, metrics: &Arc<Metrics>,
 ) -> Result<Arc<TlsClient>, BindError> {
     let options = TlsClientOptions {
         server_name: &tls.server_name,
@@ -1137,10 +1120,7 @@ fn build_tls_client(
 }
 
 fn outbound_tls_config(
-    tls: &crate::config::Tls,
-    server: &Endpoint,
-    tag: &str,
-    default_alpn: Option<&str>,
+    tls: &crate::config::Tls, server: &Endpoint, tag: &str, default_alpn: Option<&str>,
     required_alpn: Option<&str>,
 ) -> Result<OutboundTlsConfig, BuildError> {
     let server_name = tls

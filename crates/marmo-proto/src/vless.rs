@@ -221,10 +221,7 @@ pub fn request_progress(bytes: &[u8]) -> RequestProgress {
 
 /// Encodes a request header with no addons.
 pub fn encode_request(
-    uuid: &Uuid,
-    target: &Endpoint,
-    command: u8,
-    out: &mut [u8],
+    uuid: &Uuid, target: &Endpoint, command: u8, out: &mut [u8],
 ) -> Result<usize, VlessError> {
     if command != COMMAND_TCP && command != COMMAND_UDP {
         return Err(VlessError::CommandUnsupported);
@@ -342,9 +339,7 @@ pub fn encode_address(endpoint: &Endpoint, out: &mut [u8]) -> Result<usize, Vles
 
 /// Decodes an address starting at `start`; `Ok(None)` means more bytes.
 pub fn decode_address(
-    bytes: &[u8],
-    start: usize,
-    port: u16,
+    bytes: &[u8], start: usize, port: u16,
 ) -> Result<Option<(Endpoint, usize)>, VlessError> {
     if start >= bytes.len() {
         return Ok(None);

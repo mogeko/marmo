@@ -109,9 +109,7 @@ pub enum RelayError {
 /// (ADR-0015). Dropping this future cancels both directions and closes the
 /// streams.
 pub async fn relay(
-    client: BoxStream,
-    remote: BoxStream,
-    options: RelayOptions,
+    client: BoxStream, remote: BoxStream, options: RelayOptions,
 ) -> Result<RelayStats, RelayError> {
     let counters = Arc::new(RelayCounters::default());
     relay_with_counters(client, remote, options, Arc::clone(&counters)).await?;
@@ -123,10 +121,7 @@ pub async fn relay(
 /// The counters remain readable after the future is dropped, so an idle,
 /// half-close, or shutdown path still reports the bytes it copied.
 pub async fn relay_with_counters(
-    client: BoxStream,
-    remote: BoxStream,
-    options: RelayOptions,
-    counters: Arc<RelayCounters>,
+    client: BoxStream, remote: BoxStream, options: RelayOptions, counters: Arc<RelayCounters>,
 ) -> Result<RelayStats, RelayError> {
     let (client_read, client_write) = split(client);
     let (remote_read, remote_write) = split(remote);
@@ -216,10 +211,7 @@ fn spawn_idle(activity: Arc<Activity>, idle: Option<Duration>) -> IdleFuture {
 }
 
 async fn copy_direction<R, W>(
-    mut reader: R,
-    mut writer: W,
-    activity: Arc<Activity>,
-    counters: Arc<RelayCounters>,
+    mut reader: R, mut writer: W, activity: Arc<Activity>, counters: Arc<RelayCounters>,
     direction: Direction,
 ) -> Result<u64, RelayError>
 where
@@ -248,9 +240,7 @@ where
 }
 
 async fn wait_grace<F>(
-    future: Pin<&mut F>,
-    grace: Duration,
-    idle: &mut IdleFuture,
+    future: Pin<&mut F>, grace: Duration, idle: &mut IdleFuture,
 ) -> Result<u64, RelayError>
 where
     F: Future<Output = Result<u64, RelayError>>,

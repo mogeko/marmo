@@ -28,10 +28,7 @@ const UDP_REPLY_BUFFER: usize = 65_535 + 262;
 
 /// Handles one accepted SOCKS5 connection.
 pub(crate) async fn handle(
-    mut client: TcpStream,
-    context: Arc<Context>,
-    inbound: Arc<str>,
-    deadline: Deadline,
+    mut client: TcpStream, context: Arc<Context>, inbound: Arc<str>, deadline: Deadline,
 ) {
     let token = context.supervisor.token();
     let handshake = tokio::select! {
@@ -69,10 +66,7 @@ pub(crate) async fn handle(
 }
 
 async fn connect_target(
-    client: &mut TcpStream,
-    context: &Context,
-    inbound: &str,
-    destination: Endpoint,
+    client: &mut TcpStream, context: &Context, inbound: &str, destination: Endpoint,
 ) -> io::Result<Option<marmo_transport::BoxStream>> {
     let domain = destination.domain().map(str::to_owned);
     let source = client.peer_addr()?.into();
@@ -191,9 +185,7 @@ async fn send_method(client: &mut TcpStream, method: u8) -> io::Result<()> {
 }
 
 async fn send_reply(
-    client: &mut TcpStream,
-    status: ReplyStatus,
-    bound: Option<SocketAddr>,
+    client: &mut TcpStream, status: ReplyStatus, bound: Option<SocketAddr>,
 ) -> io::Result<()> {
     let mut buffer = [0_u8; 22];
     let length = encode_reply(status, bound, &mut buffer).map_err(codec_error)?;
@@ -222,12 +214,8 @@ enum UdpEvent {
 }
 
 async fn udp_event(
-    token: &CancellationToken,
-    client: &mut TcpStream,
-    client_socket: &UdpSocket,
-    upstream: &mut Option<UdpOutbound>,
-    client_buffer: &mut [u8],
-    upstream_buffer: &mut [u8],
+    token: &CancellationToken, client: &mut TcpStream, client_socket: &UdpSocket,
+    upstream: &mut Option<UdpOutbound>, client_buffer: &mut [u8], upstream_buffer: &mut [u8],
     control_buffer: &mut [u8],
 ) -> UdpEvent {
     let awaiting = async {
@@ -245,10 +233,7 @@ async fn udp_event(
 }
 
 async fn udp_associate(
-    mut client: TcpStream,
-    context: Arc<Context>,
-    inbound: Arc<str>,
-    token: CancellationToken,
+    mut client: TcpStream, context: Arc<Context>, inbound: Arc<str>, token: CancellationToken,
 ) {
     let Ok(tcp_local) = client.local_addr() else {
         return;

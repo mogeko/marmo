@@ -29,11 +29,7 @@ const MAX_ENCODED: usize = 16 + 1 + 8 + 8 + 2 + 259 + MAX_PAYLOAD + 16;
 
 /// Runs the UDP listener until shutdown, aborting every session on exit.
 pub(crate) async fn serve(
-    listener: UdpSocket,
-    context: Arc<Context>,
-    inbound: Arc<str>,
-    method: Method,
-    key: Arc<Key>,
+    listener: UdpSocket, context: Arc<Context>, inbound: Arc<str>, method: Method, key: Arc<Key>,
 ) {
     let listener = Arc::new(listener);
     let token = context.supervisor.token();
@@ -73,15 +69,8 @@ pub(crate) async fn serve(
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_datagram(
-    listener: &Arc<UdpSocket>,
-    context: &Context,
-    inbound: &str,
-    method: Method,
-    key: &Arc<Key>,
-    sessions: &mut HashMap<[u8; 8], Session>,
-    source: SocketAddr,
-    bytes: &[u8],
-    plain: &mut [u8],
+    listener: &Arc<UdpSocket>, context: &Context, inbound: &str, method: Method, key: &Arc<Key>,
+    sessions: &mut HashMap<[u8; 8], Session>, source: SocketAddr, bytes: &[u8], plain: &mut [u8],
 ) {
     let Ok(decoded) = decode_udp_packet(
         method,
@@ -161,10 +150,7 @@ struct Session {
 
 impl Session {
     async fn create(
-        listener: &Arc<UdpSocket>,
-        method: Method,
-        key: &Arc<Key>,
-        client_session_id: [u8; 8],
+        listener: &Arc<UdpSocket>, method: Method, key: &Arc<Key>, client_session_id: [u8; 8],
         source: SocketAddr,
     ) -> Option<Self> {
         let ipv4 = source.is_ipv4();
@@ -230,13 +216,8 @@ impl Session {
 
 #[allow(clippy::too_many_arguments)]
 async fn reply_loop(
-    listener: Arc<UdpSocket>,
-    socket: Arc<UdpSocket>,
-    method: Method,
-    key: Arc<Key>,
-    server_session_id: [u8; 8],
-    client_session_id: [u8; 8],
-    state: Arc<Mutex<ClientState>>,
+    listener: Arc<UdpSocket>, socket: Arc<UdpSocket>, method: Method, key: Arc<Key>,
+    server_session_id: [u8; 8], client_session_id: [u8; 8], state: Arc<Mutex<ClientState>>,
 ) {
     let mut counter = 0_u64;
     let mut received = vec![0_u8; MAX_PAYLOAD];

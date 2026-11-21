@@ -22,13 +22,13 @@ proxy protocols, rule-based routing, and latency-aware outbound selection.
 
 ## Workspace
 
-| Crate | Purpose |
-| --- | --- |
-| `marmo` | Public facade: `Instance`, config, routing, inbounds, outbounds, metrics |
-| `marmo-proto` | HTTP/1, SOCKS5, SS2022, Trojan, VLESS, and XUDP codecs; no I/O |
-| `marmo-net` | `Endpoint`, CIDR, and `Network` |
-| `marmo-transport` | Stream traits, TLS/WS/H2 layers, and the relay |
-| `marmo-testkit` | Test-only helpers |
+| Crate             | Purpose                                                                  |
+| ----------------- | ------------------------------------------------------------------------ |
+| `marmo`           | Public facade: `Instance`, config, routing, inbounds, outbounds, metrics |
+| `marmo-proto`     | HTTP/1, SOCKS5, SS2022, Trojan, VLESS, and XUDP codecs; no I/O           |
+| `marmo-net`       | `Endpoint`, CIDR, and `Network`                                          |
+| `marmo-transport` | Stream traits, TLS/WS/H2 layers, and the relay                           |
+| `marmo-testkit`   | Test-only helpers                                                        |
 
 ## Example
 
@@ -84,5 +84,4 @@ See [docs/architecture.md](docs/architecture.md) for the design and
 
 ## License
 
-MIT OR Apache-2.0, at your option (ADR-0020). See
-[LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
+[MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE).

@@ -198,9 +198,7 @@ fn compile_cidrs(values: Option<&[String]>, path: &str) -> Result<Vec<Cidr>, Rou
 }
 
 fn compile_action(
-    tag: &str,
-    path: String,
-    outbounds: &HashMap<&str, OutboundId>,
+    tag: &str, path: String, outbounds: &HashMap<&str, OutboundId>,
 ) -> Result<Action, RoutingError> {
     match tag {
         "direct" => Ok(Action::Direct),

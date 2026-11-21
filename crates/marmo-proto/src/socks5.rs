@@ -217,9 +217,7 @@ pub fn encode_method_selection(method: u8, out: &mut [u8]) -> Result<usize, Sock
 /// Encodes a reply. `bound` is the server-side address; `None` encodes
 /// `0.0.0.0:0`, which is valid for failures and unbound sockets.
 pub fn encode_reply(
-    status: ReplyStatus,
-    bound: Option<SocketAddr>,
-    out: &mut [u8],
+    status: ReplyStatus, bound: Option<SocketAddr>, out: &mut [u8],
 ) -> Result<usize, Socks5Error> {
     let bound = bound.unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
     match bound {
@@ -317,9 +315,7 @@ pub fn parse_udp(input: &[u8]) -> Result<UdpRequest<'_>, Socks5Error> {
 
 /// Encodes a SOCKS5 UDP datagram into `out`.
 pub fn encode_udp(
-    destination: &Endpoint,
-    payload: &[u8],
-    out: &mut [u8],
+    destination: &Endpoint, payload: &[u8], out: &mut [u8],
 ) -> Result<usize, Socks5Error> {
     let header = match destination.ip() {
         Some(IpAddr::V4(_)) => 10,

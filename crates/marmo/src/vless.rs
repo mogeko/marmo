@@ -40,9 +40,7 @@ impl ClientStream {
 
 impl AsyncRead for ClientStream {
     fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        buf: &mut ReadBuf<'_>,
+        self: Pin<&mut Self>, cx: &mut TaskContext<'_>, buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let me = self.get_mut();
         loop {
@@ -97,9 +95,7 @@ impl AsyncRead for ClientStream {
 
 impl AsyncWrite for ClientStream {
     fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        buf: &[u8],
+        self: Pin<&mut Self>, cx: &mut TaskContext<'_>, buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
     }

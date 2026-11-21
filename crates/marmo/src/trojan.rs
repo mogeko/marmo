@@ -38,8 +38,7 @@ impl FrameReader {
 
     /// Reads the next frame, or `None` at a clean end of stream.
     pub(crate) async fn next<R>(
-        &mut self,
-        reader: &mut R,
+        &mut self, reader: &mut R,
     ) -> io::Result<Option<(Endpoint, Vec<u8>)>>
     where
         R: AsyncRead + Unpin,
@@ -108,9 +107,7 @@ impl FrameReader {
 
 /// Writes one address, length, and payload frame.
 pub(crate) async fn write_frame<W>(
-    writer: &mut W,
-    source: &Endpoint,
-    payload: &[u8],
+    writer: &mut W, source: &Endpoint, payload: &[u8],
 ) -> io::Result<()>
 where
     W: AsyncWrite + Unpin,

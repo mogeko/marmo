@@ -33,13 +33,8 @@ const UDP_QUEUE: usize = 16;
 
 /// Handles one accepted Trojan connection.
 pub(crate) async fn handle(
-    client: TcpStream,
-    context: Arc<Context>,
-    inbound: Arc<str>,
-    tls: Arc<TlsServer>,
-    password: Arc<PasswordHash>,
-    fallback: Option<Endpoint>,
-    deadline: Deadline,
+    client: TcpStream, context: Arc<Context>, inbound: Arc<str>, tls: Arc<TlsServer>,
+    password: Arc<PasswordHash>, fallback: Option<Endpoint>, deadline: Deadline,
 ) {
     let token = context.supervisor.token();
     let source = client.peer_addr().ok().map(Endpoint::from);
@@ -92,9 +87,7 @@ enum Prepared {
 }
 
 async fn prepare(
-    client: TcpStream,
-    tls: &TlsServer,
-    password: &PasswordHash,
+    client: TcpStream, tls: &TlsServer, password: &PasswordHash,
 ) -> io::Result<Prepared> {
     let accepted = tls.accept(Box::new(client)).await.map_err(tls_error)?;
     let mut stream = accepted.stream;
@@ -161,14 +154,8 @@ async fn prepare(
 
 #[allow(clippy::too_many_arguments)]
 async fn connect_relay(
-    stream: BoxStream,
-    context: &Context,
-    inbound: &str,
-    source: Endpoint,
-    target: Endpoint,
-    leftover: Vec<u8>,
-    token: CancellationToken,
-    deadline: Deadline,
+    stream: BoxStream, context: &Context, inbound: &str, source: Endpoint, target: Endpoint,
+    leftover: Vec<u8>, token: CancellationToken, deadline: Deadline,
 ) {
     let Some(action) = route(context, inbound, source, &target) else {
         return;
@@ -188,12 +175,8 @@ async fn connect_relay(
 }
 
 async fn handle_udp(
-    stream: BoxStream,
-    context: Arc<Context>,
-    inbound: Arc<str>,
-    source: Endpoint,
-    leftover: Vec<u8>,
-    token: CancellationToken,
+    stream: BoxStream, context: Arc<Context>, inbound: Arc<str>, source: Endpoint,
+    leftover: Vec<u8>, token: CancellationToken,
 ) {
     let ipv4 = source.ip().is_none_or(|ip| ip.is_ipv4());
     let (mut reader, writer) = tokio::io::split(stream);
@@ -240,12 +223,8 @@ async fn handle_udp(
 }
 
 async fn reply_loop(
-    mut writer: WriteHalf<BoxStream>,
-    mut receiver: mpsc::Receiver<(Action, Endpoint, Vec<u8>)>,
-    context: Arc<Context>,
-    ipv4: bool,
-    token: CancellationToken,
-    activity: Arc<Notify>,
+    mut writer: WriteHalf<BoxStream>, mut receiver: mpsc::Receiver<(Action, Endpoint, Vec<u8>)>,
+    context: Arc<Context>, ipv4: bool, token: CancellationToken, activity: Arc<Notify>,
 ) {
     let mut outbound: Option<(Action, UdpOutbound)> = None;
     let mut buffer = vec![0_u8; MAX_UDP_PAYLOAD];
@@ -299,14 +278,8 @@ async fn reply_loop(
 
 #[allow(clippy::too_many_arguments)]
 async fn fallback_relay(
-    stream: BoxStream,
-    prefix: Vec<u8>,
-    fallback: Option<Endpoint>,
-    context: &Context,
-    inbound: &str,
-    source: Endpoint,
-    token: CancellationToken,
-    deadline: Deadline,
+    stream: BoxStream, prefix: Vec<u8>, fallback: Option<Endpoint>, context: &Context,
+    inbound: &str, source: Endpoint, token: CancellationToken, deadline: Deadline,
 ) {
     let (Some(target), false) = (fallback, prefix.is_empty()) else {
         return;
@@ -329,10 +302,7 @@ async fn fallback_relay(
 }
 
 fn route(
-    context: &Context,
-    inbound: &str,
-    source: Endpoint,
-    target: &Endpoint,
+    context: &Context, inbound: &str, source: Endpoint, target: &Endpoint,
 ) -> Option<crate::routing::Action> {
     let domain = target.domain().map(str::to_owned);
     let metadata = Metadata {
@@ -346,10 +316,7 @@ fn route(
 }
 
 async fn relay_streams(
-    client: BoxStream,
-    remote: BoxStream,
-    context: &Context,
-    token: CancellationToken,
+    client: BoxStream, remote: BoxStream, context: &Context, token: CancellationToken,
 ) {
     context.relay_streams(client, remote, &token).await;
 }

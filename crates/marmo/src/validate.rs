@@ -239,8 +239,7 @@ fn validate_inbound_tls(tls: &crate::config::InboundTls, index: usize) -> Result
 }
 
 fn validate_inbound_tls_auth(
-    tls: &crate::config::InboundTls,
-    index: usize,
+    tls: &crate::config::InboundTls, index: usize,
 ) -> Result<(), ConfigError> {
     match (tls.client_auth, tls.client_ca.as_deref()) {
         (ClientAuth::None, None) => Ok(()),
@@ -420,9 +419,7 @@ fn validate_shadowsocks_outbound(outbound: &Outbound, index: usize) -> Result<()
 }
 
 fn validate_selector(
-    outbound: &Outbound,
-    index: usize,
-    outbounds: &[Outbound],
+    outbound: &Outbound, index: usize, outbounds: &[Outbound],
 ) -> Result<(), ConfigError> {
     reject_vless_fields(outbound, index)?;
     if outbound.server.is_some() || outbound.method.is_some() || outbound.password.is_some() {
@@ -735,9 +732,7 @@ fn validate_subprotocols(protocols: &[String], base: &str) -> Result<(), ConfigE
 }
 
 fn validate_alpn(
-    protocols: Option<&[String]>,
-    required: Option<&str>,
-    base: &str,
+    protocols: Option<&[String]>, required: Option<&str>, base: &str,
 ) -> Result<(), ConfigError> {
     let list = protocols.unwrap_or(&[]);
     if list.is_empty() && required.is_some() {

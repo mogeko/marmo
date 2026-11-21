@@ -61,8 +61,7 @@ pub(crate) struct DirectOutbound;
 
 impl crate::outbound::Outbound for DirectOutbound {
     fn connect<'a>(
-        &'a self,
-        endpoint: &'a Endpoint,
+        &'a self, endpoint: &'a Endpoint,
     ) -> marmo_transport::BoxFuture<'a, std::io::Result<crate::outbound::Connected>> {
         Box::pin(async move {
             let stream = connect(endpoint).await?;
@@ -75,9 +74,7 @@ impl crate::outbound::Outbound for DirectOutbound {
     }
 
     fn connect_datagram<'a>(
-        &'a self,
-        _target: &'a Endpoint,
-        ipv4: bool,
+        &'a self, _target: &'a Endpoint, ipv4: bool,
     ) -> marmo_transport::BoxFuture<'a, std::io::Result<Option<crate::outbound::udp::UdpOutbound>>>
     {
         Box::pin(async move {

@@ -17,10 +17,7 @@ use crate::xudp::{XudpReader, write_keep, write_new};
 
 /// Dials `server` and opens a VLESS TCP stream to `target`.
 pub(crate) async fn connect(
-    server: &Endpoint,
-    uuid: &Uuid,
-    target: &Endpoint,
-    layers: &[Arc<dyn Layer>],
+    server: &Endpoint, uuid: &Uuid, target: &Endpoint, layers: &[Arc<dyn Layer>],
 ) -> io::Result<(BoxStream, Option<std::net::SocketAddr>)> {
     let (mut stream, bound) = open_stream(server, layers).await?;
     write_request(&mut stream, uuid, target, COMMAND_TCP).await?;
@@ -37,8 +34,7 @@ pub(crate) struct VlessOutbound {
 
 impl crate::outbound::Outbound for VlessOutbound {
     fn connect<'a>(
-        &'a self,
-        target: &'a Endpoint,
+        &'a self, target: &'a Endpoint,
     ) -> marmo_transport::BoxFuture<'a, io::Result<crate::outbound::Connected>> {
         Box::pin(async move {
             let (stream, bound) = connect(&self.server, &self.uuid, target, &self.layers).await?;
@@ -47,9 +43,7 @@ impl crate::outbound::Outbound for VlessOutbound {
     }
 
     fn connect_datagram<'a>(
-        &'a self,
-        target: &'a Endpoint,
-        _ipv4: bool,
+        &'a self, target: &'a Endpoint, _ipv4: bool,
     ) -> marmo_transport::BoxFuture<'a, io::Result<Option<crate::outbound::udp::UdpOutbound>>> {
         Box::pin(async move {
             if self.xudp {
@@ -111,10 +105,7 @@ impl VlessUdpClient {
 
 /// Opens a VLESS UDP association for `target`.
 pub(crate) async fn connect_udp(
-    server: &Endpoint,
-    uuid: &Uuid,
-    target: &Endpoint,
-    layers: &[Arc<dyn Layer>],
+    server: &Endpoint, uuid: &Uuid, target: &Endpoint, layers: &[Arc<dyn Layer>],
 ) -> io::Result<VlessUdpClient> {
     let (mut stream, _bound) = open_stream(server, layers).await?;
     write_request(&mut stream, uuid, target, COMMAND_UDP).await?;
@@ -202,10 +193,7 @@ impl VlessXudpClient {
 
 /// Opens a VLESS XUDP association for `target`.
 pub(crate) async fn connect_xudp(
-    server: &Endpoint,
-    uuid: &Uuid,
-    target: &Endpoint,
-    layers: &[Arc<dyn Layer>],
+    server: &Endpoint, uuid: &Uuid, target: &Endpoint, layers: &[Arc<dyn Layer>],
 ) -> io::Result<VlessXudpClient> {
     let (mut stream, _bound) = open_stream(server, layers).await?;
     let mut header = [0_u8; 1 + 16 + 1 + 1];
@@ -222,8 +210,7 @@ pub(crate) async fn connect_xudp(
 }
 
 async fn open_stream(
-    server: &Endpoint,
-    layers: &[Arc<dyn Layer>],
+    server: &Endpoint, layers: &[Arc<dyn Layer>],
 ) -> io::Result<(BoxStream, Option<std::net::SocketAddr>)> {
     let inner = crate::direct::connect(server).await?;
     let bound = inner.local_addr().ok();
@@ -235,10 +222,7 @@ async fn open_stream(
 }
 
 async fn write_request(
-    stream: &mut BoxStream,
-    uuid: &Uuid,
-    target: &Endpoint,
-    command: u8,
+    stream: &mut BoxStream, uuid: &Uuid, target: &Endpoint, command: u8,
 ) -> io::Result<usize> {
     let mut header = [0_u8; REQUEST_HEADER_MAX];
     let length = encode_request(uuid, target, command, &mut header)

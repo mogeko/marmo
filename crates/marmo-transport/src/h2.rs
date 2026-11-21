@@ -224,9 +224,7 @@ impl Drop for H2Stream {
 
 impl AsyncRead for H2Stream {
     fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        buf: &mut ReadBuf<'_>,
+        self: Pin<&mut Self>, cx: &mut TaskContext<'_>, buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
     }
@@ -234,9 +232,7 @@ impl AsyncRead for H2Stream {
 
 impl AsyncWrite for H2Stream {
     fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        buf: &[u8],
+        self: Pin<&mut Self>, cx: &mut TaskContext<'_>, buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
     }
@@ -256,9 +252,7 @@ impl AsyncWrite for H2Stream {
 }
 
 fn bridge(
-    send: SendStream<Bytes>,
-    recv: RecvStream,
-    connection: JoinHandle<()>,
+    send: SendStream<Bytes>, recv: RecvStream, connection: JoinHandle<()>,
     stop: Option<oneshot::Sender<()>>,
 ) -> BoxStream {
     let (client, server) = tokio::io::duplex(DUPLEX_BUFFER);
@@ -276,10 +270,7 @@ fn bridge(
 }
 
 async fn pump(
-    send: SendStream<Bytes>,
-    recv: RecvStream,
-    stream: DuplexStream,
-    finished: oneshot::Sender<()>,
+    send: SendStream<Bytes>, recv: RecvStream, stream: DuplexStream, finished: oneshot::Sender<()>,
 ) {
     let (reader, writer) = tokio::io::split(stream);
     let upload = async {
@@ -292,8 +283,7 @@ async fn pump(
 }
 
 async fn upload_side(
-    mut send: SendStream<Bytes>,
-    mut reader: tokio::io::ReadHalf<DuplexStream>,
+    mut send: SendStream<Bytes>, mut reader: tokio::io::ReadHalf<DuplexStream>,
 ) -> io::Result<()> {
     let mut buffer = vec![0_u8; COPY_BUFFER];
     loop {
@@ -318,8 +308,7 @@ async fn upload_side(
 }
 
 async fn download_side(
-    mut recv: RecvStream,
-    mut writer: tokio::io::WriteHalf<DuplexStream>,
+    mut recv: RecvStream, mut writer: tokio::io::WriteHalf<DuplexStream>,
 ) -> io::Result<()> {
     while let Some(chunk) = recv.data().await {
         let chunk = chunk.map_err(io::Error::other)?;

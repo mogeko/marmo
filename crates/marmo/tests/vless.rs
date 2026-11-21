@@ -388,8 +388,7 @@ async fn relays_through_vless_xudp() {
 }
 
 async fn ws_chain<F>(
-    inbound: String,
-    outbound: F,
+    inbound: String, outbound: F,
 ) -> (
     SocketAddr,
     InstanceHandle,

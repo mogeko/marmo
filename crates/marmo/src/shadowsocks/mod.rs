@@ -78,10 +78,7 @@ where
 {
     /// Sends a client request for `target` and returns the wrapped stream.
     pub(crate) async fn connect(
-        mut inner: S,
-        method: Method,
-        key: Arc<Key>,
-        target: &Endpoint,
+        mut inner: S, method: Method, key: Arc<Key>, target: &Endpoint,
     ) -> io::Result<Self> {
         let salt_len = method.salt_len();
         let salt = random_bytes::<32>()?;
@@ -131,9 +128,7 @@ where
 
     /// Reads the client request header, returning the requested target.
     pub(crate) async fn accept(
-        mut inner: S,
-        method: Method,
-        key: Arc<Key>,
+        mut inner: S, method: Method, key: Arc<Key>,
     ) -> io::Result<(Self, Endpoint)> {
         let salt_len = method.salt_len();
         let mut header = vec![0_u8; salt_len + FIXED_HEADER + TAG_LENGTH];
@@ -414,9 +409,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        buf: &mut ReadBuf<'_>,
+        self: Pin<&mut Self>, cx: &mut TaskContext<'_>, buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let me = self.get_mut();
         if buf.remaining() == 0 {
@@ -443,9 +436,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        buf: &[u8],
+        self: Pin<&mut Self>, cx: &mut TaskContext<'_>, buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let me = self.get_mut();
         loop {
@@ -479,8 +470,7 @@ where
 
 /// Resolves a configured method and base64 password into a key.
 pub(crate) fn credentials(
-    method: Option<&str>,
-    password: Option<&str>,
+    method: Option<&str>, password: Option<&str>,
 ) -> io::Result<(Method, Arc<Key>)> {
     let method = method.and_then(Method::parse).ok_or_else(|| {
         io::Error::new(

@@ -121,11 +121,7 @@ pub fn derive_subkey(method: Method, psk: &[u8], salt: &[u8]) -> [u8; 32] {
 
 /// Encrypts `plaintext` and appends the tag to `out`.
 pub fn seal(
-    method: Method,
-    key: &[u8],
-    nonce: [u8; NONCE_LENGTH],
-    plaintext: &[u8],
-    out: &mut [u8],
+    method: Method, key: &[u8], nonce: [u8; NONCE_LENGTH], plaintext: &[u8], out: &mut [u8],
 ) -> Result<usize, SsError> {
     if key.len() < method.key_len() {
         return Err(SsError::InvalidKey);
@@ -160,11 +156,7 @@ pub fn seal(
 
 /// Decrypts `ciphertext` into `out`, verifying the tag.
 pub fn open(
-    method: Method,
-    key: &[u8],
-    nonce: [u8; NONCE_LENGTH],
-    ciphertext: &[u8],
-    out: &mut [u8],
+    method: Method, key: &[u8], nonce: [u8; NONCE_LENGTH], ciphertext: &[u8], out: &mut [u8],
 ) -> Result<usize, SsError> {
     if key.len() < method.key_len() {
         return Err(SsError::InvalidKey);
@@ -365,10 +357,7 @@ pub struct UdpDecoded<'a> {
 
 /// Encodes one UDP packet.
 pub fn encode_udp_packet(
-    method: Method,
-    psk: &[u8],
-    packet: &UdpPacket<'_>,
-    out: &mut [u8],
+    method: Method, psk: &[u8], packet: &UdpPacket<'_>, out: &mut [u8],
 ) -> Result<usize, SsError> {
     if psk.len() < method.key_len() {
         return Err(SsError::InvalidKey);
@@ -424,12 +413,8 @@ pub fn encode_udp_packet(
 
 /// Decodes one UDP packet into `plaintext`.
 pub fn decode_udp_packet<'a>(
-    method: Method,
-    psk: &[u8],
-    packet: &[u8],
-    expected_direction: Direction,
-    expected_client_session: Option<[u8; 8]>,
-    plaintext: &'a mut [u8],
+    method: Method, psk: &[u8], packet: &[u8], expected_direction: Direction,
+    expected_client_session: Option<[u8; 8]>, plaintext: &'a mut [u8],
 ) -> Result<UdpDecoded<'a>, SsError> {
     if psk.len() < method.key_len() {
         return Err(SsError::InvalidKey);
@@ -612,10 +597,7 @@ pub struct ClientRequestFixed {
 /// `bytes` must hold `salt_len + 11 + TAG_LENGTH` bytes; the caller reads the
 /// variable header next using [`decode_client_variable`].
 pub fn decode_client_fixed(
-    method: Method,
-    psk: &[u8],
-    bytes: &[u8],
-    now: u64,
+    method: Method, psk: &[u8], bytes: &[u8], now: u64,
 ) -> Result<ClientRequestFixed, SsError> {
     let salt_len = method.salt_len();
     if psk.len() < method.key_len() || bytes.len() < salt_len + 11 + TAG_LENGTH {
@@ -667,10 +649,7 @@ pub fn decode_client_fixed(
 /// `bytes` must hold `fixed.variable_len + TAG_LENGTH` bytes, and `plaintext`
 /// must have room for `fixed.variable_len` bytes.
 pub fn decode_client_variable<'a>(
-    method: Method,
-    fixed: &ClientRequestFixed,
-    bytes: &[u8],
-    plaintext: &'a mut [u8],
+    method: Method, fixed: &ClientRequestFixed, bytes: &[u8], plaintext: &'a mut [u8],
 ) -> Result<(Endpoint, &'a [u8]), SsError> {
     let variable_len = fixed.variable_len;
     if bytes.len() < variable_len + TAG_LENGTH || plaintext.len() < variable_len {
@@ -724,14 +703,8 @@ pub struct ClientRequest<'a> {
 /// Encodes a TCP client request (salt, fixed header, variable header).
 #[allow(clippy::too_many_arguments)]
 pub fn encode_client_request(
-    method: Method,
-    psk: &[u8],
-    salt: &[u8],
-    target: &Endpoint,
-    timestamp: u64,
-    padding: &[u8],
-    initial_payload: &[u8],
-    out: &mut [u8],
+    method: Method, psk: &[u8], salt: &[u8], target: &Endpoint, timestamp: u64, padding: &[u8],
+    initial_payload: &[u8], out: &mut [u8],
 ) -> Result<usize, SsError> {
     if salt.len() != method.salt_len() || psk.len() < method.key_len() {
         return Err(SsError::InvalidKey);
@@ -785,11 +758,7 @@ pub fn encode_client_request(
 
 /// Decodes and authenticates a TCP client request.
 pub fn decode_client_request<'a>(
-    method: Method,
-    psk: &[u8],
-    bytes: &[u8],
-    plaintext: &'a mut [u8],
-    now: u64,
+    method: Method, psk: &[u8], bytes: &[u8], plaintext: &'a mut [u8], now: u64,
 ) -> Result<ClientRequest<'a>, SsError> {
     let fixed = decode_client_fixed(method, psk, bytes, now)?;
     let variable_start = usize::from(fixed.salt_len) + 11 + TAG_LENGTH;
@@ -827,11 +796,7 @@ pub struct ServerResponseFixed {
 /// `bytes` must hold `salt_len + 11 + request_salt.len() + TAG_LENGTH` bytes;
 /// the caller reads the first payload next using [`decode_server_variable`].
 pub fn decode_server_fixed(
-    method: Method,
-    psk: &[u8],
-    request_salt: &[u8],
-    bytes: &[u8],
-    now: u64,
+    method: Method, psk: &[u8], request_salt: &[u8], bytes: &[u8], now: u64,
 ) -> Result<ServerResponseFixed, SsError> {
     let salt_len = method.salt_len();
     let fixed_len = 11 + salt_len;
@@ -891,10 +856,7 @@ pub fn decode_server_fixed(
 /// `bytes` must hold `fixed.first_len + TAG_LENGTH` bytes, and `plaintext`
 /// must have room for `fixed.first_len` bytes.
 pub fn decode_server_variable<'a>(
-    method: Method,
-    fixed: &ServerResponseFixed,
-    bytes: &[u8],
-    plaintext: &'a mut [u8],
+    method: Method, fixed: &ServerResponseFixed, bytes: &[u8], plaintext: &'a mut [u8],
 ) -> Result<&'a [u8], SsError> {
     let first_len = fixed.first_len;
     if bytes.len() < first_len + TAG_LENGTH || plaintext.len() < first_len {
@@ -930,13 +892,8 @@ pub struct ServerResponse<'a> {
 
 /// Encodes a TCP server response (salt, fixed header, first payload).
 pub fn encode_server_response(
-    method: Method,
-    psk: &[u8],
-    request_salt: &[u8],
-    salt: &[u8],
-    timestamp: u64,
-    first_payload: &[u8],
-    out: &mut [u8],
+    method: Method, psk: &[u8], request_salt: &[u8], salt: &[u8], timestamp: u64,
+    first_payload: &[u8], out: &mut [u8],
 ) -> Result<usize, SsError> {
     if salt.len() != method.salt_len()
         || request_salt.len() != method.salt_len()
@@ -980,11 +937,7 @@ pub fn encode_server_response(
 
 /// Decodes and authenticates a TCP server response.
 pub fn decode_server_response<'a>(
-    method: Method,
-    psk: &[u8],
-    request_salt: &[u8],
-    bytes: &[u8],
-    plaintext: &'a mut [u8],
+    method: Method, psk: &[u8], request_salt: &[u8], bytes: &[u8], plaintext: &'a mut [u8],
     now: u64,
 ) -> Result<ServerResponse<'a>, SsError> {
     let fixed = decode_server_fixed(method, psk, request_salt, bytes, now)?;
@@ -1007,11 +960,7 @@ pub fn decode_server_response<'a>(
 
 /// Encodes one TCP length/payload chunk.
 pub fn seal_chunk(
-    method: Method,
-    key: &[u8],
-    counter: &mut u64,
-    payload: &[u8],
-    out: &mut [u8],
+    method: Method, key: &[u8], counter: &mut u64, payload: &[u8], out: &mut [u8],
 ) -> Result<usize, SsError> {
     let length = u16::try_from(payload.len()).map_err(|_| SsError::NoSpace)?;
     if length == 0 {
@@ -1041,11 +990,7 @@ pub fn seal_chunk(
 
 /// Decodes one TCP length/payload chunk into `plaintext`.
 pub fn open_chunk(
-    method: Method,
-    key: &[u8],
-    counter: &mut u64,
-    bytes: &[u8],
-    plaintext: &mut [u8],
+    method: Method, key: &[u8], counter: &mut u64, bytes: &[u8], plaintext: &mut [u8],
 ) -> Result<(usize, usize), SsError> {
     if bytes.len() < 2 + TAG_LENGTH {
         return Err(SsError::MalformedPacket);
