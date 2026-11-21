@@ -21,11 +21,12 @@ repository ships the library only: no CLI, daemon, or `app` layer.
 
 ## Repo state
 
-- The Rust target lives in `crates/` (R2: workspace and CI, config and
-  validation, routing, limits, SOCKS5 CONNECT + UDP ASSOCIATE, HTTP CONNECT
-  and forwarding, HTTP CONNECT outbound, SS2022 primitives, UDP packet codec,
-  and TCP stream). It is unreleased; `master` stays Zig-only until the parity
-  integration merge.
+- The Rust target lives in `crates/`. R2 and R3 are complete; R4 now covers
+  the ADR-0017 `Outbound`/`Layer` boundaries, selector strategies and TCP
+  health probes, connection/byte/timeout/health metrics, schema version 2
+  with inline PEM credentials (ADR-0023), and the correctness fixes for
+  absolute handshake deadlines and shared idle deadlines. It is unreleased;
+  `master` stays Zig-only until the parity integration merge.
 - Phase 1 MVP is implemented. Phase 2 has started with outbound selectors:
   manual, round-robin, random, fallback, and least-latency, plus active TCP
   health probes, VLESS outbound and inbound over TCP/TLS/WebSocket/HTTP/2

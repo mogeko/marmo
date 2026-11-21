@@ -133,6 +133,7 @@ async fn prepare(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn connect_relay(
     mut stream: BoxStream,
     context: &Context,
@@ -163,6 +164,7 @@ async fn connect_relay(
     relay_streams(stream, remote, context, token).await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_udp(
     mut stream: BoxStream,
     context: Arc<Context>,

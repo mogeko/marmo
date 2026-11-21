@@ -66,6 +66,7 @@ impl Instance {
     pub fn handle(&self) -> InstanceHandle {
         InstanceHandle {
             token: self.supervisor.token(),
+            metrics: Arc::clone(&self.metrics),
         }
     }
 
@@ -523,6 +524,24 @@ impl InstanceBuilder {
     }
 }
 
+/// Aborts selector health tasks when serving ends or the future is dropped.
+#[derive(Default)]
+struct HealthTasks(Vec<tokio::task::JoinHandle<()>>);
+
+impl HealthTasks {
+    fn abort_all(&mut self) {
+        for task in self.0.drain(..) {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for HealthTasks {
+    fn drop(&mut self) {
+        self.abort_all();
+    }
+}
+
 /// A bound instance: listeners are open, no accept loop has started.
 pub struct BoundInstance {
     runtime: Handle,
@@ -562,7 +581,14 @@ impl BoundInstance {
     pub fn handle(&self) -> InstanceHandle {
         InstanceHandle {
             token: self.supervisor.token(),
+            metrics: Arc::clone(&self.metrics),
         }
+    }
+
+    /// Returns a point-in-time copy of the instance counters.
+    #[must_use]
+    pub fn metrics(&self) -> MetricsSnapshot {
+        self.metrics.snapshot()
     }
 
     /// Accepts until the handle shuts down or a listener fails.
@@ -580,10 +606,10 @@ impl BoundInstance {
             limits,
         });
         let token = supervisor.token();
-        let mut health = Vec::new();
+        let mut health = HealthTasks::default();
         for outbound in &context.outbounds {
             if let Some(task) = outbound.start_health(&context.runtime, &token) {
-                health.push(task);
+                health.0.push(task);
             }
         }
 
@@ -615,9 +641,7 @@ impl BoundInstance {
         }
 
         supervisor.cancel();
-        for task in health {
-            task.abort();
-        }
+        health.abort_all();
         let grace = limits.shutdown_grace;
         let drain = async { while tasks.join_next().await.is_some() {} };
         if timeout(grace, drain).await.is_err() {
@@ -652,6 +676,7 @@ impl BoundInstance {
 #[derive(Clone)]
 pub struct InstanceHandle {
     token: CancellationToken,
+    metrics: Arc<Metrics>,
 }
 
 impl InstanceHandle {
@@ -664,6 +689,12 @@ impl InstanceHandle {
     #[must_use]
     pub fn is_shutdown(&self) -> bool {
         self.token.is_cancelled()
+    }
+
+    /// Returns a point-in-time copy of the instance counters.
+    #[must_use]
+    pub fn metrics(&self) -> MetricsSnapshot {
+        self.metrics.snapshot()
     }
 }
 

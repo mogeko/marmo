@@ -254,7 +254,7 @@ fn build_without_a_runtime_fails() {
 }
 
 #[tokio::test]
-async fn rejects_unsupported_outbounds() {
+async fn builds_selector_outbounds() {
     let config = Config::from_json(
         r#"{
           "outbounds": [
@@ -265,8 +265,51 @@ async fn rejects_unsupported_outbounds() {
         }"#,
     )
     .expect("config");
-    assert!(matches!(
-        Instance::builder(config).build(),
-        Err(BuildError::UnsupportedOutbound { .. })
-    ));
+    assert!(Instance::builder(config).build().is_ok());
+}
+
+#[tokio::test]
+async fn selector_falls_back_after_a_dead_node() {
+    let (echo, echo_task) = echo_server().await;
+    let dead = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+    let dead_address = dead.local_addr().expect("addr");
+    let dead_task = tokio::spawn(async move {
+        let _ = dead.accept().await;
+    });
+    let json = format!(
+        r#"{{
+          "limits": {{ "handshake_timeout_s": 2 }},
+          "inbounds": [
+            {{ "tag": "socks", "protocol": "socks5", "listen": "127.0.0.1:0" }}
+          ],
+          "outbounds": [
+            {{ "tag": "dead", "protocol": "http", "server": "127.0.0.1:{}" }},
+            {{ "tag": "direct", "protocol": "direct" }},
+            {{ "tag": "group", "protocol": "selector",
+               "nodes": ["dead", "direct"], "strategy": "fallback" }}
+          ],
+          "route": {{ "final": "group" }}
+        }}"#,
+        dead_address.port()
+    );
+    let (address, handle, serve) = start(&json).await;
+
+    let mut client = TcpStream::connect(address).await.expect("connect");
+    assert_eq!(socks5_connect(&mut client, echo).await, 0);
+    client.write_all(b"fallback").await.expect("write");
+    let mut buffer = [0_u8; 8];
+    client.read_exact(&mut buffer).await.expect("read");
+    assert_eq!(&buffer, b"fallback");
+
+    drop(client);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let metrics = handle.clone();
+    stop(handle, serve).await;
+    let snapshot = metrics.metrics();
+    assert!(snapshot.connections_accepted >= 1);
+    assert_eq!(snapshot.connections_rejected, 0);
+    assert!(snapshot.bytes_client_to_remote >= 8);
+    assert!(snapshot.bytes_remote_to_client >= 8);
+    dead_task.abort();
+    echo_task.abort();
 }

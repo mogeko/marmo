@@ -42,12 +42,6 @@ impl Deadline {
             }
         }
     }
-
-    /// Returns true once the deadline has passed.
-    #[cfg(test)]
-    pub(crate) fn expired(&self) -> bool {
-        Instant::now() >= self.at
-    }
 }
 
 /// Waits for `limit` without activity, or forever when the limit is disabled.

@@ -159,6 +159,7 @@ async fn prepare(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn connect_relay(
     stream: BoxStream,
     context: &Context,
@@ -294,6 +295,7 @@ async fn reply_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn fallback_relay(
     stream: BoxStream,
     prefix: Vec<u8>,

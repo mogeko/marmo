@@ -193,7 +193,7 @@ nothing.
 | Crate | Published | Contents |
 | --- | --- | --- |
 | `marmo` | yes | public facade, `Instance`, config, routing, inbounds, outbounds, metrics |
-| `marmo-proto` | yes | SOCKS5, HTTP/1, SS2022, Trojan, VLESS, XUDP codecs; no I/O, no tokio |
+| `marmo-proto` | yes | SOCKS5, SS2022, Trojan, VLESS, XUDP codecs; no I/O, no tokio |
 | `marmo-net` | yes | `Endpoint`, CIDR, socket options, resolver interface |
 | `marmo-transport` | yes | stream/datagram traits, TLS/WS/H2/QUIC adapters, relay |
 | `marmo-testkit` | no | fake streams, fixture loader, loopback helpers |
@@ -201,6 +201,8 @@ nothing.
 Five crates. `inbound`, `outbound`, `routing`, and `config` stay inside
 `marmo` because `Instance` wires all of them and splitting would only add
 re-export churn. All crates version together at `0.x` until the API is stable.
+The minimal HTTP/1 inbound still parses in `marmo`; moving that parser into
+`marmo-proto` is follow-up work so it can share the fuzz harness.
 
 ### 8.2 Streams and datagrams
 
