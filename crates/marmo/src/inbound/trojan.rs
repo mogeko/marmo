@@ -1,28 +1,34 @@
 //! Trojan inbound: TLS termination, authentication probe, CONNECT, fallback.
 //!
 //! Traffic that does not start with the configured authentication line is
-//! replayed to the optional fallback service (ADR-0011). UDP ASSOCIATE is not
-//! wired yet.
+//! replayed to the optional fallback service (ADR-0011). UDP ASSOCIATE frames
+//! are routed per datagram with one sticky outbound per association.
 
 use std::io;
 use std::sync::Arc;
 
 use marmo_net::{Endpoint, Network};
 use marmo_proto::trojan::{
-    AUTH_PREFIX_LEN, AuthState, COMMAND_CONNECT, PasswordHash, REQUEST_HEADER_MAX, RequestProgress,
-    auth_state, request_progress,
+    AUTH_PREFIX_LEN, AuthState, COMMAND_CONNECT, COMMAND_UDP_ASSOCIATE, MAX_UDP_PAYLOAD,
+    PasswordHash, REQUEST_HEADER_MAX, RequestProgress, auth_state, request_progress,
 };
 use marmo_transport::tls::TlsServer;
 use marmo_transport::{BoxStream, RelayOptions, relay};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 use crate::instance::Context;
 use crate::outbound::trojan::tls_error;
-use crate::routing::Metadata;
+use crate::outbound::udp::UdpOutbound;
+use crate::routing::{Action, Metadata};
+use crate::trojan::{FrameReader, write_frame};
+
+/// Bounded queue between the frame reader and the outbound reply task.
+const UDP_QUEUE: usize = 16;
 
 /// Handles one accepted Trojan connection.
 pub(crate) async fn handle(
@@ -55,12 +61,15 @@ pub(crate) async fn handle(
             command,
             target,
             leftover,
-        } => {
-            if command != COMMAND_CONNECT {
-                return;
+        } => match command {
+            COMMAND_CONNECT => {
+                connect_relay(stream, &context, &inbound, source, target, leftover, token).await;
             }
-            connect_relay(stream, &context, &inbound, source, target, leftover, token).await;
-        }
+            COMMAND_UDP_ASSOCIATE => {
+                handle_udp(stream, context, inbound, source, leftover, token).await;
+            }
+            _ => {}
+        },
     }
 }
 
@@ -168,6 +177,99 @@ async fn connect_relay(
         return;
     }
     relay_streams(stream, remote, context, token).await;
+}
+
+async fn handle_udp(
+    stream: BoxStream,
+    context: Arc<Context>,
+    inbound: Arc<str>,
+    source: Endpoint,
+    leftover: Vec<u8>,
+    token: CancellationToken,
+) {
+    let ipv4 = source.ip().is_none_or(|ip| ip.is_ipv4());
+    let (mut reader, writer) = tokio::io::split(stream);
+    let Ok(mut frames) = FrameReader::new(&leftover) else {
+        return;
+    };
+    let (sender, receiver) = mpsc::channel(UDP_QUEUE);
+    let reply = tokio::spawn(reply_loop(
+        writer,
+        receiver,
+        Arc::clone(&context),
+        ipv4,
+        token.clone(),
+    ));
+
+    loop {
+        let next = tokio::select! {
+            _ = token.cancelled() => break,
+            result = frames.next(&mut reader) => result,
+        };
+        let Ok(Some((destination, payload))) = next else {
+            break;
+        };
+        if payload.is_empty() {
+            continue;
+        }
+        let Some(action) = route(&context, &inbound, source.clone(), &destination) else {
+            continue;
+        };
+        if sender.send((action, destination, payload)).await.is_err() {
+            break;
+        }
+    }
+    drop(sender);
+    let _ = reply.await;
+}
+
+async fn reply_loop(
+    mut writer: WriteHalf<BoxStream>,
+    mut receiver: mpsc::Receiver<(Action, Endpoint, Vec<u8>)>,
+    context: Arc<Context>,
+    ipv4: bool,
+    token: CancellationToken,
+) {
+    let mut outbound: Option<(Action, UdpOutbound)> = None;
+    let mut buffer = vec![0_u8; MAX_UDP_PAYLOAD];
+    loop {
+        tokio::select! {
+            _ = token.cancelled() => break,
+            message = receiver.recv() => {
+                let Some((action, target, payload)) = message else {
+                    break;
+                };
+                if outbound
+                    .as_ref()
+                    .is_some_and(|(current, _)| *current != action)
+                {
+                    continue;
+                }
+                if outbound.is_none() {
+                    match context.udp_outbound(action, ipv4, &target).await {
+                        Ok(Some(connection)) => outbound = Some((action, connection)),
+                        _ => continue,
+                    }
+                }
+                if let Some((_, connection)) = outbound.as_mut() {
+                    let _ = connection.send_to(&target, &payload).await;
+                }
+            }
+            received = async {
+                match outbound.as_mut() {
+                    Some((_, connection)) => connection.recv_from(&mut buffer).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let Ok((length, source)) = received else {
+                    continue;
+                };
+                if write_frame(&mut writer, &source, &buffer[..length]).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
 }
 
 async fn fallback_relay(

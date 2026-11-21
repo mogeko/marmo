@@ -356,7 +356,7 @@ async fn udp_associate(
                     if upstream.is_some() {
                         continue;
                     }
-                    match context.udp_outbound(action, ipv4).await {
+                    match context.udp_outbound(action, ipv4, &destination).await {
                         Ok(Some(connection)) => {
                             upstream = Some(connection);
                             upstream_action = Some(action);

@@ -566,10 +566,14 @@ impl Context {
     }
 
     /// Opens a datagram path for `action`, or `None` when it has no UDP.
+    ///
+    /// `target` seeds protocols whose association header carries a
+    /// destination, such as Trojan UDP ASSOCIATE.
     pub(crate) async fn udp_outbound(
         &self,
         action: Action,
         ipv4: bool,
+        target: &Endpoint,
     ) -> io::Result<Option<UdpOutbound>> {
         match action {
             Action::Direct => Ok(Some(UdpOutbound::direct(ipv4).await?)),
@@ -582,7 +586,14 @@ impl Context {
                 }) => Ok(Some(UdpOutbound::Shadowsocks(
                     SsUdpClient::connect(server, *method, Arc::clone(key)).await?,
                 ))),
-                Some(OutboundKind::Http { .. } | OutboundKind::Trojan { .. }) => Ok(None),
+                Some(OutboundKind::Trojan {
+                    server,
+                    password,
+                    tls,
+                }) => Ok(Some(UdpOutbound::Trojan(
+                    outbound::trojan::connect_udp(server, tls, password, target).await?,
+                ))),
+                Some(OutboundKind::Http { .. }) => Ok(None),
                 None => Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "outbound id is out of range",

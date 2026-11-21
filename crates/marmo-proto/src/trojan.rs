@@ -257,6 +257,63 @@ pub fn decode_udp_header(bytes: &[u8]) -> Result<(Endpoint, usize, usize), Troja
     Ok((endpoint, usize::from(length), offset + 4))
 }
 
+/// Progress of a UDP frame header.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UdpFrameProgress {
+    /// More bytes are needed.
+    NeedMore,
+    /// The frame cannot become valid.
+    Invalid,
+    /// The header is complete; `header_len + payload_len` bytes form the frame.
+    Complete {
+        /// Source or destination address.
+        source: Endpoint,
+        /// Length of the payload after the header.
+        payload_len: usize,
+        /// Length of the header before the payload.
+        header_len: usize,
+    },
+}
+
+/// Evaluates the bytes read so far as `ATYP ADDR PORT LEN CRLF`.
+#[must_use]
+pub fn udp_frame_progress(bytes: &[u8]) -> UdpFrameProgress {
+    if bytes.is_empty() {
+        return UdpFrameProgress::NeedMore;
+    }
+    let address_len = match bytes[0] {
+        ATYP_IPV4 => 1 + 4 + 2,
+        ATYP_IPV6 => 1 + 16 + 2,
+        ATYP_DOMAIN => {
+            if bytes.len() < 2 {
+                return UdpFrameProgress::NeedMore;
+            }
+            let length = usize::from(bytes[1]);
+            if length == 0 {
+                return UdpFrameProgress::Invalid;
+            }
+            2 + length + 2
+        }
+        _ => return UdpFrameProgress::Invalid,
+    };
+    let header_len = address_len + 4;
+    if bytes.len() < header_len {
+        return UdpFrameProgress::NeedMore;
+    }
+    let Ok((source, offset)) = decode_address(bytes, 0) else {
+        return UdpFrameProgress::Invalid;
+    };
+    if offset != address_len || bytes[offset + 2..offset + 4] != CRLF {
+        return UdpFrameProgress::Invalid;
+    }
+    let payload_len = usize::from(u16::from_be_bytes([bytes[offset], bytes[offset + 1]]));
+    UdpFrameProgress::Complete {
+        source,
+        payload_len,
+        header_len,
+    }
+}
+
 /// Encodes an `ATYP` address.
 pub fn encode_address(endpoint: &Endpoint, out: &mut [u8]) -> Result<usize, TrojanError> {
     match endpoint.ip() {
@@ -504,5 +561,45 @@ mod tests {
             encode_udp_header(&target, MAX_UDP_PAYLOAD + 1, &mut buffer),
             Err(TrojanError::MessageTooBig)
         ));
+    }
+    #[test]
+    fn reports_udp_frame_progress() {
+        let target = endpoint(53);
+        let mut buffer = [0_u8; UDP_HEADER_MAX];
+        let header = encode_udp_header(&target, 7, &mut buffer).expect("encode");
+        for split in 0..header {
+            assert_eq!(
+                udp_frame_progress(&buffer[..split]),
+                UdpFrameProgress::NeedMore,
+                "split {split}"
+            );
+        }
+        assert_eq!(
+            udp_frame_progress(&buffer[..header]),
+            UdpFrameProgress::Complete {
+                source: target,
+                payload_len: 7,
+                header_len: header,
+            }
+        );
+
+        let mut bad_crlf = buffer;
+        bad_crlf[header - 1] = b'x';
+        assert_eq!(
+            udp_frame_progress(&bad_crlf[..header]),
+            UdpFrameProgress::Invalid
+        );
+
+        let mut bad_atyp = buffer;
+        bad_atyp[0] = 9;
+        assert_eq!(
+            udp_frame_progress(&bad_atyp[..header]),
+            UdpFrameProgress::Invalid
+        );
+
+        let mut zero_domain = [0_u8; 4];
+        zero_domain[0] = ATYP_DOMAIN;
+        zero_domain[1] = 0;
+        assert_eq!(udp_frame_progress(&zero_domain), UdpFrameProgress::Invalid);
     }
 }
