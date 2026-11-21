@@ -9,6 +9,9 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+bytes.workspace = true
+h2.workspace = true
+http.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
 rustls-platform-verifier.workspace = true

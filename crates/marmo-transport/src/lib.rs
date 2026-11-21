@@ -5,12 +5,14 @@
 //! adapters; it does not implement TLS, HTTP/2, or WebSocket.
 #![deny(unsafe_code)]
 
+pub mod h2;
 mod relay;
 pub mod tls;
 pub mod ws;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
+pub use h2::{H2Client, H2ClientOptions, H2Error, H2Server, H2ServerOptions};
 pub use relay::{RELAY_BUFFER_SIZE, RelayError, RelayOptions, RelayStats, relay};
 pub use tls::{
     AcceptedTls, ClientAuth, TlsClient, TlsClientOptions, TlsError, TlsServer, TlsServerOptions,
