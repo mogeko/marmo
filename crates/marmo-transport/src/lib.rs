@@ -7,6 +7,7 @@
 
 mod relay;
 pub mod tls;
+pub mod ws;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -14,6 +15,7 @@ pub use relay::{RELAY_BUFFER_SIZE, RelayError, RelayOptions, RelayStats, relay};
 pub use tls::{
     AcceptedTls, ClientAuth, TlsClient, TlsClientOptions, TlsError, TlsServer, TlsServerOptions,
 };
+pub use ws::{WsClient, WsClientOptions, WsConnection, WsError, WsServer, WsServerOptions};
 
 /// Duplex, ordered bytes with half-close support.
 ///
