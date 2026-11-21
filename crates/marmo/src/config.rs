@@ -19,7 +19,7 @@ pub const MAX_CONFIG_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    /// Schema version; only `1` is defined today.
+    /// Schema version; only `2` is defined today.
     pub version: u8,
     /// Global connection and timeout policy.
     pub limits: Limits,
@@ -68,7 +68,7 @@ impl Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: 2,
             limits: Limits::default(),
             inbounds: Vec::new(),
             outbounds: Vec::new(),
@@ -203,14 +203,14 @@ pub enum StreamNetwork {
 #[derive(Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct InboundTls {
-    /// PEM or DER certificate chain, leaf first.
+    /// Inline PEM certificate chain, leaf first (ADR-0023).
     pub certificate: String,
-    /// PEM or DER ECDSA/Ed25519 private key.
+    /// Inline PEM ECDSA/Ed25519 private key (ADR-0023).
     pub private_key: String,
     /// ALPN protocols in server preference order.
     #[serde(default)]
     pub alpn: Option<Vec<String>>,
-    /// PEM or DER client-certificate trust anchors.
+    /// Inline PEM client-certificate trust anchors (ADR-0023).
     #[serde(default)]
     pub client_ca: Option<String>,
     /// Whether a client certificate is requested and verified.
@@ -304,9 +304,9 @@ pub struct Tls {
     pub alpn: Option<Vec<String>>,
     /// Require the server to select this protocol.
     pub required_alpn: Option<String>,
-    /// PEM or DER client certificate chain.
+    /// Inline PEM client certificate chain (ADR-0023).
     pub client_certificate: Option<String>,
-    /// PEM or DER client private key.
+    /// Inline PEM client private key (ADR-0023).
     pub client_private_key: Option<String>,
     /// Treat a missing `close_notify` as EOF.
     pub allow_truncation_attacks: bool,
@@ -459,7 +459,7 @@ mod tests {
 
     const FULL: &str = r#"
     {
-      "version": 1,
+      "version": 2,
       "limits": {
         "max_connections": 16,
         "handshake_timeout_s": 3,
@@ -474,10 +474,10 @@ mod tests {
           "listen": "127.0.0.1:443",
           "uuid": "00000000-0000-0000-0000-000000000001",
           "tls": {
-            "certificate": "cert.pem",
-            "private_key": "key.pem",
+            "certificate": "-----BEGIN CERTIFICATE----- x -----END CERTIFICATE-----",
+            "private_key": "-----BEGIN PRIVATE KEY----- x -----END PRIVATE KEY-----",
             "alpn": ["h2", "http/1.1"],
-            "client_ca": "ca.pem",
+            "client_ca": "-----BEGIN CERTIFICATE----- x -----END CERTIFICATE-----",
             "client_auth": "required"
           },
           "transport": {
@@ -516,7 +516,7 @@ mod tests {
     #[test]
     fn parses_defaults() {
         let config = Config::from_json("{}").expect("parse");
-        assert_eq!(config.version, 1);
+        assert_eq!(config.version, 2);
         assert_eq!(config.limits, Limits::default());
         assert!(config.inbounds.is_empty());
         assert!(config.outbounds.is_empty());
@@ -577,7 +577,7 @@ mod tests {
 
     #[test]
     fn rejects_duplicate_fields() {
-        let error = Config::from_json(r#"{"version":1,"version":2}"#).expect_err("duplicate");
+        let error = Config::from_json(r#"{"version":2,"version":2}"#).expect_err("duplicate");
         assert!(matches!(error, ConfigError::Json { .. }));
     }
 
@@ -618,7 +618,7 @@ mod tests {
     #[test]
     fn from_str_matches_from_json() {
         let config: Config = "{}".parse().expect("parse");
-        assert_eq!(config.version, 1);
+        assert_eq!(config.version, 2);
     }
 
     #[test]
