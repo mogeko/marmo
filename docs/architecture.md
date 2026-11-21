@@ -1,16 +1,8 @@
 # Architecture
 
-Status: **Target architecture (Rust).** This document replaces the Zig
-architecture archived at
-[`docs/archive/architecture-zig.md`](archive/architecture-zig.md). ADR-0017,
-ADR-0018, ADR-0019, and ADR-0020 were accepted on 2026-11-21.
-
-This document is in final review (G1). The Zig tree is frozen: no new
-features, no refactors, and no Rust implementation until G1. `AGENTS.md` and
-`README.md` still describe the Zig tree and are reconciled at cutover.
-
-Rationale, line counts, and the ecosystem survey are in
-[`docs/rust-migration.md`](rust-migration.md).
+Status: **Current Rust architecture.** Accepted decisions are ADR-0017 through
+ADR-0023. The library is the only implementation in this repository; there is
+no CLI, daemon, GUI, or application layer.
 
 ## 1. Purpose
 
@@ -63,9 +55,9 @@ handling, and configuration storage.
   implicitly. Codecs and policy code are runtime-free, but the I/O layer is
   not runtime-agnostic. See ADR-0017 for the cost of the alternative.
 - **Dependencies**: crates.io dependencies are allowed, including a C
-  toolchain for the crypto provider. The in-tree TLS/HTTP2/WebSocket packages
-  are deleted. See ADR-0018.
-- **License**: MIT OR Apache-2.0, pending ADR-0020. Protocol work remains
+  toolchain for the crypto provider. TLS, HTTP/2, and WebSocket are upstream
+  crates. See ADR-0018.
+- **License**: MIT OR Apache-2.0 (ADR-0020). Protocol work remains
   clean-room: implement from specifications, never port GPL/AGPL/MPL code, and
   keep fixture provenance.
 - **Platforms**: Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows
@@ -76,12 +68,12 @@ handling, and configuration storage.
 - **No global state**: no global allocator, logger, runtime, or process signal
   handler in the library.
 
-### 4.1 Parity freeze
+### 4.1 Scope
 
-The migration ports only what the Zig tree implements today. Everything else
-waits for the post-parity roadmap (§19.3, R5):
+The current release covers the implemented protocol and transport set.
+Everything else is post-1.0 work (§19):
 
-| In parity | Out of parity (R5 or later) |
+| Current | Future |
 | --- | --- |
 | SOCKS5 CONNECT + UDP ASSOCIATE inbound | VMess |
 | HTTP CONNECT + forward inbound | QUIC, TUIC, Hysteria2 |
@@ -125,7 +117,7 @@ Rules:
 - **No filesystem I/O in the library.** TLS credentials arrive as inline PEM
   in the configuration and are parsed during `bind()`; the embedder reads
   files or fetches secrets (ADR-0023).
-- **Config is immutable per instance in parity.** Reload is post-parity: it
+- **Config is immutable per instance.** Reload is post-1.0: it
   builds a new `CompiledConfig` and publishes it through `ArcSwap`, so the data
   plane never locks.
 
@@ -137,7 +129,7 @@ flavors; no design decision may assume a work-stealing scheduler.
 | Layer | Crate | Responsibility | Must not know about |
 | --- | --- | --- | --- |
 | core | `marmo` | limits, errors, metrics, config, logging | protocols, sockets |
-| net | `marmo-net` | addresses, endpoints, socket options, resolver policy | proxy protocols |
+| net | `marmo-net` | addresses, endpoints, network | proxy protocols |
 | transport | `marmo-transport` | stream/datagram adapters: TLS, WebSocket, HTTP/2, QUIC, relay | routing, config |
 | protocol | `marmo-proto` | wire codecs (header encode/decode, auth, per-connection state) | routing, config, listeners |
 | inbound | `marmo` | accept loops, protocol handshakes, connection metadata | outbound selection |
@@ -166,7 +158,7 @@ nothing.
   +-----+-----+     +-----+------+                    +------+-----+
         |                 |                                  |
         |           +-----v------+                           |
-        |           |    dns     | (R5)                      |
+        |           |    dns     | (post-1.0)                      |
         |           |  resolver  |                           |
         |           +-----+------+                           |
         |                 |                                  |
@@ -194,8 +186,8 @@ nothing.
 | --- | --- | --- |
 | `marmo` | yes | public facade, `Instance`, config, routing, inbounds, outbounds, metrics |
 | `marmo-proto` | yes | HTTP/1, SOCKS5, SS2022, Trojan, VLESS, XUDP codecs; no I/O, no tokio |
-| `marmo-net` | yes | `Endpoint`, CIDR, socket options, resolver interface |
-| `marmo-transport` | yes | stream/datagram traits, TLS/WS/H2/QUIC adapters, relay |
+| `marmo-net` | yes | `Endpoint`, CIDR, `Network` |
+| `marmo-transport` | yes | stream traits, TLS/WS/H2 layers, relay |
 | `marmo-testkit` | no | fake streams, fixture loader, loopback helpers |
 
 Five crates. `inbound`, `outbound`, `routing`, and `config` stay inside
@@ -333,8 +325,8 @@ small copy type. Rules are immutable after construction and live behind an
 
 ### 8.7 Resolver and sniffer
 
-The sniffer is post-parity. The resolver interface (TTL cache, DoH/DoT
-policy) is post-parity too; parity dials through the system resolver
+The sniffer is post-1.0. The resolver interface (TTL cache, DoH/DoT
+policy) is post-1.0 too; current dials through the system resolver
 (`tokio::net::lookup_host`). The sniffer peeks at the first bytes of a stream
 and returns a domain (TLS SNI, HTTP `Host`, HTTP/2 `:authority`) plus a
 protocol. Sniffed bytes are buffered and replayed to the relay so no data is
@@ -380,9 +372,9 @@ half-close deadlines are per-connection timers, not a shared scan.
 3. A per-session task holds a session permit, a bounded `mpsc` queue, and an
    idle deadline. Replies go back to the client on the original path.
 4. Sessions expire on idle timeout or when the table is full (oldest idle
-   first). In parity the table capacity is fixed at initialization per inbound
-   (128 for the Shadowsocks UDP listener, matching the Zig tree); a
-   configurable `max_udp_sessions` is post-parity. UDP caps stay separate from
+   first). In current the table capacity is fixed at initialization per inbound
+   (128 for the Shadowsocks UDP listener, matching the initial implementation); a
+   configurable `max_udp_sessions` is post-1.0. UDP caps stay separate from
    `max_connections`, as in ADR-0015.
 
 Datagrams above `max_datagram_size` are rejected with a counter, never
@@ -415,7 +407,7 @@ VLESS simple UoT binds one destination).
   proxy side until the outbound needs an IP.
 - The resolver is used for outbound dials that need an IP and for rules that
   need one. `direct` uses the system resolver by default; DoH/DoT and a cache
-  arrive in R5.
+  arrive in post-1.0.
 - Sniffing is opt-in and never replaces an inbound-provided domain.
 - Fake-IP is out of scope until a TUN inbound exists.
 
@@ -424,7 +416,7 @@ VLESS simple UoT binds one destination).
 Rules are an ordered list; the first match wins; the last rule is an explicit
 default. Each rule has an action and one or more matchers (AND within a rule).
 
-Matchers in the parity set:
+Matchers in the current set:
 
 | Matcher | Notes |
 | --- | --- |
@@ -434,7 +426,7 @@ Matchers in the parity set:
 | `port` | destination port |
 | `network` | `tcp` / `udp` |
 
-Post-parity matchers: `domain_keyword`, `port_range`, `inbound`,
+Post-current matchers: `domain_keyword`, `port_range`, `inbound`,
 `domain_set`/`geoip` (compiled rule sets), `process_name`/`process_path`, and
 `protocol` (sniffed). Compiled rule sets use a versioned binary format read
 memory-mapped at startup; no network access at runtime. Data licensing is
@@ -454,35 +446,34 @@ later. Failure returns "unknown" and never fails the connection.
 | `least_latency` | EWMA latency, lowest wins; ties by order |
 
 Selection state is `AtomicU64`/`AtomicU32` per node; node-set replacement, when
-reload lands post-parity, uses `ArcSwap` and never appears on the connect path. Health checks
+reload lands post-1.0, uses `ArcSwap` and never appears on the connect path. Health checks
 are opt-in per group: `tcp_connect` to a host:port with interval and timeout,
 driven by a task owned by the instance's `JoinSet`. Results feed an EWMA
 (`alpha = 0.2`) and a failure counter. `http_head`, jitter, and exponential
-backoff are post-parity. No traffic is generated unless configured.
+backoff are post-1.0. No traffic is generated unless configured.
 
 ## 12. Protocol support matrix
 
-`Parity` means the feature exists in the Zig tree and must exist in the Rust
-tree before cutover. `R5` means the protocol/feature is out of the migration
-scope.
+`Supported` means the feature is implemented and covered by the current test
+and interop suite. `Future` means it is not part of the current release.
 
 | Protocol | Transport | TCP | UDP | Inbound | Outbound | Scope |
 | --- | --- | --- | --- | --- | --- | --- |
-| Direct | any | yes | yes | — | yes | parity |
-| SOCKS5 | TCP (+UDP ASSOCIATE) | yes | yes | yes | no | parity |
-| HTTP proxy | TCP | yes | no | yes | yes | parity |
-| Shadowsocks 2022 | TCP/UDP | yes | yes | yes | yes | parity |
-| Trojan | TLS | yes | yes | yes | yes | parity |
-| VLESS | TCP/TLS/WS/H2 | yes | yes | yes | yes | parity |
-| VMess | TCP/TLS/WS/H2/gRPC | — | — | — | — | later |
-| TUIC | QUIC | — | — | — | — | R5 |
-| Hysteria2 | QUIC + TLS | — | — | — | — | R5 |
+| Direct | any | yes | yes | — | yes | supported |
+| SOCKS5 | TCP (+UDP ASSOCIATE) | yes | yes | yes | no | supported |
+| HTTP proxy | TCP | yes | no | yes | yes | supported |
+| Shadowsocks 2022 | TCP/UDP | yes | yes | yes | yes | supported |
+| Trojan | TLS | yes | yes | yes | yes | supported |
+| VLESS | TCP/TLS/WS/H2 | yes | yes | yes | yes | supported |
+| VMess | TCP/TLS/WS/H2/gRPC | — | — | — | — | future |
+| TUIC | QUIC | — | — | — | — | future |
+| Hysteria2 | QUIC + TLS | — | — | — | — | future |
 
-VLESS parity covers TCP, simple UoT, and XUDP over TCP, TLS, WebSocket, and
-HTTP/2, with the strict `transport` object of ADR-0016. `Instance` serves one
-VLESS stream per HTTP/2 connection in parity; root-level multiplexing/pooling
-is R5. gRPC is R5 and is built on `h2`/`tonic`. VMess is deferred: legacy CFB
-is not planned, and it is not scheduled in R5.
+VLESS supports TCP, simple UoT, and XUDP over TCP, TLS, WebSocket, and HTTP/2,
+with the strict `transport` object of ADR-0016. `Instance` serves one VLESS
+stream per HTTP/2 connection; root-level multiplexing/pooling is future work.
+gRPC is future work built on `h2`/`tonic`. VMess is deferred: legacy CFB is not
+planned.
 
 ## 13. Dependencies and transports
 
@@ -494,23 +485,22 @@ is not planned, and it is not scheduled in R5.
 | HTTP/2 | `h2` | framing, HPACK, flow control, 1xx, trailers |
 | WebSocket | `ws-net` | RFC 6455, permessage-deflate, subprotocols |
 | HTTP/1.1 | `httparse` (+ `hyper` only if needed) | the inbound is minimal; no general server |
-| QUIC (R5) | `quinn` | streams, datagrams, custom congestion control |
-| DNS (R5) | `hickory-resolver` | system, DoH, DoT, cache |
+| QUIC (post-1.0) | `quinn` | streams, datagrams, custom congestion control |
+| DNS (post-1.0) | `hickory-resolver` | system, DoH, DoT, cache |
 | Config | `serde`, `serde_json`, `serde_path_to_error` | strict parsing, path-aware errors |
 | Errors | `thiserror` | typed errors; `anyhow` only in examples/tests |
 | Secrets | `secrecy`, `zeroize` | no secret in `Debug` or logs |
 | Buffers | `bytes` | zero-copy header parsing |
-| Reload (R5) | `arc-swap` | lock-free config swap |
+| Reload (post-1.0) | `arc-swap` | lock-free config swap |
 | Sockets | `socket2` | keepalive, buffer sizes, `SO_REUSEADDR` |
 | IP/CIDR | `ipnet` | compiled ranges |
-| Domain sets (R5) | `aho-corasick` | keyword/suffix sets |
-| Process info (R5) | `sysinfo` | best-effort, opt-in |
+| Domain sets (post-1.0) | `aho-corasick` | keyword/suffix sets |
+| Process info (post-1.0) | `sysinfo` | best-effort, opt-in |
 
 Rules:
 
-- **No in-tree TLS, HTTP/2, or WebSocket.** They are deleted, not ported.
-  When a needed capability is missing upstream, pin a newer version; do not
-  fork a transport into this repository.
+- **No forked TLS, HTTP/2, or WebSocket.** When a needed capability is missing
+  upstream, pin a newer version; do not fork a transport into this repository.
 - **One crypto provider.** `aws-lc-rs` (the `rustls` default) is pinned; it
   requires a C toolchain and assembly. `ring` is not a second supported
   backend. ADR-0018 records the accepted build prerequisite.
@@ -688,11 +678,11 @@ are the runtime-chosen traits, and `tower` compatibility is not promised.
 
 - Config is strict JSON (`"version": 2`): unknown fields rejected, duplicate
   keys rejected, defaults documented. TLS credentials are inline PEM in the
-  configuration (ADR-0023), so a Zig v1 document with file paths is rejected
-  explicitly rather than parsed as DER.
+  configuration (ADR-0023), so a version 1 document with file paths is
+  rejected explicitly rather than parsed as DER.
 - Global `limits` (`max_connections`, `handshake_timeout_s`,
   `idle_timeout_s`, `uplink_only_s`, `downlink_only_s`) are validated in
-  `build()`. UDP session caps remain per-inbound fixed bounds in parity.
+  `build()`. UDP session caps remain per-inbound fixed bounds.
 - The library performs no filesystem I/O for credentials: `build()` and
   `bind()` never read files, and `spawn_blocking` is not needed on this path.
 - Secrets use `SecretString`/`zeroize`; `Debug` redacts passwords, UUIDs, and
@@ -705,30 +695,27 @@ are the runtime-chosen traits, and `tower` compatibility is not promised.
 There is no CLI, daemon, or `app` layer. `Instance` is the only composition
 root.
 
-## 15. Repository layout (target)
+## 15. Repository layout
 
-```
+```text
 Cargo.toml                 workspace + MSRV
 crates/
   marmo/                   facade: Instance, config, routing, inbound, outbound
+    tests/                 loopback integration tests
+    examples/              runnable examples
   marmo-proto/             codecs, no I/O
-  marmo-net/               endpoints, CIDR, sockets, resolver policy
-  marmo-transport/         stream/datagram traits, adapters, relay
+  marmo-net/               endpoints, CIDR, network
+  marmo-transport/         stream traits, Layer adapters, relay
   marmo-testkit/           test-only helpers
-tests/                     workspace-level integration tests
-examples/                  standalone examples (ss2022, trojan, vless)
+fuzz/                      cargo-fuzz crate and corpus
 docs/
   architecture.md          this file
-  archive/                 the Zig-era architecture
   decisions/               ADR index and records
   protocols/               protocol notes and sources
   security/                threat model, audit findings
-  rust-migration.md        feasibility study and migration log
 ```
 
-The Zig tree (`src/`, `packages/`, `build.zig*`, `tests/*.zig`, `examples/*/`)
-is removed in one commit after cutover (§19). Module boundaries inside `marmo`
-are enforced by review, not by the compiler.
+Module boundaries inside `marmo` are enforced by review, not by the compiler.
 
 ## 16. Testing strategy
 
@@ -739,14 +726,13 @@ are enforced by review, not by the compiler.
   `tokio::time::pause()` makes timeout and half-close tests deterministic.
 - Integration tests bind loopback port 0 and exercise real sockets through
   tokio. No live third-party servers in CI.
-- Protocol tests use the existing synthetic fixtures under
-  `tests/fixtures/<protocol>/`; provenance stays in
-  `tests/fixtures/README.md`.
+- Protocol tests use synthetic vectors and the fuzz corpus in `fuzz/corpus/`;
+  no fixture is a capture of real traffic.
 - `proptest` covers parsers and config validation; `cargo-fuzz` covers every
   decoder and the framing glue we own (nightly only). Malformed input returns
   a typed error, never panics.
-- Interop runs against self-hosted `shadowsocks-rust` and `sing-box` binaries
-  in CI. No GPL code is linked, ported, or distributed.
+- Interop runs against self-hosted reference binaries outside CI. No GPL code
+  is linked, ported, or distributed.
 - CI matrix: Linux x86_64, macOS arm64, Windows x86_64; `cargo fmt --check`,
   `clippy -D warnings`, `cargo test`, `cargo audit`, and the copyleft check.
 - Benchmarks (`criterion`) and `miri`/`loom` runs are opt-in and never part of
@@ -764,9 +750,8 @@ are enforced by review, not by the compiler.
 
 ## 18. Security
 
-- The threat model, audit findings, and residual risks move to the Rust tree;
-  [`docs/security/audit.md`](security/audit.md) is updated at cutover. Findings
-  that applied to in-tree TLS/H2/WS are closed by deletion, not by porting.
+- The threat model, audit findings, obligations, and residual risks are in
+  [`docs/security/audit.md`](security/audit.md).
 - Untrusted bytes never panic, recurse, or allocate unboundedly. Decoders are
   fuzzed; length fields are bounded before allocation.
 - Secrets are zeroized and compared in constant time; `unsafe` is
@@ -778,102 +763,43 @@ are enforced by review, not by the compiler.
 - Cancellation safety is a security property: a dropped protocol state machine
   must not leave a half-authenticated session reachable.
 
-## 19. Migration and roadmap
+## 19. Roadmap
 
-### 19.1 Gates
+The implementation is complete for the current release. Planned post-1.0 work:
 
-- **G0 — decisions (done 2026-11-21).** ADR-0017..ADR-0020 accepted.
-- **G1 — plan (done 2026-11-21).** This document and the roadmap approved; the
-  parity matrix is frozen. R0 has started on `rusty`.
-- **G2 — parity.** Every parity row green: unit, integration, fixture, interop,
-  fuzz.
-- **G3 — cutover.** Zig tree deleted after a `zig-final` tag.
-
-### 19.2 Repository strategy
-
-One repository, two trees: `crates/` beside `src/`. The Zig tree stays
-buildable and frozen (security fixes and fixture additions only) until G3, so
-Rust integration tests can run differentially against it and rollback is a
-branch revert. A long-lived branch, a separate repository, and a C-ABI
-strangler are rejected: they fork the fixtures/docs or require two runtimes
-across an FFI boundary.
-
-### 19.3 Phases
-
-| Phase | Work | Exit | Days |
-| --- | --- | --- | --- |
-| R0 | workspace, toolchain, CI (3 OS), copyleft/audit gates, fixtures, testkit | empty facade builds everywhere; license gate enforced | 2 |
-| S | spikes: rustls ALPN/mTLS, quinn custom CC, relay throughput vs Zig | written findings, no merge | 2-3 |
-| R1 | net, Instance, cancellation, limits, relay, direct, TCP skeleton | loopback relay + deadline + limit tests | 3 |
-| R2 | serde config, routing, SOCKS5, HTTP, HTTP CONNECT, SS2022 | config snapshots, SS2022 interop, UDP caps | 5 |
-| R3 | rustls, Trojan, VLESS TCP/UoT/XUDP, WS/H2 composition | protocol matrix green, interop, fuzz parity | 6 |
-| R4 | fuzz 24h, proptest, benches, examples, docs, cutover | G2 and G3 | 5 |
-| R5 | QUIC/TUIC/Hysteria2, DoH, gRPC, rule sets, H2 pooling | post-parity roadmap | 14-23 |
-
-Parity total: ~25 engineer-days (range 18-35), where an engineer-day is six
-productive hours. If the runtime-agnostic alternative in ADR-0017 is chosen,
-add 4-6 days and a second runtime test matrix.
-
-R0 and R1 are complete. R1 delivered the address layer, relay, admission
-control, cancellation, direct connect, and the internal TCP engine with
-loopback tests. The public `Instance` lifecycle is wired in R2 together with
-the serde config, so R1 does not expose a public facade yet.
-
-### 19.4 Parity matrix
-
-One row per capability (config field, protocol, transport, matcher, limit,
-metric) with columns: Zig behavior, Rust test, interop, fuzz. Cutover requires
-every row green and no `todo!()`/`unimplemented!()` on a reachable path. The
-working copy lives in `docs/rust-migration.md` and is frozen at G1.
+| Item | Enabled by |
+| --- | --- |
+| QUIC, TUIC, Hysteria2 | `quinn` |
+| DNS cache and DoH/DoT | `hickory-resolver` |
+| gRPC transport | `h2`/`tonic` |
+| Rule sets, GEOIP/GEOSITE, process rules | `aho-corasick`, `sysinfo` |
+| HTTP/2 root multiplexing and pooling | `h2` |
+| `http_head` health checks, jitter, backoff | `tokio::time` |
 
 ## 20. Risks and open questions
 
 | Risk | Mitigation |
 | --- | --- |
-| Cancellation-safety bugs in protocol state machines | cancel-safety column in the parity matrix; drop-mid-await tests; `select!` review |
-| Protocol regressions while porting | unchanged byte fixtures; differential interop; fuzz before cutover |
+| Cancellation-safety bugs in protocol state machines | drop-mid-await tests; `select!` review |
 | Dependency supply chain | pinned lockfile, `--locked`, copyleft check, `cargo-audit`, review new build scripts |
 | C toolchain friction on Windows/macOS | one pinned provider, CI images documented; a platform that cannot build `aws-lc-rs` needs a new ADR, not a silent backend switch |
 | License-change consent | both copyright holders must agree; ADR-0020 records the decision |
-| Throughput regression vs Zig | S3 spike plus criterion benches before deleting the Zig tree |
 | Tokio lock-in | accepted in ADR-0017; codecs and policy remain runtime-free |
-| Scope creep during migration | parity freeze in §4.1; new features wait for R5 |
 | Ecosystem churn in `rustls`/`quinn`/`h2` | adapters isolate versions; pin minor ranges |
+| External audit | not yet commissioned; required before a production-readiness claim |
 
-Open questions, deferred by decision:
+Open questions:
 
-- Whether a second runtime is required by an actual embedder (revisit
-  ADR-0017 only with a named embedder and a budget).
+- Whether a second runtime is required by an actual embedder (revisit ADR-0017
+  only with a named embedder and a budget).
 - Whether to publish crates individually or only `marmo` at 1.0.
-- Whether Hysteria2's Brutal controller fits `quinn`'s controller trait (S2).
+- Whether Hysteria2's Brutal controller fits `quinn`'s controller trait.
 
 ## 21. Decision index
 
-### Zig era (ended 2026-11-21)
-
-ADR-0001..0016 remain the record of the Zig implementation. They are not
-edited; the conflicting ones are marked superseded in the index.
-
-| ADR | Topic | Status |
-| --- | --- | --- |
-| [0001](decisions/0001-io-runtime.md) | I/O and concurrency runtime | Superseded by ADR-0017 |
-| [0002](decisions/0002-scope-and-phasing.md) | Scope and delivery phases | Carried over, re-baselined in §4.1 |
-| [0003](decisions/0003-core-abstractions.md) | Core interfaces and dispatch | Superseded by ADR-0017 |
-| [0004](decisions/0004-transport-composition.md) | Transport composition | Carried over; in-tree clause superseded by ADR-0018 |
-| [0005](decisions/0005-routing-engine.md) | Routing engine | Carried over |
-| [0006](decisions/0006-outbound-selection.md) | Outbound selection | Carried over |
-| [0007](decisions/0007-tls-quic-dependencies.md) | TLS, QUIC, crypto dependencies | Superseded by ADR-0018 |
-| [0008](decisions/0008-api-and-config.md) | Public API, config, errors | Carried over, re-expressed in Rust |
-| [0009](decisions/0009-licensing-and-interop.md) | Licensing and interop hygiene | License superseded by ADR-0020; clean-room carried over |
-| [0010](decisions/0010-tls-module-package.md) | TLS module package | Superseded by ADR-0019 |
-| [0011](decisions/0011-trojan-inbound-fallback.md) | Trojan inbound fallback | Carried over |
-| [0012](decisions/0012-tls-alpn.md) | TLS ALPN | Carried over (rustls) |
-| [0013](decisions/0013-http2-package.md) | HTTP/2 package | Superseded by ADR-0019 |
-| [0014](decisions/0014-websocket-package.md) | WebSocket package | Superseded by ADR-0019 |
-| [0015](decisions/0015-connection-limits-and-timeouts.md) | Limits and timeouts | Carried over; reaper replaced by permits |
-| [0016](decisions/0016-protocol-transport-wiring.md) | Transport wiring | Carried over |
-
-### Rust era (accepted 2026-11-21)
+Current decisions are ADR-0017 through ADR-0023. Historical decisions from the
+initial implementation are ADR-0001 through ADR-0016 and remain in
+[`docs/decisions/`](decisions/README.md); their bodies are unchanged.
 
 | ADR | Topic | Status |
 | --- | --- | --- |
@@ -881,3 +807,6 @@ edited; the conflicting ones are marked superseded in the index.
 | [0018](decisions/0018-dependencies-and-crypto.md) | Dependencies and crypto backend | Accepted |
 | [0019](decisions/0019-workspace-and-packaging.md) | Workspace layout and packaging | Accepted |
 | [0020](decisions/0020-license.md) | License change | Accepted |
+| [0021](decisions/0021-websocket-backend.md) | WebSocket backend and permessage-deflate | Accepted |
+| [0022](decisions/0022-vless-http2-method.md) | VLESS HTTP/2 transport method | Accepted |
+| [0023](decisions/0023-tls-credentials-inline.md) | TLS credentials as inline configuration | Accepted |

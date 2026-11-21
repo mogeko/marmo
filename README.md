@@ -1,83 +1,88 @@
 # marmo
 
-A TCP/UDP proxy library written in Zig: L4/L7 inbounds, multiple proxy
-protocols, rule-based routing, and latency-aware node selection.
+An embeddable Rust library for TCP/UDP proxying: L4/L7 inbounds, multiple
+proxy protocols, rule-based routing, and latency-aware outbound selection.
 
-**Version:** 0.0.2 (Not production-ready; API is unstable and may change without notice.)
+**Version:** 0.0.2 (unreleased; API may change between minor versions.)
 
-**Status:** Phase 1 MVP implemented; Phase 2 has started with outbound selectors
-(manual, round-robin, random, fallback, least-latency), active TCP health
-probes, VLESS outbound and inbound over TCP/TLS/WebSocket/HTTP/2 (TCP/UDP,
-simple UoT and XUDP), Trojan inbound and outbound over TLS (TCP/UDP, optional
-routed fallback), and a TLS 1.3 server. Includes strict JSON config, direct TCP/UDP and HTTP
-CONNECT outbounds, SOCKS5 inbound (CONNECT + UDP ASSOCIATE), HTTP CONNECT and
-forward proxying, Shadowsocks 2022 TCP/UDP (AES-128/256-GCM),
-domain/IP-CIDR/port routing, relay, metrics, TLS ALPN, HTTP/2 and WebSocket
-transport packages, and global connection limits/timeouts (ADR-0015).
+## Features
 
-> **Migration in progress (2026-11-21).** G1 passed: the Rust target is
-> accepted (ADR-0017..ADR-0023). R2 and R3 are complete and R4 hardening is in
-> progress on `rusty` (interfaces, selectors/health, metrics, schema v2). The
-> Zig tree is frozen and remains the 0.0.2 implementation; `master` stays
-> Zig-only until the parity integration merge.
-> See [docs/architecture.md](docs/architecture.md) for the target design and
-> [docs/rust-migration.md](docs/rust-migration.md) for the roadmap.
-
-**Transport status:** plaintext TCP, TCP/TLS, TLS+WebSocket, and TLS+HTTP/2 are
-wired in for VLESS; the in-tree TLS 1.3 client/server is shared. TLS, HTTP/2,
-and WebSocket live in independent packages (ADR-0010, ADR-0013, ADR-0014). TLS supports X25519/P-256 ECDHE,
-AES-128-GCM/AES-256-GCM/ChaCha20-Poly1305, ALPN, mTLS, KeyUpdate, and
-ECDSA/Ed25519/RSA server certificates. The
-HTTP/2 transport multiplexes up to 16 streams per connection and exposes
-1xx/trailers for gRPC-style callers; WebSocket implements RFC 6455 with
-permessage-deflate and subprotocol negotiation. VLESS selects its L7 transport
-with `transport.network` (ADR-0016); `Instance` currently serves one VLESS
-stream per HTTP/2 connection. QUIC and gRPC are not implemented (ADR-0007).
-
-- [Architecture](docs/architecture.md)
-- [Architecture decisions](docs/decisions/)
-- [Packages](packages/)
-- [Examples](examples/)
-- [Changelog](CHANGELOG.md)
-- [Agent instructions and Zig style](AGENTS.md)
+- Inbounds: SOCKS5 (CONNECT and UDP ASSOCIATE), HTTP CONNECT and forward
+  proxying, Shadowsocks 2022, Trojan, and VLESS.
+- Outbounds: direct, HTTP CONNECT, Shadowsocks 2022, Trojan, VLESS, and
+  selectors with manual, round-robin, random, fallback, and least-latency
+  strategies.
+- Transports: TCP, TLS 1.3 (`rustls`), WebSocket (`ws-net`), and HTTP/2 (`h2`).
+  VLESS supports TCP, simple UoT, and XUDP over TLS, WebSocket, and HTTP/2.
+- Routing: exact and suffix domains, IP CIDR, destination port, and network.
+- Limits: global connection cap plus handshake, idle, and half-close timeouts.
+- Metrics: connection, byte, timeout, UDP-session, and health-probe counters
+  with an optional `MetricsSink`.
+- Strict JSON configuration, schema version 2. TLS credentials are inline PEM.
 
 ## Workspace
 
-The repository is in migration. The Zig tree (`src/`, `packages/`, `examples/`)
-is frozen and remains the 0.0.2 implementation. The Rust target lives in
-`crates/` and is not released until the parity cutover.
+| Crate | Purpose |
+| --- | --- |
+| `marmo` | Public facade: `Instance`, config, routing, inbounds, outbounds, metrics |
+| `marmo-proto` | HTTP/1, SOCKS5, SS2022, Trojan, VLESS, and XUDP codecs; no I/O |
+| `marmo-net` | `Endpoint`, CIDR, and `Network` |
+| `marmo-transport` | Stream traits, TLS/WS/H2 layers, and the relay |
+| `marmo-testkit` | Test-only helpers |
 
-Zig (frozen):
+## Example
 
-```sh
-zig build test       # root and package tests
-zig build check      # formatting check plus tests
-zig build examples   # build every example
+```rust
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = marmo::Config::from_json(r#"{
+      "inbounds": [
+        { "tag": "socks", "protocol": "socks5", "listen": "127.0.0.1:1080" }
+      ],
+      "outbounds": [
+        { "tag": "direct", "protocol": "direct" }
+      ],
+      "route": { "final": "direct" }
+    }"#)?;
+
+    let instance = marmo::Instance::builder(config)
+        .shutdown_grace(Duration::from_secs(10))
+        .build()?;
+
+    instance.serve().await?;
+    Ok(())
+}
 ```
 
-Rust:
+Runnable examples live in [`crates/marmo/examples/`](crates/marmo/examples/):
 
 ```sh
-cargo test --workspace
+cargo run -p marmo --example socks5 -- 127.0.0.1:1080
+cargo run -p marmo --example vless -- client 127.0.0.1:1080 127.0.0.1:443 UUID tcp /
+```
+
+## Development
+
+MSRV is Rust 1.87. The workspace uses edition 2024.
+
+```sh
+cargo test --workspace --locked
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo +nightly fuzz build
 ```
 
-Workspace rules are in [`packages/README.md`](packages/README.md) (Zig, frozen)
-and [`crates/README.md`](crates/README.md) (Rust).
+Protocol tests are in `crates/*/tests/`, unit tests beside the code, and fuzz
+targets in [`fuzz/`](fuzz/). CI runs Linux, macOS, and Windows, the MSRV job,
+the dependency audit, and a bounded fuzz smoke.
 
-## Design highlights
-
-- `std.Io`-based runtime; the library never owns threads or an event loop.
-- Layered: inbound → routing → outbound, over composable transports.
-- Rule-based routing on domain, IP/CIDR, GEOIP/GEOSITE, port, process, and
-  sniffed protocol.
-- Outbound groups with manual, round-robin, random, fallback, and least-latency
-  selection.
-- Phased protocol support; see the matrix in the architecture document.
+See [docs/architecture.md](docs/architecture.md) for the design and
+[docs/decisions/](docs/decisions/) for the ADR record. Workspace rules are in
+[crates/README.md](crates/README.md).
 
 ## License
 
 MIT OR Apache-2.0, at your option (ADR-0020). See [LICENSE](LICENSE),
-[LICENSE-MIT](LICENSE-MIT), and [LICENSE-APACHE](LICENSE-APACHE). Releases
-before 2026-11-21, including 0.0.2, remain LGPL-2.1.
+[LICENSE-MIT](LICENSE-MIT), and [LICENSE-APACHE](LICENSE-APACHE).

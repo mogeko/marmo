@@ -2,9 +2,8 @@
 
 Source: the Trojan protocol as documented by trojan-gfw
 (<https://trojan-gfw.github.io/trojan/protocol>, retrieved 2026-11-19), the
-SOCKS5 address format in RFC 1928, and SHA-224 in FIPS 180-4. The in-tree TLS
-1.3 server in `packages/tls13` terminates inbound TLS; outbound TLS uses
-`std.crypto.tls.Client` through the root adapter.
+SOCKS5 address format in RFC 1928, and SHA-224 in FIPS 180-4. TLS 1.3 is
+provided by `rustls` through `marmo-transport` in both directions.
 
 ## Implemented
 
@@ -13,8 +12,9 @@ SOCKS5 address format in RFC 1928, and SHA-224 in FIPS 180-4. The in-tree TLS
 - Inbound transport is mandatory TLS 1.3. Outbound configuration also requires
   a `tls` object; plaintext Trojan is not exposed by the config schema.
 - Authentication is `hex(SHA224(password)) | CRLF`: 56 lower-case hex bytes,
-  compared with `std.crypto.timing_safe.eql`. The password hash is computed at
-  `Instance.init`; the plaintext password is not stored by the protocol layer.
+  compared with constant-time equality. The password hash is computed while
+  building the instance; the plaintext password is not stored by the protocol
+  layer.
 - The request is `CMD | ATYP | DST.ADDR | DST.PORT | CRLF` using the SOCKS5
   address types: `0x01` IPv4, `0x03` domain, `0x04` IPv6. A domain is 1-255
   bytes; the port is big-endian.
@@ -102,14 +102,9 @@ that points at the same listener.
 - No plaintext Trojan inbound or outbound configuration. Tests may construct
   the outbound struct directly with a plain transport; the public config does
   not.
-- The in-tree TLS 1.3 server supports X25519, AES-128-GCM/SHA-256, and ECDSA
-  P-256 certificates only. It has no TLS 1.2, RSA certificates, ALPN, client
-  auth, session tickets, KeyUpdate, or 0-RTT. Trojan clients that require TLS
-  1.2 or ALPN cannot interoperate.
-- The authentication prefix read has no protocol-level timeout. A peer that
-  completes TLS and then stalls can hold a connection until the embedder closes
-  it. This is the same class as the open inbound timeout finding in
-  `docs/security/audit.md`.
+- TLS is TLS 1.3 only through `rustls`; ALPN and mTLS are supported. Trojan
+  clients that require TLS 1.2 cannot interoperate.
+- The authentication prefix is covered by the global handshake deadline.
 - The fallback path is routed and therefore can loop if the operator routes
   the Trojan inbound tag to a proxy outbound that points back at the same
   listener. Configuration is trusted; there is no runtime loop detector.
@@ -134,18 +129,15 @@ that points at the same listener.
   and a valid authentication followed by a malformed request closes without
   fallback.
 - Integration: SOCKS5 -> Trojan outbound over TLS -> Trojan inbound over TLS
-  -> direct TCP echo, including the in-tree TLS 1.3 server.
+  -> direct TCP echo.
 - Integration: SOCKS5 UDP ASSOCIATE -> Trojan UDP association over TLS, with
   two destinations in one association.
 - Integration: an unauthenticated HTTP probe over TLS reaches a routed
   fallback HTTP service and receives its response.
-- Fuzz: `trojan_auth`, `trojan_request`, and `trojan_udp_frame` under
-  `zig build fuzz`; deterministic corpus smoke in `zig build test`.
-- Fixtures: `tests/fixtures/trojan/auth_line.bin`,
-  `request_ipv4.bin`, and `udp_packet.bin` are synthetic, spec-derived inputs
-  (no captured traffic).
-- Standalone example: `examples/trojan/` runs a server and a SOCKS5 client,
-  with an optional fallback HTTP service for local probes.
+- Fuzz: the `trojan` target under `cargo +nightly fuzz run`; corpus seeds are
+  in `fuzz/corpus/trojan/` and are synthetic, spec-derived inputs.
+- Standalone example: `crates/marmo/examples/trojan.rs` runs a server and a
+  SOCKS5 client, with an optional fallback HTTP service for local probes.
 
 ## Interop
 
@@ -170,18 +162,11 @@ the harness are not committed and are not part of CI.
 - marmo SOCKS client -> trojan-gfw server over TLS: TCP and UDP passed.
 - Both sides used a self-signed ECDSA P-256 certificate for `localhost`.
   trojan-gfw used `verify: false` (client) and `--insecure` (marmo client).
-- Both directions set `"alpn": []`; the in-tree TLS 1.3 server does not
-  negotiate ALPN.
-- The trojan-gfw server used `cipher_tls13: TLS_AES_128_GCM_SHA256`, matching
-  the in-tree server and the std TLS client.
+- Both directions used an empty ALPN list.
+- The trojan-gfw server used `cipher_tls13: TLS_AES_128_GCM_SHA256`; the TLS
+  1.3 client negotiated a matching suite.
 - The trojan-gfw client sends UDP ASSOCIATE to `0.0.0.0:0` when talking to the
   marmo server. marmo routes the first datagram, so the association works.
-- A local check exposed a TLS client bug: a partial TLS record could be
-  reported as EOF by `packages/tls13/src/reader.zig`, which lost a
-  trojan-gfw UDP reply split across TCP reads. `readSome` now waits for a
-  complete record and has a regression test. This affects all TLS-client
-  streams, not just Trojan.
-
 No live third-party servers were used. The reference implementations are
 GPL-3.0/MPL-2.0; only their published behavior was exercised, and no code or
 binary is committed (ADR-0009).

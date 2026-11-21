@@ -193,8 +193,8 @@ Planned scope when it is taken up:
   the handshake failure is reported as a SOCKS5 failure reply.
 - Integration: client and server TLS handshakes against peers that never send
   TLS records, asserting `TimedOut` with a short test timeout.
-- Integration: TLS client -> VLESS inbound over the in-tree TLS 1.3 server ->
-  direct TCP echo, including PEM credential loading and response-header order.
+- Integration: TLS client -> VLESS inbound over `rustls` -> direct TCP echo,
+  including inline PEM credentials and response-header order.
 - Integration: SOCKS5 UDP ASSOCIATE -> VLESS UDP outbound (simple and XUDP) ->
   TLS -> VLESS UDP inbound (command `2` and XUDP command `3`) -> direct UDP
   echo.
@@ -204,9 +204,9 @@ Planned scope when it is taken up:
 - Local-only interop: the TLS adapter and VLESS-over-TLS request/response were
   checked against a Python/OpenSSL TLS echo and VLESS mock. The harness is not
   committed.
-- Fixtures: `tests/fixtures/vless/request_ipv4.bin` and
-  `tests/fixtures/vless/xudp_new.bin` are synthetic, spec-derived inputs (no
-  captured traffic).
-- Fuzz targets: `vless_request` and `xudp_frame` under `zig build fuzz`; the
-  short corpus smoke runs in `zig build test`. See `docs/security/audit.md`.
-- No reference-implementation interop has been recorded in the repository.
+- Synthetic request and XUDP inputs live in `fuzz/corpus/vless/` and
+  `fuzz/corpus/xudp/`.
+- Fuzz targets: `vless` and `xudp` under `cargo +nightly fuzz run`; the bounded
+  corpus smoke runs in the `Fuzz` workflow. See `docs/security/audit.md`.
+- Reference interop: TCP/WS/H2 and UDP/XUDP were checked locally against
+  Xray-core and V2Ray; the harness is not committed.
