@@ -47,7 +47,7 @@ ADR-0017 onward.
 | [0021](0021-websocket-backend.md) | WebSocket backend and permessage-deflate | Accepted | `ws-net` + tokio pump |
 | [0022](0022-vless-http2-method.md) | VLESS HTTP/2 transport method | Accepted | `PUT` client, no content type |
 | [0023](0023-tls-credentials-inline.md) | TLS credentials as inline configuration | Accepted | inline PEM; schema v2 |
-| [0024](0024-drop-testkit.md) | Drop the unused testkit crate | Proposed | remove `marmo-testkit`; four published crates |
+| [0024](0024-drop-testkit.md) | Drop the unused testkit crate | Accepted (2026-11-21) | four published crates |
 
 ADR-0001, 0003, 0007, 0010, 0013, and 0014 are superseded. ADR-0009 is
 superseded only in its license half; its clean-room protocol rule remains in

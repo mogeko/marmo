@@ -1,6 +1,6 @@
 # ADR-0024: Drop the unused testkit crate
 
-- Status: Proposed
+- Status: Accepted (2026-11-21)
 - Date: 2026-11-21
 - Deciders: @mogeko
 - Related: ADR-0019
@@ -85,13 +85,13 @@ Testing and observation:
 - `cargo package -p marmo-net` and `cargo package -p marmo-transport` still
   work, and the release order becomes `marmo-net` → `marmo-proto` /
   `marmo-transport` → `marmo`.
-- Every remaining `marmo-testkit` reference is removed from the current docs;
-  ADR-0019 stays as history with its fifth-crate clause marked superseded in
-  the index.
+- Every remaining `marmo-testkit` reference is removed from the current
+  operational docs; ADR-0019 stays as history with its fifth-crate clause
+  marked superseded in the index.
 
 ## Approval
 
-- [ ] Accept the recommendation: delete `marmo-testkit` and keep shared helpers
+- [x] Accept the recommendation: delete `marmo-testkit` and keep shared helpers
       in local test modules.
 - [ ] Choose an alternative: keep the crate, publish it, or merge its helper
       elsewhere.
