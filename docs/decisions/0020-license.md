@@ -91,3 +91,9 @@ The license gate no longer uses `cargo-deny`. CI runs a `cargo tree` check that
 rejects GPL/AGPL/MPL, and dependency-changing PRs record a license review. The
 dual-license choice and the allowlist (MIT, Apache-2.0, ISC, BSD, Unlicense,
 CC0, Unicode-3.0, CDLA-Permissive-2.0) are unchanged.
+
+## Amendment (2026-11-21)
+
+The root `LICENSE` pointer was removed after the cutover. The license text is
+in `LICENSE-MIT` and `LICENSE-APACHE`; the `Cargo.toml` license metadata is
+unchanged.
