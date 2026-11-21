@@ -10,6 +10,7 @@ use marmo_proto::vless::{
 };
 use marmo_proto::xudp::{STATUS_END, STATUS_KEEP, STATUS_KEEPALIVE, STATUS_NEW};
 use marmo_transport::tls::TlsServer;
+use marmo_transport::ws::WsServer;
 use marmo_transport::{BoxStream, RelayOptions, relay};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::net::TcpStream;
@@ -36,6 +37,7 @@ pub(crate) async fn handle(
     inbound: Arc<str>,
     uuid: Arc<Uuid>,
     tls: Arc<TlsServer>,
+    ws: Option<Arc<WsServer>>,
 ) {
     let token = context.supervisor.token();
     let source = client.peer_addr().ok().map(Endpoint::from);
@@ -43,7 +45,7 @@ pub(crate) async fn handle(
         _ = token.cancelled() => return,
         result = timeout(
             context.limits.handshake_timeout,
-            prepare(client, &tls, &uuid),
+            prepare(client, &tls, ws.as_deref(), &uuid),
         ) => result,
     };
     let (
@@ -85,9 +87,17 @@ enum Prepared {
     },
 }
 
-async fn prepare(client: TcpStream, tls: &TlsServer, uuid: &Uuid) -> io::Result<Prepared> {
+async fn prepare(
+    client: TcpStream,
+    tls: &TlsServer,
+    ws: Option<&WsServer>,
+    uuid: &Uuid,
+) -> io::Result<Prepared> {
     let accepted = tls.accept(Box::new(client)).await.map_err(tls_error)?;
     let mut stream = accepted.stream;
+    if let Some(ws) = ws {
+        stream = ws.accept(stream).await.map_err(io::Error::other)?.stream;
+    }
     let mut buffer = [0_u8; REQUEST_HEADER_MAX];
     let mut filled = 0;
     loop {

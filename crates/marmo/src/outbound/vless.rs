@@ -10,6 +10,7 @@ use marmo_proto::vless::{
 use marmo_proto::xudp::{STATUS_END, STATUS_KEEP, STATUS_KEEPALIVE, STATUS_NEW};
 use marmo_transport::BoxStream;
 use marmo_transport::tls::TlsClient;
+use marmo_transport::ws::WsClient;
 use tokio::io::AsyncWriteExt;
 use zeroize::Zeroize;
 
@@ -21,15 +22,11 @@ use crate::xudp::{XudpReader, write_keep, write_new};
 pub(crate) async fn connect(
     server: &Endpoint,
     tls: Option<&TlsClient>,
+    ws: Option<&WsClient>,
     uuid: &Uuid,
     target: &Endpoint,
 ) -> io::Result<(BoxStream, Option<SocketAddr>)> {
-    let inner = crate::direct::connect(server).await?;
-    let bound = inner.local_addr().ok();
-    let mut stream = match tls {
-        Some(tls) => tls.connect(Box::new(inner)).await.map_err(tls_error)?,
-        None => Box::new(inner),
-    };
+    let (mut stream, bound) = open_stream(server, tls, ws).await?;
     write_request(&mut stream, uuid, target, COMMAND_TCP).await?;
     Ok((Box::new(ClientStream::new(stream)), bound))
 }
@@ -84,14 +81,11 @@ impl VlessUdpClient {
 pub(crate) async fn connect_udp(
     server: &Endpoint,
     tls: Option<&TlsClient>,
+    ws: Option<&WsClient>,
     uuid: &Uuid,
     target: &Endpoint,
 ) -> io::Result<VlessUdpClient> {
-    let inner = crate::direct::connect(server).await?;
-    let mut stream = match tls {
-        Some(tls) => tls.connect(Box::new(inner)).await.map_err(tls_error)?,
-        None => Box::new(inner),
-    };
+    let (mut stream, _bound) = open_stream(server, tls, ws).await?;
     write_request(&mut stream, uuid, target, COMMAND_UDP).await?;
     read_response_header(&mut stream).await?;
     Ok(VlessUdpClient {
@@ -168,14 +162,11 @@ impl VlessXudpClient {
 pub(crate) async fn connect_xudp(
     server: &Endpoint,
     tls: Option<&TlsClient>,
+    ws: Option<&WsClient>,
     uuid: &Uuid,
     target: &Endpoint,
 ) -> io::Result<VlessXudpClient> {
-    let inner = crate::direct::connect(server).await?;
-    let mut stream = match tls {
-        Some(tls) => tls.connect(Box::new(inner)).await.map_err(tls_error)?,
-        None => Box::new(inner),
-    };
+    let (mut stream, _bound) = open_stream(server, tls, ws).await?;
     let mut header = [0_u8; 1 + 16 + 1 + 1];
     let length = encode_mux_request(uuid, &mut header)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
@@ -187,6 +178,23 @@ pub(crate) async fn connect_xudp(
         frames: XudpReader::new(&[])?,
         target: target.clone(),
     })
+}
+
+async fn open_stream(
+    server: &Endpoint,
+    tls: Option<&TlsClient>,
+    ws: Option<&WsClient>,
+) -> io::Result<(BoxStream, Option<SocketAddr>)> {
+    let inner = crate::direct::connect(server).await?;
+    let bound = inner.local_addr().ok();
+    let mut stream = match tls {
+        Some(tls) => tls.connect(Box::new(inner)).await.map_err(tls_error)?,
+        None => Box::new(inner),
+    };
+    if let Some(ws) = ws {
+        stream = ws.connect(stream).await.map_err(io::Error::other)?.stream;
+    }
+    Ok((stream, bound))
 }
 
 async fn write_request(

@@ -170,6 +170,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "compress-lib"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f24567b04321c39bd541177653296db8741d88cb45bd98c33ac575aa39f9f730"
+
+[[package]]
 name = "constant_time_eq"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -526,6 +532,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-rustls",
+ "ws-net",
 ]
 
 [[package]]
@@ -546,6 +553,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "mod-rand"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc1b4d8d7792dd9d5f59d9b7c45083646976950b3fb2b0b0fda0ebef71d0ec92"
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -556,6 +569,12 @@ name = "openssl-probe"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e036b411754132fd6b74e94b74e9a13c5cf606fa93d1885c35860d3060820b1"
+
+[[package]]
+name = "parse-net"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ce7087f365226e8aa51334ae75dfa17b8081741a8e646219c3d723916851726"
 
 [[package]]
 name = "pin-project-lite"
@@ -1111,6 +1130,17 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
+
+[[package]]
+name = "ws-net"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6da391ca892e7ec841a61111057d70a3b7af1354fd9e6550527ede926ea048e"
+dependencies = [
+ "compress-lib",
+ "mod-rand",
+ "parse-net",
+]
 
 [[package]]
 name = "zeroize"

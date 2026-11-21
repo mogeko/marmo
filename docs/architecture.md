@@ -174,7 +174,7 @@ nothing.
                                           |
                      +--------------------v----------------------+
                      | transport: stream | datagram | relay     |
-                     | rustls | tokio-tungstenite | h2 | quinn  |
+                     | rustls | ws-net           | h2 | quinn  |
                      +--------------------+----------------------+
                                           |
                      +--------------------v----------------------+
@@ -492,7 +492,7 @@ is not planned, and it is not scheduled in R5.
 | Cancellation, task tracking, codecs | `tokio-util` | `CancellationToken`, `TaskTracker`, `Framed` |
 | TLS 1.3 client/server, ALPN, mTLS | `rustls`, `tokio-rustls` | TLS 1.3 only; platform verifier |
 | HTTP/2 | `h2` | framing, HPACK, flow control, 1xx, trailers |
-| WebSocket | `tokio-tungstenite` | permessage-deflate, subprotocols |
+| WebSocket | `ws-net` | RFC 6455, permessage-deflate, subprotocols |
 | HTTP/1.1 | `httparse` (+ `hyper` only if needed) | the inbound is minimal; no general server |
 | QUIC (R5) | `quinn` | streams, datagrams, custom congestion control |
 | DNS (R5) | `hickory-resolver` | system, DoH, DoT, cache |

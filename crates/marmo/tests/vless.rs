@@ -163,6 +163,48 @@ fn vless_outbound(server: SocketAddr) -> String {
     )
 }
 
+fn vless_ws_inbound() -> String {
+    format!(
+        r#"{{ "tag": "vl", "protocol": "vless", "listen": "127.0.0.1:0",
+             "uuid": "{UUID}",
+             "tls": {{ "certificate": {}, "private_key": {} }},
+             "transport": {{ "network": "ws", "path": "/ws",
+                             "subprotocols": ["marmo"] }} }}"#,
+        json_string(SERVER_CERT),
+        json_string(SERVER_KEY)
+    )
+}
+
+fn vless_ws_outbound(server: SocketAddr) -> String {
+    format!(
+        r#"{{ "tag": "vl", "protocol": "vless", "server": "{server}",
+             "uuid": "{UUID}", "tls": {{ "insecure": true }},
+             "transport": {{ "network": "ws", "path": "/ws",
+                             "subprotocols": ["marmo"] }} }}"#
+    )
+}
+
+fn vless_ws_compressed_inbound() -> String {
+    format!(
+        r#"{{ "tag": "vl", "protocol": "vless", "listen": "127.0.0.1:0",
+             "uuid": "{UUID}",
+             "tls": {{ "certificate": {}, "private_key": {} }},
+             "transport": {{ "network": "ws", "path": "/ws",
+                             "subprotocols": ["marmo"], "compression": true }} }}"#,
+        json_string(SERVER_CERT),
+        json_string(SERVER_KEY)
+    )
+}
+
+fn vless_ws_compressed_outbound(server: SocketAddr) -> String {
+    format!(
+        r#"{{ "tag": "vl", "protocol": "vless", "server": "{server}",
+             "uuid": "{UUID}", "tls": {{ "insecure": true }},
+             "transport": {{ "network": "ws", "path": "/ws",
+                             "subprotocols": ["marmo"], "compression": true }} }}"#
+    )
+}
+
 fn vless_xudp_outbound(server: SocketAddr) -> String {
     format!(
         r#"{{ "tag": "vl", "protocol": "vless", "server": "{server}",
@@ -321,6 +363,126 @@ async fn relays_through_vless_xudp() {
     assert_eq!(&reply[4..8], &echo.ip().octets());
 
     drop(control);
+    stop(front_handle, front_task).await;
+    stop(proxy_handle, proxy_task).await;
+    echo_task.abort();
+}
+
+async fn ws_chain<F>(
+    inbound: String,
+    outbound: F,
+) -> (
+    SocketAddr,
+    InstanceHandle,
+    JoinHandle<Result<(), ServeError>>,
+    InstanceHandle,
+    JoinHandle<Result<(), ServeError>>,
+)
+where
+    F: FnOnce(SocketAddr) -> String,
+{
+    let proxy = format!(
+        r#"{{
+          "limits": {{ "handshake_timeout_s": 5, "idle_timeout_s": 10 }},
+          "inbounds": [ {inbound} ],
+          "outbounds": [ {{ "tag": "direct", "protocol": "direct" }} ],
+          "route": {{ "final": "direct" }}
+        }}"#
+    );
+    let (proxy_address, proxy_handle, proxy_task) = start(&proxy).await;
+    let front = format!(
+        r#"{{
+          "limits": {{ "handshake_timeout_s": 5, "idle_timeout_s": 10 }},
+          "inbounds": [
+            {{ "tag": "socks", "protocol": "socks5", "listen": "127.0.0.1:0" }}
+          ],
+          "outbounds": [ {} ],
+          "route": {{ "final": "vl" }}
+        }}"#,
+        outbound(proxy_address)
+    );
+    let (front_address, front_handle, front_task) = start(&front).await;
+    (
+        front_address,
+        front_handle,
+        front_task,
+        proxy_handle,
+        proxy_task,
+    )
+}
+
+#[tokio::test]
+async fn relays_through_vless_websocket() {
+    let (echo, echo_task) = echo_server().await;
+    let (front, front_handle, front_task, proxy_handle, proxy_task) =
+        ws_chain(vless_ws_inbound(), vless_ws_outbound).await;
+
+    let mut client = TcpStream::connect(front).await.expect("connect");
+    socks5_connect(&mut client, echo).await;
+    let payload: Vec<u8> = (0..32_000).map(|index| (index % 251) as u8).collect();
+    let (mut reader, mut writer) = client.into_split();
+    let write = writer.write_all(&payload);
+    let read = async {
+        let mut received = vec![0_u8; payload.len()];
+        reader.read_exact(&mut received).await.expect("read");
+        received
+    };
+    let (written, echoed) = tokio::join!(write, read);
+    written.expect("write");
+    assert_eq!(echoed, payload);
+
+    stop(front_handle, front_task).await;
+    stop(proxy_handle, proxy_task).await;
+    echo_task.abort();
+}
+
+#[tokio::test]
+async fn relays_vless_uot_over_websocket() {
+    let (echo, echo_task) = udp_echo().await;
+    let (front, front_handle, front_task, proxy_handle, proxy_task) =
+        ws_chain(vless_ws_inbound(), vless_ws_outbound).await;
+
+    let mut control = TcpStream::connect(front).await.expect("connect");
+    let (datagram, relay) = udp_associate(&mut control).await;
+    let payload: Vec<u8> = (0..8_000).map(|index| (index % 251) as u8).collect();
+    datagram
+        .send_to(&udp_request(echo, &payload), relay)
+        .await
+        .expect("send");
+    let mut reply = vec![0_u8; 65_535];
+    let (length, _) = timeout(Duration::from_secs(5), datagram.recv_from(&mut reply))
+        .await
+        .expect("reply timeout")
+        .expect("recv");
+    assert!(length >= 10 + payload.len());
+    assert_eq!(&reply[10..length], &payload[..]);
+
+    drop(control);
+    stop(front_handle, front_task).await;
+    stop(proxy_handle, proxy_task).await;
+    echo_task.abort();
+}
+
+#[tokio::test]
+async fn relays_vless_over_compressed_websocket() {
+    let (echo, echo_task) = echo_server().await;
+    let (front, front_handle, front_task, proxy_handle, proxy_task) =
+        ws_chain(vless_ws_compressed_inbound(), vless_ws_compressed_outbound).await;
+
+    let mut client = TcpStream::connect(front).await.expect("connect");
+    socks5_connect(&mut client, echo).await;
+    let payload = vec![b'a'; 100_000];
+    let (mut reader, mut writer) = client.into_split();
+    let write = writer.write_all(&payload);
+    let read = async {
+        let mut received = vec![0_u8; payload.len()];
+        reader.read_exact(&mut received).await.expect("read");
+        received
+    };
+    let (written, echoed) = tokio::join!(write, read);
+    written.expect("write");
+    assert_eq!(echoed, payload);
+
     stop(front_handle, front_task).await;
     stop(proxy_handle, proxy_task).await;
     echo_task.abort();

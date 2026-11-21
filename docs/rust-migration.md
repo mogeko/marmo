@@ -18,7 +18,7 @@ The case is not "Rust is nicer". It is that this repository already spends
 ecosystem ships and audits** — TLS 1.3 client/server, HTTP/2, WebSocket — and
 that the next phase needs QUIC, which is the largest and riskiest of those
 re-implementations. Rust removes that work and replaces it with `rustls`,
-`h2`, `quinn`, and `tokio-tungstenite`; the proxy-specific code that remains
+`h2`, `quinn`, and `ws-net`; the proxy-specific code that remains
 (protocols, routing, inbounds/outbounds, config) is roughly 9,000 lines and is
 the part worth owning.
 
@@ -97,7 +97,7 @@ by taking the MIT/ISC option. The two exceptions are noted below the table.
 | QUIC v1, streams, datagrams, pluggable CC | `quinn` | 0.11.12 | MIT OR Apache-2.0 | Phase 3 QUIC |
 | HTTP/2 framing, HPACK, flow control | `h2` | 0.4.20 | MIT | `packages/http2` (4,279) |
 | HTTP/1.1 client/server, CONNECT | `hyper` + `http`, or `httparse` | 1.12.0 / 1.5.0 / 1.10.1 | MIT | `src/inbound/http.zig` |
-| WebSocket, permessage-deflate | `tokio-tungstenite` | 0.30.0 | MIT | `packages/ws` (4,089) |
+| WebSocket, permessage-deflate | `ws-net` | 0.10.0 | Apache-2.0 OR MIT | `packages/ws` (4,089) |
 | gRPC (Phase 3) | `tonic` | 0.14.9 | MIT | — |
 | DNS, DoH, DoT, cache | `hickory-resolver` | 0.26.3 | MIT OR Apache-2.0 | `src/net` resolver |
 | Config, strict JSON, path errors | `serde`, `serde_json`, `serde_path_to_error` | 1.0.229 / 1.0.154 / 0.1.20 | MIT OR Apache-2.0 | `config.zig` (1,879) |
@@ -538,7 +538,7 @@ a self-hosted reference peer or fixture; `Cancel` is the dropped-future test.
 | VLESS TCP + simple UoT | `protocol/vless.zig` | loopback | reference server | decoder | yes |
 | VLESS XUDP | `protocol/xudp.zig` | vectors | reference server | decoder | yes |
 | TLS 1.3: ALPN, mTLS, suites, certs, KeyUpdate | `packages/tls13` | rustls tests + loopback | reference server | — | — |
-| WebSocket: framing, deflate, subprotocols | `packages/ws` | `tokio-tungstenite` tests | reference server | decoder | — |
+| WebSocket: framing, deflate, subprotocols | `packages/ws` | `ws-net` + loopback tests | reference server | decoder | — |
 | HTTP/2 transport: 16 streams, 1xx, trailers | `packages/http2` | `h2` tests + loopback | reference server | — | — |
 | Transport object: tcp/ws/h2, ALPN defaults | `instance.zig` | config + loopback | reference server | — | — |
 | Routing: domain, suffix, CIDR, port, network | `routing/rules.zig` | table tests | — | proptest | — |

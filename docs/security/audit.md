@@ -35,7 +35,7 @@ not implemented in this revision (VMess, QUIC, TUIC, Hysteria2).
 
 - **Closed by deletion.** The in-tree TLS 1.3, HTTP/2, and WebSocket
   implementations (15,465 lines) are replaced by `rustls`, `h2`, and
-  `tokio-tungstenite` (ADR-0018). Findings in those parsers are closed by
+  `ws-net` (ADR-0018, ADR-0021). Findings in those parsers are closed by
   deleting the code; they are not ported. The assurance argument becomes
   "upstream project plus our configuration", not "our parser".
 - **New surface.** Crates and their build scripts, the `aws-lc-rs` C/assembly

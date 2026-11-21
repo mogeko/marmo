@@ -17,6 +17,7 @@ use marmo_proto::trojan::PasswordHash;
 use marmo_proto::vless::Uuid;
 use marmo_transport::BoxStream;
 use marmo_transport::tls::{TlsClient, TlsClientOptions, TlsServer, TlsServerOptions};
+use marmo_transport::ws::{WsClient, WsClientOptions, WsServer, WsServerOptions};
 use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::runtime::Handle;
@@ -223,16 +224,23 @@ impl InstanceBuilder {
                     }
                 }
                 InboundProtocol::Vless => {
-                    if inbound
-                        .transport
-                        .as_ref()
-                        .is_some_and(|transport| transport.network != StreamNetwork::Tcp)
-                    {
-                        return Err(BuildError::InboundOption {
-                            tag: inbound.tag.clone(),
-                            reason: "ws/h2 transport is not implemented yet".into(),
-                        });
-                    }
+                    let ws = match inbound.transport.as_ref() {
+                        None => None,
+                        Some(transport) => match transport.network {
+                            StreamNetwork::Tcp => None,
+                            StreamNetwork::Ws => Some(WsServerOptions {
+                                path: transport.path.clone(),
+                                subprotocols: transport.subprotocols.clone().unwrap_or_default(),
+                                compression: transport.compression,
+                            }),
+                            StreamNetwork::H2 => {
+                                return Err(BuildError::InboundOption {
+                                    tag: inbound.tag.clone(),
+                                    reason: "h2 transport is not implemented yet".into(),
+                                });
+                            }
+                        },
+                    };
                     let Some(tls) = inbound.tls.as_ref() else {
                         return Err(BuildError::InboundOption {
                             tag: inbound.tag.clone(),
@@ -252,6 +260,7 @@ impl InstanceBuilder {
                     InboundConfig::Vless {
                         uuid: Arc::new(uuid),
                         tls: InboundTlsConfig::new(tls),
+                        ws,
                     }
                 }
             };
@@ -339,7 +348,7 @@ impl InstanceBuilder {
                             reason: "tls is required for trojan".into(),
                         });
                     };
-                    let tls = outbound_tls_config(tls, &server, &outbound.tag)?;
+                    let tls = outbound_tls_config(tls, &server, &outbound.tag, None)?;
                     OutboundConfig::Trojan {
                         server,
                         password: Arc::new(PasswordHash::derive(password)),
@@ -347,16 +356,6 @@ impl InstanceBuilder {
                     }
                 }
                 OutboundProtocol::Vless => {
-                    if outbound
-                        .transport
-                        .as_ref()
-                        .is_some_and(|transport| transport.network != StreamNetwork::Tcp)
-                    {
-                        return Err(BuildError::OutboundOption {
-                            tag: outbound.tag.clone(),
-                            reason: "ws/h2 transport is not implemented yet".into(),
-                        });
-                    }
                     let Some(server) = outbound.server.as_deref() else {
                         return Err(BuildError::OutboundEndpoint {
                             tag: outbound.tag.clone(),
@@ -378,16 +377,53 @@ impl InstanceBuilder {
                         tag: outbound.tag.clone(),
                         reason: "invalid vless uuid".into(),
                     })?;
+                    let ws = match outbound.transport.as_ref() {
+                        None => None,
+                        Some(transport) => match transport.network {
+                            StreamNetwork::Tcp => None,
+                            StreamNetwork::Ws => {
+                                let host = transport
+                                    .host
+                                    .clone()
+                                    .or_else(|| {
+                                        outbound.tls.as_ref().and_then(|tls| tls.sni.clone())
+                                    })
+                                    .or_else(|| server.domain().map(str::to_owned))
+                                    .or_else(|| server.ip().map(host_from_ip))
+                                    .ok_or_else(|| BuildError::OutboundOption {
+                                        tag: outbound.tag.clone(),
+                                        reason: "ws host is missing".into(),
+                                    })?;
+                                Some(WsClientOptions {
+                                    host,
+                                    path: transport.path.clone(),
+                                    subprotocols: transport
+                                        .subprotocols
+                                        .clone()
+                                        .unwrap_or_default(),
+                                    compression: transport.compression,
+                                })
+                            }
+                            StreamNetwork::H2 => {
+                                return Err(BuildError::OutboundOption {
+                                    tag: outbound.tag.clone(),
+                                    reason: "h2 transport is not implemented yet".into(),
+                                });
+                            }
+                        },
+                    };
+                    let default_alpn = ws.as_ref().map(|_| "http/1.1");
                     let tls = outbound
                         .tls
                         .as_ref()
-                        .map(|tls| outbound_tls_config(tls, &server, &outbound.tag))
+                        .map(|tls| outbound_tls_config(tls, &server, &outbound.tag, default_alpn))
                         .transpose()?;
                     OutboundConfig::Vless {
                         server,
                         uuid: Arc::new(uuid),
                         tls,
                         xudp: outbound.xudp,
+                        ws,
                     }
                 }
                 OutboundProtocol::Selector => {
@@ -600,10 +636,20 @@ impl Context {
                     Ok((stream, bound))
                 }
                 Some(OutboundKind::Vless {
-                    server, uuid, tls, ..
+                    server,
+                    uuid,
+                    tls,
+                    ws,
+                    ..
                 }) => {
-                    let (stream, bound) =
-                        outbound::vless::connect(server, tls.as_deref(), uuid, target).await?;
+                    let (stream, bound) = outbound::vless::connect(
+                        server,
+                        tls.as_deref(),
+                        ws.as_deref(),
+                        uuid,
+                        target,
+                    )
+                    .await?;
                     Ok((stream, bound))
                 }
                 Some(OutboundKind::Shadowsocks {
@@ -661,16 +707,29 @@ impl Context {
                     uuid,
                     tls,
                     xudp,
+                    ws,
                 }) => {
                     if *xudp {
                         Ok(Some(UdpOutbound::VlessXudp(
-                            outbound::vless::connect_xudp(server, tls.as_deref(), uuid, target)
-                                .await?,
+                            outbound::vless::connect_xudp(
+                                server,
+                                tls.as_deref(),
+                                ws.as_deref(),
+                                uuid,
+                                target,
+                            )
+                            .await?,
                         )))
                     } else {
                         Ok(Some(UdpOutbound::Vless(
-                            outbound::vless::connect_udp(server, tls.as_deref(), uuid, target)
-                                .await?,
+                            outbound::vless::connect_udp(
+                                server,
+                                tls.as_deref(),
+                                ws.as_deref(),
+                                uuid,
+                                target,
+                            )
+                            .await?,
                         )))
                     }
                 }
@@ -711,6 +770,7 @@ pub(crate) enum OutboundKind {
         uuid: Arc<Uuid>,
         tls: Option<Arc<TlsClient>>,
         xudp: bool,
+        ws: Option<Arc<WsClient>>,
     },
 }
 
@@ -730,6 +790,7 @@ enum InboundKind {
     Vless {
         uuid: Arc<Uuid>,
         tls: Arc<TlsServer>,
+        ws: Option<Arc<WsServer>>,
     },
 }
 
@@ -754,6 +815,7 @@ enum InboundConfig {
     Vless {
         uuid: Arc<Uuid>,
         tls: InboundTlsConfig,
+        ws: Option<WsServerOptions>,
     },
 }
 
@@ -792,9 +854,10 @@ impl InboundConfig {
                 tls: build_tls_server(&tls, tag)?,
                 fallback,
             },
-            Self::Vless { uuid, tls } => InboundKind::Vless {
+            Self::Vless { uuid, tls, ws } => InboundKind::Vless {
                 uuid,
                 tls: build_tls_server(&tls, tag)?,
+                ws: ws.map(|options| Arc::new(WsServer::new(options))),
             },
         })
     }
@@ -825,6 +888,7 @@ enum OutboundConfig {
         uuid: Arc<Uuid>,
         tls: Option<OutboundTlsConfig>,
         xudp: bool,
+        ws: Option<WsClientOptions>,
     },
 }
 
@@ -866,6 +930,7 @@ impl OutboundSpec {
                 uuid,
                 tls,
                 xudp,
+                ws,
             } => OutboundKind::Vless {
                 server,
                 uuid,
@@ -874,8 +939,16 @@ impl OutboundSpec {
                     .map(|tls| build_tls_client(tls, &tag))
                     .transpose()?,
                 xudp,
+                ws: ws.map(|options| Arc::new(WsClient::new(options))),
             },
         })
+    }
+}
+
+fn host_from_ip(ip: std::net::IpAddr) -> String {
+    match ip {
+        std::net::IpAddr::V4(address) => address.to_string(),
+        std::net::IpAddr::V6(address) => format!("[{address}]"),
     }
 }
 
@@ -914,6 +987,7 @@ fn outbound_tls_config(
     tls: &crate::config::Tls,
     server: &Endpoint,
     tag: &str,
+    default_alpn: Option<&str>,
 ) -> Result<OutboundTlsConfig, BuildError> {
     let server_name = tls
         .sni
@@ -924,9 +998,13 @@ fn outbound_tls_config(
             tag: tag.to_owned(),
             reason: "tls.sni is required".into(),
         })?;
+    let alpn = match tls.alpn.clone() {
+        Some(alpn) => alpn,
+        None => default_alpn.map(str::to_owned).into_iter().collect(),
+    };
     Ok(OutboundTlsConfig {
         server_name,
-        alpn: tls.alpn.clone().unwrap_or_default(),
+        alpn,
         required_alpn: tls.required_alpn.clone(),
         insecure: tls.insecure,
         client_certificate: tls.client_certificate.clone(),
@@ -1038,8 +1116,16 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                             )
                             .await;
                         }
-                        InboundKind::Vless { uuid, tls } => {
-                            inbound::vless::handle(stream, task_context, tag, uuid, tls).await;
+                        InboundKind::Vless { uuid, tls, ws } => {
+                            inbound::vless::handle(
+                                stream,
+                                task_context,
+                                tag,
+                                uuid,
+                                tls,
+                                ws,
+                            )
+                            .await;
                         }
                     }
                 }, &runtime);

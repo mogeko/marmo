@@ -40,6 +40,7 @@ tokio = { version = "1.54", default-features = false, features = [
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "logging"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 zeroize = "1.9"
+ws-net = { version = "0.10", features = ["deflate"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
