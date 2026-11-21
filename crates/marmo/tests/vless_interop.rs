@@ -283,3 +283,86 @@ fn vless_mux_interop_with_xray() {
         udp_task.abort();
     });
 }
+
+fn xray_vless_server(port: u16) -> String {
+    format!(
+        r#"{{
+  "log": {{ "loglevel": "warning" }},
+  "inbounds": [{{
+    "listen": "127.0.0.1", "port": {port}, "protocol": "vless",
+    "settings": {{ "decryption": "none", "clients": [{{ "id": "{UUID}" }}] }},
+    "streamSettings": {{ "network": "tcp", "security": "none" }}
+  }}],
+  "outbounds": [{{ "protocol": "freedom", "settings": {{ "finalRules": [
+    {{ "action": "allow", "ip": ["127.0.0.0/8"] }}
+  ] }} }}]
+}}"#
+    )
+}
+
+fn marmo_mux_outbound(server: SocketAddr) -> String {
+    format!(
+        r#"{{
+  "limits": {{ "handshake_timeout_s": 5, "idle_timeout_s": 10 }},
+  "inbounds": [{{ "tag": "socks", "protocol": "socks5", "listen": "127.0.0.1:0" }}],
+  "outbounds": [{{ "tag": "vl", "protocol": "vless", "server": "{server}",
+    "uuid": "{UUID}", "mux": true }}],
+  "route": {{ "final": "vl" }}
+}}"#
+    )
+}
+
+#[test]
+#[ignore = "requires a local xray binary"]
+fn vless_outbound_mux_interop_with_xray() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let (tcp_echo, tcp_task) = echo_tcp().await;
+        let (udp_echo, udp_task) = echo_udp().await;
+        let port = free_port();
+        let xray = start_xray(&xray_vless_server(port), port).await;
+        let server = SocketAddr::from(([127, 0, 0, 1], port));
+        let (proxy, handle, task) = start_marmo(&marmo_mux_outbound(server)).await;
+        tcp_through_socks(proxy, tcp_echo).await;
+        udp_through_socks(proxy, udp_echo).await;
+        stop_marmo(handle, task).await;
+        drop(xray);
+        tcp_task.abort();
+        udp_task.abort();
+    });
+}
+
+fn marmo_xudp_outbound(server: SocketAddr) -> String {
+    format!(
+        r#"{{
+  "limits": {{ "handshake_timeout_s": 5, "idle_timeout_s": 10 }},
+  "inbounds": [{{ "tag": "socks", "protocol": "socks5", "listen": "127.0.0.1:0" }}],
+  "outbounds": [{{ "tag": "vl", "protocol": "vless", "server": "{server}",
+    "uuid": "{UUID}", "xudp": true }}],
+  "route": {{ "final": "vl" }}
+}}"#
+    )
+}
+
+#[test]
+#[ignore = "requires a local xray binary"]
+fn vless_xudp_interop_with_xray() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let (udp_echo, udp_task) = echo_udp().await;
+        let port = free_port();
+        let xray = start_xray(&xray_vless_server(port), port).await;
+        let server = SocketAddr::from(([127, 0, 0, 1], port));
+        let (proxy, handle, task) = start_marmo(&marmo_xudp_outbound(server)).await;
+        udp_through_socks(proxy, udp_echo).await;
+        stop_marmo(handle, task).await;
+        drop(xray);
+        udp_task.abort();
+    });
+}

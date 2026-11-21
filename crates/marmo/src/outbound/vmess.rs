@@ -1,19 +1,23 @@
 //! VMess outbound: AEAD request, chunked TCP, and direct UDP.
 
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use marmo_net::Endpoint;
 use marmo_proto::vmess::{
-    COMMAND_TCP, COMMAND_UDP, ChunkDecoder, ChunkEncoder, CmdKey, REQUEST_HEADER_MAX, Request,
-    RequestProgress, RequestSecrets, RequestSpec, Security, encode_request, request_progress,
-    response_keys,
+    COMMAND_MUX, COMMAND_TCP, COMMAND_UDP, ChunkDecoder, ChunkEncoder, CmdKey, MUX_DOMAIN,
+    MUX_PORT, REQUEST_HEADER_MAX, Request, RequestProgress, RequestSecrets, RequestSpec, Security,
+    encode_request, request_progress, response_keys,
 };
 use marmo_transport::{BoxFuture, BoxStream, Layer};
 use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
+use tokio::runtime::Handle;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use zeroize::Zeroize;
 
 use crate::outbound::Connected;
+use crate::outbound::mux::{MuxDialer, MuxPool};
 use crate::vmess::{ChunkReader, ChunkStream, ChunkWriter, now_unix, random};
 
 /// A VMess outbound node.
@@ -21,12 +25,24 @@ pub(crate) struct VmessOutbound {
     pub(crate) server: Endpoint,
     pub(crate) cmd_key: Arc<CmdKey>,
     pub(crate) security: Security,
+    pub(crate) mux: bool,
     pub(crate) layers: Vec<Arc<dyn Layer>>,
+    pub(crate) pool: OnceLock<Arc<MuxPool>>,
 }
 
 impl crate::outbound::Outbound for VmessOutbound {
     fn connect<'a>(&'a self, target: &'a Endpoint) -> BoxFuture<'a, io::Result<Connected>> {
         Box::pin(async move {
+            if self.mux {
+                let Some(pool) = self.pool.get() else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotConnected,
+                        "VMess mux pool is not started",
+                    ));
+                };
+                let stream = pool.open_tcp(target).await?;
+                return Ok(Connected::with_bound(stream, None));
+            }
             let (mut stream, bound) = open_stream(&self.server, &self.layers).await?;
             let request = write_request(
                 &mut stream,
@@ -47,6 +63,18 @@ impl crate::outbound::Outbound for VmessOutbound {
         &'a self, target: &'a Endpoint, _ipv4: bool,
     ) -> BoxFuture<'a, io::Result<Option<crate::outbound::udp::UdpOutbound>>> {
         Box::pin(async move {
+            if self.mux {
+                let Some(pool) = self.pool.get() else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotConnected,
+                        "VMess mux pool is not started",
+                    ));
+                };
+                let datagram = pool.open_udp(target).await?;
+                return Ok(Some(crate::outbound::udp::UdpOutbound::Mux(Box::new(
+                    datagram,
+                ))));
+            }
             let (mut stream, _bound) = open_stream(&self.server, &self.layers).await?;
             let request = write_request(
                 &mut stream,
@@ -80,6 +108,51 @@ impl crate::outbound::Outbound for VmessOutbound {
                     target: target.clone(),
                 },
             ))))
+        })
+    }
+
+    fn start(&self, runtime: &Handle, token: &CancellationToken) -> Option<JoinHandle<()>> {
+        if !self.mux || self.pool.get().is_some() {
+            return None;
+        }
+        let dialer: Arc<dyn MuxDialer> = Arc::new(VmessDialer {
+            server: self.server.clone(),
+            cmd_key: Arc::clone(&self.cmd_key),
+            security: self.security,
+            layers: self.layers.clone(),
+        });
+        let pool = MuxPool::new(runtime.clone(), token.clone(), dialer);
+        let supervisor = pool.supervisor();
+        let _ = self.pool.set(pool);
+        Some(supervisor)
+    }
+}
+
+struct VmessDialer {
+    server: Endpoint,
+    cmd_key: Arc<CmdKey>,
+    security: Security,
+    layers: Vec<Arc<dyn Layer>>,
+}
+
+impl MuxDialer for VmessDialer {
+    fn dial(&self) -> BoxFuture<'_, io::Result<BoxStream>> {
+        Box::pin(async move {
+            let (mut stream, _) = open_stream(&self.server, &self.layers).await?;
+            let target = Endpoint::from_domain(MUX_DOMAIN, MUX_PORT)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "mux target"))?;
+            let request = write_request(
+                &mut stream,
+                &self.cmd_key,
+                &target,
+                COMMAND_MUX,
+                self.security,
+            )
+            .await?;
+            let padding =
+                random::<64>().map_err(|_| io::Error::other("random source unavailable"))?;
+            let client: BoxStream = Box::new(ChunkStream::client(stream, request, padding, &[]));
+            Ok(client)
         })
     }
 }

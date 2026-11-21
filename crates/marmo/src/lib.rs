@@ -22,7 +22,6 @@ mod trojan;
 mod validate;
 mod vless;
 mod vmess;
-mod xudp;
 
 pub use config::{Config, ConfigError};
 pub use instance::{

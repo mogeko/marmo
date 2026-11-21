@@ -14,7 +14,7 @@ resolved against a local Xray 26.11.9 peer and is marked "observed" below.
   (`0x01`), None (`0x05`), and Zero (`0x06`) are rejected with typed errors.
 - TCP (`0x01`), direct UDP (`0x02`), and Mux.Cool (`0x03`) request commands. The
   inbound terminates Mux.Cool TCP and UDP sessions; the outbound uses direct
-  UDP and does not pool Mux connections.
+  UDP by default and `mux: true` for client-side pooling (ADR-0027).
 - Transports: TCP, TLS 1.3, WebSocket, and HTTP/2 through the ADR-0016
   `transport` object. The inbound requires TLS for ws/h2; plain TCP is allowed.
 - One UUID per listener, matching the VLESS inbound. No multi-user, alterId,
@@ -192,8 +192,9 @@ on Keep; replies carry the source address.
 
 - Legacy MD5/CFB, body None/Zero, and the authenticated-length option are not
   implemented.
-- Client-side Mux.Cool pooling is not implemented; the outbound opens one
-  physical connection per stream or UDP association using direct UDP.
+- Client-side Mux.Cool pooling is opt-in with `mux: true`; the pool reuses up
+  to four physical connections and 128 sessions per connection. Without it the
+  outbound opens one physical connection per stream or UDP association.
 - One UUID per listener. No multi-user, alterId, dynamic port, or request
   addons.
 - A body direction is closed after 65,536 chunks (about 1 GiB at the maximum
@@ -231,6 +232,9 @@ on Keep; replies carry the source address.
 }
 ```
 
+Add `"mux": true` to the VMess outbound to multiplex TCP and UDP sessions over
+a bounded pool of up to four physical connections.
+
 ## Tests
 
 - Unit vectors: KDF outputs for one- and three-item paths; EAuID
@@ -242,8 +246,9 @@ on Keep; replies carry the source address.
   ChaCha20-Poly1305; direct UDP; Mux TCP and UDP sessions; replay and bad-UUID
   rejection.
 - Reference interop with Xray 26.11.9: marmo outbound to Xray over TCP and
-  WebSocket (TCP and UDP); Xray to marmo inbound over TCP (TCP and UDP), with
-  mux disabled and enabled. The mux-enabled client exercised XUDP session `0`.
+  WebSocket (TCP and UDP), with and without `mux: true`; Xray to marmo inbound
+  over TCP (TCP and UDP), with mux disabled and enabled. The mux-enabled client
+  exercised XUDP session `0`.
 - Synthetic request, chunk, response, and Mux corpus files live in
   `fuzz/corpus/vmess/`; the `vmess` target runs under `cargo +nightly fuzz
   run`.

@@ -35,7 +35,8 @@ uses `rustls` for both TLS roles, `ws-net` for WebSocket, and `h2` for HTTP/2
     verification is enabled;
   - inbound `tls.certificate` and `tls.private_key` are required, must be
     non-empty PEM, and are rejected when they look like a file path;
-  - outbound `xudp` is optional and defaults to `false`;
+  - outbound `xudp` and `mux` are optional and default to `false`; they are
+    mutually exclusive;
   - inbound/outbound TLS `handshake_timeout_s` defaults to 10 and must be
     positive;
   - `uuid` and `tls` are rejected on other outbound/inbound protocols;
@@ -60,9 +61,10 @@ uses `rustls` for both TLS roles, `ws-net` for WebSocket, and `h2` for HTTP/2
   `v1.mux.cool` target carries New/Keep/End/KeepAlive frames for TCP and UDP,
   with multiple session ids and XUDP session `0`. The dispatcher is shared with
   the VMess inbound (ADR-0026).
-- The outbound can opt into XUDP with `"xudp": true`; it opens one stream per
-  TCP connection and one association per UDP target. Client-side mux pooling is
-  not implemented (roadmap P5-13).
+- The outbound can opt into XUDP with `"xudp": true`; `xudp` is a single-target
+  subset of Mux.Cool. With `"mux": true` the outbound carries TCP and UDP
+  sessions over a bounded pool of up to four physical connections (ADR-0027);
+  `mux` and `xudp` are mutually exclusive.
 - The outbound defaults to simple UoT, which is more interoperable with
   non-Xray servers.
 - Zero-length UDP frames are skipped on receive and dropped on send, matching
@@ -120,7 +122,7 @@ GlobalID/cone NAT and binds the stream to the first New frame's target.
       "uuid": "00112233-4455-6677-8899-aabbccddeeff",
       "tls": { "sni": "cdn.example.com" },
       "transport": { "network": "ws", "path": "/vless", "host": "cdn.example.com" },
-      "xudp": true
+      "mux": true
     }
   ],
   "route": { "final": "proxy" }
@@ -130,6 +132,9 @@ GlobalID/cone NAT and binds the stream to the first New frame's target.
 Without a `tls` object the outbound sends VLESS over plain TCP; this is useful
 for loopback tests and for deployments that terminate TLS in front of the proxy.
 The inbound always requires TLS; plaintext VLESS inbound is not supported.
+`"mux": true` multiplexes TCP and UDP sessions over one bounded outbound pool;
+`"xudp": true` is the older single-target UDP subset and cannot be combined
+with `mux`.
 
 ## Limits and known gaps
 
@@ -156,8 +161,8 @@ The inbound always requires TLS; plaintext VLESS inbound is not supported.
   HTTP/2 WebSocket options. `Instance` serves one VLESS stream per H2
   connection even though the package supports multiple streams; root-level
   HTTP/2 multiplexing/pooling is a follow-up. gRPC is not implemented.
-- No client-side mux pooling; the outbound keeps one stream per connection and
-  one association per UDP target.
+- Without `mux: true` the outbound keeps one stream per connection and one
+  association per UDP target; `xudp` is the single-target UDP subset.
 - No custom CA file or pinning is exposed by the root config; verification uses
   the platform bundle. `tls.insecure` is restricted to loopback test servers.
 - TLS state, including read/write keys and `KeyUpdate`, is owned by `rustls`.
@@ -206,16 +211,18 @@ Planned scope when it is taken up:
 - Integration: raw VLESS Mux connection carrying a TCP session and a UDP
   session on one physical stream, with End frames.
 - Reference interop: an Xray 26.11.9 client with mux enabled against the VLESS
-  inbound (TCP and UDP, TLS with a pinned test certificate).
+  inbound (TCP and UDP, TLS with a pinned test certificate), and the VLESS
+  outbound with `mux: true` against an Xray VLESS inbound (TCP and UDP).
 - Unit: XUDP New/Keep frame roundtrip and address encoding.
 - Local interop with Xray-core 26.11.9: TCP in both directions; UDP/XUDP in
   both directions.
 - Local-only interop: the TLS adapter and VLESS-over-TLS request/response were
   checked against a Python/OpenSSL TLS echo and VLESS mock. The harness is not
   committed.
-- Synthetic request and XUDP inputs live in `fuzz/corpus/vless/` and
-  `fuzz/corpus/xudp/`.
-- Fuzz targets: `vless` and `xudp` under `cargo +nightly fuzz run`; the bounded
-  corpus smoke runs in the `Fuzz` workflow. See `docs/security/audit.md`.
+- Synthetic VLESS inputs live in `fuzz/corpus/vless/`; the shared Mux.Cool
+  seeds live in `fuzz/corpus/vmess/`.
+- Fuzz targets: `vless` for request/UoT framing and `vmess` for chunk and
+  Mux.Cool metadata; the bounded corpus smoke runs in the `Fuzz` workflow. See
+  `docs/security/audit.md`.
 - Reference interop: TCP/WS/H2 and UDP/XUDP were checked locally against
   Xray-core and V2Ray; the harness is not committed.

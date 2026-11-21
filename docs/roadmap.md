@@ -63,6 +63,7 @@ any order after their dependencies.
 | P2-5 | Selectors and health probes | Done | P1-6 | Five strategies, EWMA, TCP probes, unit tests |
 | P2-6 | Connection limits and deadlines | Done | P1-2 | Absolute handshake, shared idle, half-close tests |
 | P2-7 | VMess AEAD inbound/outbound: TCP, direct UDP, Mux.Cool | Done | P2-3, P2-4 | Vectors, loopback, Xray interop, fuzz |
+| P2-14 | Client-side Mux.Cool pooling (VMess/VLESS) | Done | P2-1, P2-7 | Pool bounds, TCP/UDP/mixed, Xray interop |
 
 ### Remaining
 
@@ -130,7 +131,7 @@ P1 core (net, config, relay, limits)
   |
   +--> P2-1 VLESS --+
   +--> P2-2 Trojan --+
-  +--> P2-7 VMess --+
+  +--> P2-7 VMess --+--> P2-14 client mux
   +--> P2-3 TLS -----+--> P2-4 WS/H2 --+--> P2-12 H2 pooling
   |                                    +--> P3-5 gRPC
   |                                    +--> P3-6 XHTTP (h3 after P3-2)
@@ -176,9 +177,7 @@ criteria. They are tracked here so they do not disappear from the docs.
 | P5-8 | Trojan-Go WebSocket/Mux/XTLS | Deferred | not part of standard Trojan |
 | P5-9 | WS early data/heartbeat; VLESS `flow`/XTLS Vision | Deferred | compatibility extensions |
 | P5-10 | Windows-specific process matching | Planned | with P2-10, best-effort |
-| P5-11 | VMess client-side Mux.Cool pooling | Deferred | inbound mux works; outbound uses direct UDP |
 | P5-12 | VMess authenticated-length option | Deferred | only if a reference client enables Opt A |
-| P5-13 | VLESS client-side Mux.Cool pooling | Deferred | inbound mux works; outbound uses UoT/XUDP |
 
 ## Release packaging order
 

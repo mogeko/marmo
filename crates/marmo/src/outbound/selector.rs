@@ -166,6 +166,27 @@ impl Outbound for SelectorOutbound {
         self.nodes.iter().all(|node| node.udp_direct())
     }
 
+    fn start(&self, runtime: &Handle, token: &CancellationToken) -> Option<JoinHandle<()>> {
+        let handles: Vec<JoinHandle<()>> = self
+            .nodes
+            .iter()
+            .filter_map(|node| node.start(runtime, token))
+            .collect();
+        if handles.is_empty() {
+            return None;
+        }
+        let token = token.clone();
+        Some(runtime.spawn(async move {
+            token.cancelled().await;
+            for handle in &handles {
+                handle.abort();
+            }
+            for handle in handles {
+                let _ = handle.await;
+            }
+        }))
+    }
+
     fn start_health(&self, runtime: &Handle, token: &CancellationToken) -> Option<JoinHandle<()>> {
         let check = self.health_check.clone()?;
         let target = Endpoint::parse(&check.target).ok()?;

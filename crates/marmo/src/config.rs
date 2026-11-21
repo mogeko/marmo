@@ -287,6 +287,9 @@ pub struct Outbound {
     /// VLESS XUDP framing.
     #[serde(default)]
     pub xudp: bool,
+    /// Client-side Mux.Cool pooling for VMess and VLESS.
+    #[serde(default)]
+    pub mux: bool,
     /// VMess body cipher.
     #[serde(default)]
     pub security: Option<VmessSecurity>,

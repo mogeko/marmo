@@ -530,11 +530,12 @@ fn validate_trojan(outbound: &Outbound, index: usize) -> Result<(), ConfigError>
     if outbound.method.is_some()
         || outbound.uuid.is_some()
         || outbound.xudp
+        || outbound.mux
         || outbound.security.is_some()
     {
         return Err(fail(
             format!("outbounds[{index}]"),
-            "trojan does not take method, uuid, xudp, or security",
+            "trojan does not take method, uuid, xudp, mux, or security",
         ));
     }
     if outbound.transport.is_some() {
@@ -584,6 +585,12 @@ fn validate_vless(outbound: &Outbound, index: usize) -> Result<(), ConfigError> 
         return Err(fail(
             format!("outbounds[{index}].security"),
             "only applies to vmess",
+        ));
+    }
+    if outbound.mux && outbound.xudp {
+        return Err(fail(
+            format!("outbounds[{index}]"),
+            "mux and xudp are mutually exclusive",
         ));
     }
     let server_text = outbound
@@ -916,11 +923,12 @@ fn reject_vless_fields(outbound: &Outbound, index: usize) -> Result<(), ConfigEr
     if outbound.uuid.is_some()
         || outbound.tls.is_some()
         || outbound.xudp
+        || outbound.mux
         || outbound.security.is_some()
     {
         return Err(fail(
             format!("outbounds[{index}]"),
-            "uuid/xudp/security only apply to vless or vmess; tls applies to vless/trojan/vmess",
+            "uuid/xudp/mux/security only apply to vless or vmess; tls applies to vless/trojan/vmess",
         ));
     }
     if outbound.transport.is_some() {
@@ -1240,6 +1248,39 @@ mod tests {
             "transport":{"network":"h2"}
         }]}"#;
         assert_path(error(h2_without_tls), "outbounds[0].tls");
+    }
+
+    #[test]
+    fn validates_mux_option() {
+        let vless = r#"{"outbounds":[{
+            "tag":"vl","protocol":"vless","server":"example.com:443",
+            "uuid":"00000000-0000-0000-0000-000000000001","mux":true
+        }]}"#;
+        assert!(parse(vless).is_ok());
+
+        let vmess = r#"{"outbounds":[{
+            "tag":"vm","protocol":"vmess","server":"example.com:443",
+            "uuid":"00000000-0000-0000-0000-000000000001","mux":true
+        }]}"#;
+        assert!(parse(vmess).is_ok());
+
+        let both = r#"{"outbounds":[{
+            "tag":"vl","protocol":"vless","server":"example.com:443",
+            "uuid":"00000000-0000-0000-0000-000000000001",
+            "mux":true,"xudp":true
+        }]}"#;
+        assert_path(error(both), "outbounds[0]");
+
+        let trojan = r#"{"outbounds":[{
+            "tag":"tr","protocol":"trojan","server":"example.com:443",
+            "password":"secret","tls":{"insecure":true},"mux":true
+        }]}"#;
+        assert_path(error(trojan), "outbounds[0]");
+
+        let direct = r#"{"outbounds":[{
+            "tag":"d","protocol":"direct","mux":true
+        }]}"#;
+        assert_path(error(direct), "outbounds[0]");
     }
 
     #[test]

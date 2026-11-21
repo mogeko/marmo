@@ -114,7 +114,6 @@ impl<W: AsyncWrite + Unpin> MuxWriter<W> {
     }
 
     /// Writes a New frame.
-    #[allow(dead_code)]
     pub(crate) async fn new_session(
         &mut self, session: u16, target: &Endpoint, network: u8, data: &[u8],
     ) -> io::Result<()> {
@@ -130,6 +129,11 @@ impl<W: AsyncWrite + Unpin> MuxWriter<W> {
         let mut meta = [0_u8; MAX_META_LEN];
         let length = encode_keep_meta(session, target, &mut meta).map_err(frame_error)?;
         self.frame(&meta[..length], data).await
+    }
+
+    /// Writes a keep-alive frame.
+    pub(crate) async fn keepalive(&mut self) -> io::Result<()> {
+        self.frame(&marmo_proto::mux::KEEPALIVE_META, &[]).await
     }
 
     /// Writes an End frame.

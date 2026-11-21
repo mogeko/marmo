@@ -612,7 +612,7 @@ fn vmess_server_config(port: u16, network: &str, path: &str) -> String {
     )
 }
 
-fn marmo_outbound_config(server: SocketAddr, network: &str, path: &str) -> String {
+fn marmo_outbound_config(server: SocketAddr, network: &str, path: &str, mux: bool) -> String {
     let ws = if network == "ws" {
         format!(r#", "transport": {{ "network": "ws", "path": "{path}" }}"#)
     } else {
@@ -623,7 +623,7 @@ fn marmo_outbound_config(server: SocketAddr, network: &str, path: &str) -> Strin
   "limits": {{ "handshake_timeout_s": 5, "idle_timeout_s": 10 }},
   "inbounds": [{{ "tag": "socks", "protocol": "socks5", "listen": "127.0.0.1:0" }}],
   "outbounds": [{{ "tag": "vm", "protocol": "vmess", "server": "{server}",
-    "uuid": "{UUID}", "security": "aes-128-gcm"{ws} }}],
+    "uuid": "{UUID}", "security": "aes-128-gcm", "mux": {mux}{ws} }}],
   "route": {{ "final": "vm" }}
 }}"#
     )
@@ -676,21 +676,25 @@ fn instance_interop_with_xray() {
         let (echo, echo_task) = echo_tcp().await;
         let (udp_echo, udp_task) = echo_udp().await;
 
-        // marmo outbound -> Xray inbound, plain TCP and WebSocket.
+        // marmo outbound -> Xray inbound, plain TCP and WebSocket, with and
+        // without client-side mux.
         for (network, path) in [("tcp", ""), ("ws", "/ws")] {
-            let port = free_port();
-            let xray =
-                start_xray_config(&vmess_server_config(port, network, path), port, true).await;
-            let (proxy, handle, task) = start_marmo(&marmo_outbound_config(
-                SocketAddr::from(([127, 0, 0, 1], port)),
-                network,
-                path,
-            ))
-            .await;
-            tcp_through_socks(proxy, echo).await;
-            udp_through_socks(proxy, udp_echo).await;
-            stop_marmo(handle, task).await;
-            drop(xray);
+            for mux in [false, true] {
+                let port = free_port();
+                let xray =
+                    start_xray_config(&vmess_server_config(port, network, path), port, true).await;
+                let (proxy, handle, task) = start_marmo(&marmo_outbound_config(
+                    SocketAddr::from(([127, 0, 0, 1], port)),
+                    network,
+                    path,
+                    mux,
+                ))
+                .await;
+                tcp_through_socks(proxy, echo).await;
+                udp_through_socks(proxy, udp_echo).await;
+                stop_marmo(handle, task).await;
+                drop(xray);
+            }
         }
 
         // Xray outbound -> marmo inbound, with and without mux.

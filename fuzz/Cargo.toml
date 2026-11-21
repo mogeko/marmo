@@ -62,10 +62,3 @@ path = "fuzz_targets/vmess.rs"
 test = false
 doc = false
 bench = false
-
-[[bin]]
-name = "xudp"
-path = "fuzz_targets/xudp.rs"
-test = false
-doc = false
-bench = false

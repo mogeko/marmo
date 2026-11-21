@@ -165,6 +165,13 @@ fn vless_outbound(server: SocketAddr) -> String {
     )
 }
 
+fn vless_mux_outbound(server: SocketAddr) -> String {
+    format!(
+        r#"{{ "tag": "vl", "protocol": "vless", "server": "{server}",
+             "uuid": "{UUID}", "tls": {{ "insecure": true }}, "mux": true }}"#
+    )
+}
+
 fn vless_ws_inbound() -> String {
     format!(
         r#"{{ "tag": "vl", "protocol": "vless", "listen": "127.0.0.1:0",
@@ -705,4 +712,150 @@ async fn terminates_vless_mux_tcp_and_udp_sessions() {
     stop(proxy_handle, proxy_task).await;
     tcp_task.abort();
     udp_task.abort();
+}
+
+#[tokio::test]
+async fn relays_through_vless_mux_tcp() {
+    let (echo, echo_task) = echo_server().await;
+    let proxy = format!(
+        r#"{{
+          "limits": {{ "handshake_timeout_s": 5, "idle_timeout_s": 10 }},
+          "inbounds": [ {} ],
+          "outbounds": [ {{ "tag": "direct", "protocol": "direct" }} ],
+          "route": {{ "final": "direct" }}
+        }}"#,
+        vless_inbound()
+    );
+    let (proxy_address, proxy_handle, proxy_task) = start(&proxy).await;
+    let front = format!(
+        r#"{{
+          "limits": {{ "handshake_timeout_s": 5, "idle_timeout_s": 10 }},
+          "inbounds": [
+            {{ "tag": "socks", "protocol": "socks5", "listen": "127.0.0.1:0" }}
+          ],
+          "outbounds": [ {} ],
+          "route": {{ "final": "vl" }}
+        }}"#,
+        vless_mux_outbound(proxy_address)
+    );
+    let (front_address, front_handle, front_task) = start(&front).await;
+
+    let mut clients = Vec::new();
+    for _ in 0..8 {
+        let mut client = TcpStream::connect(front_address).await.expect("connect");
+        socks5_connect(&mut client, echo).await;
+        clients.push(client);
+    }
+    for (index, client) in clients.into_iter().enumerate() {
+        let payload: Vec<u8> = (0..8_000)
+            .map(|offset| ((offset + index) % 251) as u8)
+            .collect();
+        let (mut reader, mut writer) = client.into_split();
+        let write = writer.write_all(&payload);
+        let read = async {
+            let mut received = vec![0_u8; payload.len()];
+            reader.read_exact(&mut received).await.expect("read");
+            received
+        };
+        let (written, echoed) = tokio::join!(write, read);
+        written.expect("write");
+        assert_eq!(echoed, payload);
+    }
+
+    stop(front_handle, front_task).await;
+    stop(proxy_handle, proxy_task).await;
+    echo_task.abort();
+}
+
+#[tokio::test]
+async fn relays_through_vless_mux_udp() {
+    let (echo, echo_task) = udp_echo().await;
+    let proxy = format!(
+        r#"{{
+          "limits": {{ "handshake_timeout_s": 5, "idle_timeout_s": 10 }},
+          "inbounds": [ {} ],
+          "outbounds": [ {{ "tag": "direct", "protocol": "direct" }} ],
+          "route": {{ "final": "direct" }}
+        }}"#,
+        vless_inbound()
+    );
+    let (proxy_address, proxy_handle, proxy_task) = start(&proxy).await;
+    let front = format!(
+        r#"{{
+          "limits": {{ "handshake_timeout_s": 5, "idle_timeout_s": 10 }},
+          "inbounds": [
+            {{ "tag": "socks", "protocol": "socks5", "listen": "127.0.0.1:0" }}
+          ],
+          "outbounds": [ {} ],
+          "route": {{ "final": "vl" }}
+        }}"#,
+        vless_mux_outbound(proxy_address)
+    );
+    let (front_address, front_handle, front_task) = start(&front).await;
+
+    let mut control = TcpStream::connect(front_address).await.expect("connect");
+    let (datagram, relay) = udp_associate(&mut control).await;
+    let payload: Vec<u8> = (0..8_000).map(|index| (index % 251) as u8).collect();
+    datagram
+        .send_to(&udp_request(echo, &payload), relay)
+        .await
+        .expect("send");
+    let mut reply = vec![0_u8; 65_535];
+    let (length, _) = timeout(Duration::from_secs(5), datagram.recv_from(&mut reply))
+        .await
+        .expect("reply timeout")
+        .expect("recv");
+    assert!(length >= 10 + payload.len());
+    assert_eq!(&reply[10..length], &payload[..]);
+
+    drop(control);
+    stop(front_handle, front_task).await;
+    stop(proxy_handle, proxy_task).await;
+    echo_task.abort();
+}
+
+#[tokio::test]
+async fn relays_through_vless_mux_over_websocket() {
+    let (echo, echo_task) = echo_server().await;
+    let proxy = format!(
+        r#"{{
+          "limits": {{ "handshake_timeout_s": 5, "idle_timeout_s": 10 }},
+          "inbounds": [ {} ],
+          "outbounds": [ {{ "tag": "direct", "protocol": "direct" }} ],
+          "route": {{ "final": "direct" }}
+        }}"#,
+        vless_ws_inbound()
+    );
+    let (proxy_address, proxy_handle, proxy_task) = start(&proxy).await;
+    let outbound =
+        vless_ws_outbound(proxy_address).replace(r#""uuid": "#, r#""mux": true, "uuid": "#);
+    let front = format!(
+        r#"{{
+          "limits": {{ "handshake_timeout_s": 5, "idle_timeout_s": 10 }},
+          "inbounds": [
+            {{ "tag": "socks", "protocol": "socks5", "listen": "127.0.0.1:0" }}
+          ],
+          "outbounds": [ {outbound} ],
+          "route": {{ "final": "vl" }}
+        }}"#
+    );
+    let (front_address, front_handle, front_task) = start(&front).await;
+
+    let mut client = TcpStream::connect(front_address).await.expect("connect");
+    socks5_connect(&mut client, echo).await;
+    let payload: Vec<u8> = (0..16_000).map(|index| (index % 251) as u8).collect();
+    let (mut reader, mut writer) = client.into_split();
+    let write = writer.write_all(&payload);
+    let read = async {
+        let mut received = vec![0_u8; payload.len()];
+        reader.read_exact(&mut received).await.expect("read");
+        received
+    };
+    let (written, echoed) = tokio::join!(write, read);
+    written.expect("write");
+    assert_eq!(echoed, payload);
+
+    stop(front_handle, front_task).await;
+    stop(proxy_handle, proxy_task).await;
+    echo_task.abort();
 }

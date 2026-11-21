@@ -9,7 +9,6 @@ cargo +nightly fuzz run ss2022_udp -- -runs=20000 -max_len=4096
 cargo +nightly fuzz run socks5 -- -runs=20000 -max_len=4096
 cargo +nightly fuzz run trojan -- -runs=20000 -max_len=4096
 cargo +nightly fuzz run vless -- -runs=20000 -max_len=4096
-cargo +nightly fuzz run xudp -- -runs=20000 -max_len=4096
 cargo +nightly fuzz run http -- -runs=20000 -max_len=8192
 ```
 
@@ -31,7 +30,6 @@ because a `schedule` would only run from the repository default branch.
 | `socks5` | greeting, request, UDP datagram |
 | `trojan` | authentication prefix, request headers, UDP frame headers |
 | `vless` | request headers, response header, UoT length, address parsing |
-| `xudp` | New/Keep/End/Keepalive metadata |
 
 The SS2022 targets take the first byte as the method selector (bit 0: 0 =
 `2022-blake3-aes-128-gcm`, 1 = `2022-blake3-aes-256-gcm`); the rest is the wire
@@ -42,7 +40,7 @@ input.
 `corpus/<target>/` contains synthetic seeds:
 
 - encoder-produced greetings, requests, responses, chunks, UDP packets, and
-  XUDP metadata with fixed keys and timestamps;
+  Mux.Cool metadata with fixed keys and timestamps;
 - synthetic protocol fixtures (`fixture-*`) shared with the earlier test corpus.
 
 None is a capture of real traffic. libFuzzer writes newly minimised inputs

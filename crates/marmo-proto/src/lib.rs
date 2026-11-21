@@ -1,5 +1,5 @@
 //! Wire codecs for SOCKS5, HTTP/1, Shadowsocks 2022, Trojan, VLESS, VMess,
-//! Mux.Cool, and XUDP.
+//! and Mux.Cool.
 //!
 //! No I/O and no tokio: decoders take bounded bytes and return typed errors so
 //! they can be fuzzed in isolation. See `docs/architecture.md` §8.8.
@@ -25,6 +25,3 @@ pub mod vless;
 
 /// VMess AEAD codec: auth IDs, instructions, responses, and chunked bodies.
 pub mod vmess;
-
-/// XUDP framing under the VLESS Mux command.
-pub mod xudp;

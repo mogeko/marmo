@@ -18,7 +18,6 @@ panicking. That is what makes each codec fuzzable in isolation.
 | `vless` | UUID, request and response headers, UoT frames, and address codec |
 | `vmess` | AEAD request/response headers, chunk framing, and key schedule |
 | `mux` | Mux.Cool metadata and frame headers for VMess and VLESS |
-| `xudp` | XUDP metadata and frame headers under the VLESS Mux command |
 
 Crypto is delegated to `aes-gcm`, `chacha20poly1305`, `blake3`, `sha2`,
 `sha3` (SHAKE128), `hmac`, and `md-5`; `subtle` handles constant-time

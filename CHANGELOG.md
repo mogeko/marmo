@@ -11,6 +11,11 @@ and behavior may change between minor releases.
 - `marmo-proto` adds the `vmess` and `mux` codecs and a `vmess` fuzz target.
 - VLESS inbound terminates full Mux.Cool for TCP and UDP sessions, sharing the
   VMess dispatcher (ADR-0026). The VLESS outbound keeps UoT/XUDP.
+- Client-side Mux.Cool pooling for VMess and VLESS with `"mux": true`:
+  bounded connection/session tables, TCP and UDP, per-datagram UDP targets,
+  keep-alive, and idle close (ADR-0027).
+- Removed the duplicate `xudp` codecs and fuzz target; the `xudp: true` mode
+  now uses the shared Mux.Cool codec (ADR-0027).
 
 ## 0.0.3 - 2026-11-21
 
@@ -78,7 +83,7 @@ and behavior may change between minor releases.
 - QUIC/TUIC/Hysteria2, gRPC/XHTTP, DNS cache/DoH, sniffing, rule sets,
   process rules, HTTP/2 root multiplexing/pooling, `http_head` health checks,
   jitter, and exponential backoff are not implemented.
-- VMess client-side Mux.Cool pooling and the authenticated-length option are
-  not implemented; legacy VMess CFB is not planned.
+- The VMess authenticated-length option is not implemented; legacy VMess CFB
+  is not planned. Client-side Mux.Cool pooling is available with `mux: true`.
 - `Instance` serves one VLESS stream per HTTP/2 connection.
 - The library is not production-ready and has not had an external audit.

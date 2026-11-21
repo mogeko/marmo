@@ -59,6 +59,11 @@ not implemented in this revision (QUIC, TUIC, Hysteria2).
   sessions per physical connection, a 16-frame queue per session, 64 KiB
   frames, 512-byte metadata, and the instance idle timeout. Sessions own one
   task and are aborted with the physical connection.
+- **Mux.Cool outbound.** The client pool is bounded to four physical
+  connections, 128 sessions per connection, 16 queued frames per session, and a
+  4 MiB in-flight downlink budget. TCP downlink applies backpressure; UDP drops
+  under queue pressure. Session ids are never reused, and all pool tasks are
+  tracked and cancelled with the instance.
 
 ## 3. Open obligations
 

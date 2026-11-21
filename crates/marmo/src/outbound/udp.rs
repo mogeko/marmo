@@ -8,6 +8,7 @@ use marmo_net::Endpoint;
 use tokio::net::UdpSocket;
 
 use crate::direct;
+use crate::outbound::mux::MuxDatagram;
 use crate::outbound::trojan::TrojanUdpClient;
 use crate::outbound::vless::{VlessUdpClient, VlessXudpClient};
 use crate::outbound::vmess::VmessUdpClient;
@@ -34,6 +35,8 @@ pub(crate) enum UdpOutbound {
     VlessXudp(VlessXudpClient),
     /// A direct VMess UDP association.
     Vmess(Box<VmessUdpClient>),
+    /// A client-side mux UDP session.
+    Mux(Box<MuxDatagram>),
 }
 
 impl UdpOutbound {
@@ -78,6 +81,7 @@ impl UdpOutbound {
             Self::Vless(client) => client.send_to(target, payload).await,
             Self::VlessXudp(client) => client.send_to(target, payload).await,
             Self::Vmess(client) => client.send_to(target, payload).await,
+            Self::Mux(client) => client.send_to(target, payload).await,
         }
     }
 
@@ -93,6 +97,7 @@ impl UdpOutbound {
             Self::Vless(client) => client.recv_from(buffer).await,
             Self::VlessXudp(client) => client.recv_from(buffer).await,
             Self::Vmess(client) => client.recv_from(buffer).await,
+            Self::Mux(client) => client.recv_from(buffer).await,
         }
     }
 }

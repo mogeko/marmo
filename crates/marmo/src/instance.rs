@@ -8,7 +8,7 @@
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use marmo_net::{Endpoint, Network};
@@ -553,6 +553,7 @@ impl InstanceBuilder {
                         uuid: Arc::new(uuid),
                         tls,
                         xudp: outbound.xudp,
+                        mux: outbound.mux,
                         ws,
                         h2,
                     }
@@ -643,6 +644,7 @@ impl InstanceBuilder {
                         server,
                         cmd_key: Arc::new(CmdKey::derive(&uuid)),
                         security,
+                        mux: outbound.mux,
                         tls,
                         ws,
                         h2,
@@ -683,11 +685,11 @@ impl Drop for ConnectionGuard {
     }
 }
 
-/// Aborts selector health tasks when serving ends or the future is dropped.
+/// Aborts outbound background tasks when serving ends or the future is dropped.
 #[derive(Default)]
-struct HealthTasks(Vec<tokio::task::JoinHandle<()>>);
+struct BackgroundTasks(Vec<tokio::task::JoinHandle<()>>);
 
-impl HealthTasks {
+impl BackgroundTasks {
     fn abort_all(&mut self) {
         for task in self.0.drain(..) {
             task.abort();
@@ -695,7 +697,7 @@ impl HealthTasks {
     }
 }
 
-impl Drop for HealthTasks {
+impl Drop for BackgroundTasks {
     fn drop(&mut self) {
         self.abort_all();
     }
@@ -765,10 +767,13 @@ impl BoundInstance {
             limits,
         });
         let token = supervisor.token();
-        let mut health = HealthTasks::default();
+        let mut background = BackgroundTasks::default();
         for outbound in &context.outbounds {
+            if let Some(task) = outbound.start(&context.runtime, &token) {
+                background.0.push(task);
+            }
             if let Some(task) = outbound.start_health(&context.runtime, &token) {
-                health.0.push(task);
+                background.0.push(task);
             }
         }
 
@@ -800,7 +805,7 @@ impl BoundInstance {
         }
 
         supervisor.cancel();
-        health.abort_all();
+        background.abort_all();
         let grace = limits.shutdown_grace;
         let drain = async { while tasks.join_next().await.is_some() {} };
         if timeout(grace, drain).await.is_err() {
@@ -1119,6 +1124,7 @@ enum OutboundConfig {
         uuid: Arc<Uuid>,
         tls: Option<OutboundTlsConfig>,
         xudp: bool,
+        mux: bool,
         ws: Option<WsClientOptions>,
         h2: Option<H2ClientOptions>,
     },
@@ -1126,6 +1132,7 @@ enum OutboundConfig {
         server: Endpoint,
         cmd_key: Arc<CmdKey>,
         security: VmessCipher,
+        mux: bool,
         tls: Option<OutboundTlsConfig>,
         ws: Option<WsClientOptions>,
         h2: Option<H2ClientOptions>,
@@ -1180,6 +1187,7 @@ impl OutboundSpec {
                 uuid,
                 tls,
                 xudp,
+                mux,
                 ws,
                 h2,
             } => {
@@ -1197,13 +1205,16 @@ impl OutboundSpec {
                     server,
                     uuid,
                     xudp,
+                    mux,
                     layers,
+                    pool: OnceLock::new(),
                 })
             }
             OutboundConfig::Vmess {
                 server,
                 cmd_key,
                 security,
+                mux,
                 tls,
                 ws,
                 h2,
@@ -1222,7 +1233,9 @@ impl OutboundSpec {
                     server,
                     cmd_key,
                     security,
+                    mux,
                     layers,
+                    pool: OnceLock::new(),
                 })
             }
             OutboundConfig::Selector { .. } => {

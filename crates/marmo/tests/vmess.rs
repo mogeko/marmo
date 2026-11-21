@@ -189,7 +189,7 @@ fn vmess_outbound(server: SocketAddr, tls: bool, transport: &str) -> String {
     )
 }
 
-async fn tcp_round_trip(tls: bool, transport: &str, security: &str) {
+async fn tcp_round_trip(tls: bool, transport: &str, security: &str, mux: bool) {
     let (echo, echo_task) = echo_server().await;
     let proxy = format!(
         r#"{{
@@ -204,7 +204,7 @@ async fn tcp_round_trip(tls: bool, transport: &str, security: &str) {
 
     let outbound = vmess_outbound(proxy_address, tls, transport).replace(
         r#""uuid": "#,
-        &format!(r#""security": "{security}", "uuid": "#),
+        &format!(r#""security": "{security}", "mux": {mux}, "uuid": "#),
     );
     let front = format!(
         r#"{{
@@ -239,27 +239,32 @@ async fn tcp_round_trip(tls: bool, transport: &str, security: &str) {
 
 #[tokio::test]
 async fn relays_through_vmess_tcp() {
-    tcp_round_trip(false, "tcp", "aes-128-gcm").await;
+    tcp_round_trip(false, "tcp", "aes-128-gcm", false).await;
 }
 
 #[tokio::test]
 async fn relays_through_vmess_tcp_chacha() {
-    tcp_round_trip(false, "tcp", "chacha20-poly1305").await;
+    tcp_round_trip(false, "tcp", "chacha20-poly1305", false).await;
 }
 
 #[tokio::test]
 async fn relays_through_vmess_tls() {
-    tcp_round_trip(true, "tcp", "aes-128-gcm").await;
+    tcp_round_trip(true, "tcp", "aes-128-gcm", false).await;
 }
 
 #[tokio::test]
 async fn relays_through_vmess_ws() {
-    tcp_round_trip(true, "ws", "aes-128-gcm").await;
+    tcp_round_trip(true, "ws", "aes-128-gcm", false).await;
 }
 
 #[tokio::test]
 async fn relays_through_vmess_h2() {
-    tcp_round_trip(true, "h2", "aes-128-gcm").await;
+    tcp_round_trip(true, "h2", "aes-128-gcm", false).await;
+}
+
+#[tokio::test]
+async fn relays_through_vmess_tcp_mux() {
+    tcp_round_trip(false, "tcp", "aes-128-gcm", true).await;
 }
 
 #[tokio::test]
@@ -285,6 +290,54 @@ async fn relays_through_vmess_udp() {
           "route": {{ "final": "vm" }}
         }}"#,
         vmess_outbound(proxy_address, false, "tcp")
+    );
+    let (front_address, front_handle, front_task) = start(&front).await;
+
+    let mut control = TcpStream::connect(front_address).await.expect("connect");
+    let (datagram, relay) = udp_associate(&mut control).await;
+    let payload: Vec<u8> = (0..8_000).map(|index| (index % 251) as u8).collect();
+    datagram
+        .send_to(&udp_request(echo, &payload), relay)
+        .await
+        .expect("send");
+    let mut reply = vec![0_u8; 65_535];
+    let (length, _) = timeout(Duration::from_secs(5), datagram.recv_from(&mut reply))
+        .await
+        .expect("reply timeout")
+        .expect("recv");
+    assert!(length >= 10 + payload.len());
+    assert_eq!(&reply[10..length], &payload[..]);
+
+    drop(control);
+    stop(front_handle, front_task).await;
+    stop(proxy_handle, proxy_task).await;
+    echo_task.abort();
+}
+
+#[tokio::test]
+async fn relays_through_vmess_udp_mux() {
+    let (echo, echo_task) = udp_echo().await;
+    let proxy = format!(
+        r#"{{
+          "limits": {{ "handshake_timeout_s": 5, "idle_timeout_s": 10 }},
+          "inbounds": [ {} ],
+          "outbounds": [ {{ "tag": "direct", "protocol": "direct" }} ],
+          "route": {{ "final": "direct" }}
+        }}"#,
+        vmess_inbound(false, "tcp")
+    );
+    let (proxy_address, proxy_handle, proxy_task) = start(&proxy).await;
+    let outbound = vmess_outbound(proxy_address, false, "tcp")
+        .replace(r#""uuid": "#, r#""mux": true, "uuid": "#);
+    let front = format!(
+        r#"{{
+          "limits": {{ "handshake_timeout_s": 5, "idle_timeout_s": 10 }},
+          "inbounds": [
+            {{ "tag": "socks", "protocol": "socks5", "listen": "127.0.0.1:0" }}
+          ],
+          "outbounds": [ {outbound} ],
+          "route": {{ "final": "vm" }}
+        }}"#
     );
     let (front_address, front_handle, front_task) = start(&front).await;
 
