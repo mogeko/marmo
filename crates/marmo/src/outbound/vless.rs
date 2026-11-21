@@ -103,6 +103,8 @@ pub(crate) struct VlessXudpClient {
     stream: BoxStream,
     frames: XudpReader,
     target: Endpoint,
+    started: bool,
+    response_started: bool,
 }
 
 impl VlessXudpClient {
@@ -117,11 +119,20 @@ impl VlessXudpClient {
         if payload.is_empty() {
             return Ok(());
         }
-        write_keep(&mut self.stream, payload).await
+        if self.started {
+            write_keep(&mut self.stream, payload).await
+        } else {
+            self.started = true;
+            write_new(&mut self.stream, &self.target, payload).await
+        }
     }
 
     /// Reads one data frame; replies always come from the association target.
     pub(crate) async fn recv_from(&mut self, buffer: &mut [u8]) -> io::Result<(usize, Endpoint)> {
+        if !self.response_started {
+            read_response_header(&mut self.stream).await?;
+            self.response_started = true;
+        }
         loop {
             let Some(frame) = self.frames.next(&mut self.stream).await? else {
                 return Err(io::Error::new(
@@ -175,12 +186,12 @@ pub(crate) async fn connect_xudp(
     let length = encode_mux_request(uuid, &mut header)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     stream.write_all(&header[..length]).await?;
-    write_new(&mut stream, target, &[]).await?;
-    read_response_header(&mut stream).await?;
     Ok(VlessXudpClient {
         stream,
         frames: XudpReader::new(&[])?,
         target: target.clone(),
+        started: false,
+        response_started: false,
     })
 }
 
