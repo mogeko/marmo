@@ -765,7 +765,8 @@ Module boundaries inside `marmo` are enforced by review, not by the compiler.
 
 ## 19. Roadmap
 
-The implementation is complete for the current release. Planned post-1.0 work:
+The implementation is complete for the current release. The dependency-ordered
+work list is in [`roadmap.md`](roadmap.md); the summary is:
 
 | Item | Enabled by |
 | --- | --- |

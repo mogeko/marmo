@@ -78,7 +78,8 @@ Protocol tests are in `crates/*/tests/`, unit tests beside the code, and fuzz
 targets in [`fuzz/`](fuzz/). CI runs Linux, macOS, and Windows, the MSRV job,
 the dependency audit, and a bounded fuzz smoke.
 
-See [docs/architecture.md](docs/architecture.md) for the design and
+See [docs/architecture.md](docs/architecture.md) for the design,
+[docs/roadmap.md](docs/roadmap.md) for the dependency-ordered phases, and
 [docs/decisions/](docs/decisions/) for the ADR record. Workspace rules are in
 [crates/README.md](crates/README.md).
 

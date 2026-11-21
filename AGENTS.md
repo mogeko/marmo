@@ -6,7 +6,8 @@ selection.
 
 ## Design gate
 
-- Read `docs/architecture.md` and `docs/decisions/` before changing a boundary.
+- Read `docs/architecture.md`, `docs/roadmap.md`, and `docs/decisions/` before
+  changing a boundary.
   A `Proposed` ADR is not approved: do not implement it.
 - Accepted ADRs are immutable; supersede them with a new ADR instead of editing
   history.
