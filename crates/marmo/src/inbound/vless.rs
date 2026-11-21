@@ -247,9 +247,9 @@ async fn handle_xudp(
     };
     let first = tokio::select! {
         _ = token.cancelled() => return,
-        result = frames.next(&mut stream) => result,
+        result = deadline.run(frames.next(&mut stream)) => result,
     };
-    let Ok(Some(first)) = first else {
+    let Ok(Ok(Some(first))) = first else {
         return;
     };
     if first.meta.status != STATUS_NEW {
@@ -345,11 +345,13 @@ async fn reply_loop(
                 let Some(payload) = message else {
                     break;
                 };
-                let _ = outbound.send_to(&target, &payload).await;
+                if outbound.send_to(&target, &payload).await.is_err() {
+                    break;
+                }
             }
             received = outbound.recv_from(&mut buffer) => {
                 let Ok((length, _source)) = received else {
-                    continue;
+                    break;
                 };
                 activity.notify_one();
                 let written = if xudp {
