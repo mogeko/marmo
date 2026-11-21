@@ -4,7 +4,10 @@ use std::io;
 use std::net::SocketAddr;
 
 use marmo_net::Endpoint;
-use marmo_proto::vless::{COMMAND_TCP, COMMAND_UDP, REQUEST_HEADER_MAX, Uuid, encode_request};
+use marmo_proto::vless::{
+    COMMAND_TCP, COMMAND_UDP, REQUEST_HEADER_MAX, Uuid, encode_mux_request, encode_request,
+};
+use marmo_proto::xudp::{STATUS_END, STATUS_KEEP, STATUS_KEEPALIVE, STATUS_NEW};
 use marmo_transport::BoxStream;
 use marmo_transport::tls::TlsClient;
 use tokio::io::AsyncWriteExt;
@@ -12,6 +15,7 @@ use zeroize::Zeroize;
 
 use crate::outbound::trojan::tls_error;
 use crate::vless::{ClientStream, UotReader, read_response_header, write_udp_frame};
+use crate::xudp::{XudpReader, write_keep, write_new};
 
 /// Dials `server` and opens a VLESS TCP stream to `target`.
 pub(crate) async fn connect(
@@ -93,6 +97,94 @@ pub(crate) async fn connect_udp(
     Ok(VlessUdpClient {
         stream,
         frames: UotReader::new(&[])?,
+        target: target.clone(),
+    })
+}
+
+/// A VLESS XUDP association with one fixed target.
+pub(crate) struct VlessXudpClient {
+    stream: BoxStream,
+    frames: XudpReader,
+    target: Endpoint,
+}
+
+impl VlessXudpClient {
+    /// Writes one Keep frame; the target must match the association.
+    pub(crate) async fn send_to(&mut self, target: &Endpoint, payload: &[u8]) -> io::Result<()> {
+        if target != &self.target {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "XUDP association has a different target",
+            ));
+        }
+        if payload.is_empty() {
+            return Ok(());
+        }
+        write_keep(&mut self.stream, payload).await
+    }
+
+    /// Reads one data frame; replies always come from the association target.
+    pub(crate) async fn recv_from(&mut self, buffer: &mut [u8]) -> io::Result<(usize, Endpoint)> {
+        loop {
+            let Some(frame) = self.frames.next(&mut self.stream).await? else {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "XUDP association closed",
+                ));
+            };
+            match frame.meta.status {
+                STATUS_NEW | STATUS_KEEP => {
+                    if frame.data.is_empty() {
+                        continue;
+                    }
+                    if frame.data.len() > buffer.len() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "XUDP datagram exceeds the output buffer",
+                        ));
+                    }
+                    buffer[..frame.data.len()].copy_from_slice(&frame.data);
+                    return Ok((frame.data.len(), self.target.clone()));
+                }
+                STATUS_KEEPALIVE => continue,
+                STATUS_END => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "XUDP association ended",
+                    ));
+                }
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "unexpected XUDP frame",
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// Opens a VLESS XUDP association for `target`.
+pub(crate) async fn connect_xudp(
+    server: &Endpoint,
+    tls: Option<&TlsClient>,
+    uuid: &Uuid,
+    target: &Endpoint,
+) -> io::Result<VlessXudpClient> {
+    let inner = crate::direct::connect(server).await?;
+    let mut stream = match tls {
+        Some(tls) => tls.connect(Box::new(inner)).await.map_err(tls_error)?,
+        None => Box::new(inner),
+    };
+    let mut header = [0_u8; 1 + 16 + 1 + 1];
+    let length = encode_mux_request(uuid, &mut header)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    stream.write_all(&header[..length]).await?;
+    write_new(&mut stream, target, &[]).await?;
+    read_response_header(&mut stream).await?;
+    Ok(VlessXudpClient {
+        stream,
+        frames: XudpReader::new(&[])?,
         target: target.clone(),
     })
 }

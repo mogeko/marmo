@@ -163,6 +163,13 @@ fn vless_outbound(server: SocketAddr) -> String {
     )
 }
 
+fn vless_xudp_outbound(server: SocketAddr) -> String {
+    format!(
+        r#"{{ "tag": "vl", "protocol": "vless", "server": "{server}",
+             "uuid": "{UUID}", "tls": {{ "insecure": true }}, "xudp": true }}"#
+    )
+}
+
 #[tokio::test]
 async fn relays_through_vless_tcp() {
     let (echo, echo_task) = echo_server().await;
@@ -255,6 +262,63 @@ async fn relays_through_vless_udp() {
     assert_eq!(&reply[4..8], &echo.ip().octets());
     assert_eq!(u16::from_be_bytes([reply[8], reply[9]]), echo.port());
     assert_eq!(&reply[10..length], &payload[..]);
+
+    drop(control);
+    stop(front_handle, front_task).await;
+    stop(proxy_handle, proxy_task).await;
+    echo_task.abort();
+}
+
+#[tokio::test]
+async fn relays_through_vless_xudp() {
+    let (echo, echo_task) = udp_echo().await;
+    let proxy = format!(
+        r#"{{
+          "limits": {{ "handshake_timeout_s": 5, "idle_timeout_s": 10 }},
+          "inbounds": [ {} ],
+          "outbounds": [ {{ "tag": "direct", "protocol": "direct" }} ],
+          "route": {{ "final": "direct" }}
+        }}"#,
+        vless_inbound()
+    );
+    let (proxy_address, proxy_handle, proxy_task) = start(&proxy).await;
+
+    let front = format!(
+        r#"{{
+          "limits": {{ "handshake_timeout_s": 5, "idle_timeout_s": 10 }},
+          "inbounds": [
+            {{ "tag": "socks", "protocol": "socks5", "listen": "127.0.0.1:0" }}
+          ],
+          "outbounds": [ {} ],
+          "route": {{ "final": "vl" }}
+        }}"#,
+        vless_xudp_outbound(proxy_address)
+    );
+    let (front_address, front_handle, front_task) = start(&front).await;
+
+    let mut control = TcpStream::connect(front_address).await.expect("connect");
+    let (datagram, relay) = udp_associate(&mut control).await;
+    let mut reply = vec![0_u8; 65_535];
+    for round in 0..2 {
+        let payload: Vec<u8> = (0..4_000)
+            .map(|index| ((index + round) % 251) as u8)
+            .collect();
+        datagram
+            .send_to(&udp_request(echo, &payload), relay)
+            .await
+            .expect("send");
+        let (length, _) = timeout(Duration::from_secs(5), datagram.recv_from(&mut reply))
+            .await
+            .expect("reply timeout")
+            .expect("recv");
+        assert!(length >= 10 + payload.len());
+        assert_eq!(&reply[10..length], &payload[..]);
+    }
+
+    let SocketAddr::V4(echo) = echo else {
+        panic!("test echo must be IPv4");
+    };
+    assert_eq!(&reply[4..8], &echo.ip().octets());
 
     drop(control);
     stop(front_handle, front_task).await;

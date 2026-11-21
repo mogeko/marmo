@@ -15,3 +15,6 @@ pub mod trojan;
 
 /// VLESS codec: UUIDs, request and response headers, and UoT frames.
 pub mod vless;
+
+/// XUDP framing under the VLESS Mux command.
+pub mod xudp;
