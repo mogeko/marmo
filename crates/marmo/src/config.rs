@@ -11,6 +11,7 @@ use std::str::FromStr;
 use marmo_net::Network;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use zeroize::Zeroize;
 
 /// Upper bound for a configuration document (4 MiB).
 pub const MAX_CONFIG_BYTES: usize = 4 * 1024 * 1024;
@@ -19,7 +20,7 @@ pub const MAX_CONFIG_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    /// Schema version; only `1` is defined today.
+    /// Schema version; only `2` is defined today.
     pub version: u8,
     /// Global connection and timeout policy.
     pub limits: Limits,
@@ -68,7 +69,7 @@ impl Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: 2,
             limits: Limits::default(),
             inbounds: Vec::new(),
             outbounds: Vec::new(),
@@ -143,6 +144,17 @@ pub struct Inbound {
     pub fallback: Option<String>,
 }
 
+impl Drop for Inbound {
+    fn drop(&mut self) {
+        if let Some(password) = self.password.as_mut() {
+            password.zeroize();
+        }
+        if let Some(uuid) = self.uuid.as_mut() {
+            uuid.zeroize();
+        }
+    }
+}
+
 /// Inbound protocols.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -203,14 +215,14 @@ pub enum StreamNetwork {
 #[derive(Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct InboundTls {
-    /// PEM or DER certificate chain, leaf first.
+    /// Inline PEM certificate chain, leaf first (ADR-0023).
     pub certificate: String,
-    /// PEM or DER ECDSA/Ed25519 private key.
+    /// Inline PEM ECDSA/Ed25519 private key (ADR-0023).
     pub private_key: String,
     /// ALPN protocols in server preference order.
     #[serde(default)]
     pub alpn: Option<Vec<String>>,
-    /// PEM or DER client-certificate trust anchors.
+    /// Inline PEM client-certificate trust anchors (ADR-0023).
     #[serde(default)]
     pub client_ca: Option<String>,
     /// Whether a client certificate is requested and verified.
@@ -219,6 +231,16 @@ pub struct InboundTls {
     /// TLS handshake deadline.
     #[serde(default = "default_handshake_timeout_s")]
     pub handshake_timeout_s: u16,
+}
+
+impl Drop for InboundTls {
+    fn drop(&mut self) {
+        self.certificate.zeroize();
+        self.private_key.zeroize();
+        if let Some(ca) = self.client_ca.as_mut() {
+            ca.zeroize();
+        }
+    }
 }
 
 /// Client-certificate policy.
@@ -274,6 +296,17 @@ pub struct Outbound {
     pub health_check: Option<HealthCheck>,
 }
 
+impl Drop for Outbound {
+    fn drop(&mut self) {
+        if let Some(password) = self.password.as_mut() {
+            password.zeroize();
+        }
+        if let Some(uuid) = self.uuid.as_mut() {
+            uuid.zeroize();
+        }
+    }
+}
+
 /// Outbound protocols.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -293,24 +326,32 @@ pub enum OutboundProtocol {
 }
 
 /// Outbound TLS settings.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Tls {
     /// SNI override.
+    #[serde(default)]
     pub sni: Option<String>,
-    /// Disable certificate verification. Intended for tests only.
+    /// Skip certificate verification for a loopback test server.
+    ///
+    /// Validation rejects this for any non-loopback server; use a trusted
+    /// certificate or a private CA instead.
+    #[serde(default)]
     pub insecure: bool,
     /// ALPN protocols in client preference order.
+    #[serde(default)]
     pub alpn: Option<Vec<String>>,
     /// Require the server to select this protocol.
+    #[serde(default)]
     pub required_alpn: Option<String>,
-    /// PEM or DER client certificate chain.
+    /// Inline PEM client certificate chain (ADR-0023).
+    #[serde(default)]
     pub client_certificate: Option<String>,
-    /// PEM or DER client private key.
+    /// Inline PEM client private key (ADR-0023).
+    #[serde(default)]
     pub client_private_key: Option<String>,
-    /// Treat a missing `close_notify` as EOF.
-    pub allow_truncation_attacks: bool,
     /// TLS handshake deadline.
+    #[serde(default = "default_handshake_timeout_s")]
     pub handshake_timeout_s: u16,
 }
 
@@ -323,8 +364,38 @@ impl Default for Tls {
             required_alpn: None,
             client_certificate: None,
             client_private_key: None,
-            allow_truncation_attacks: false,
             handshake_timeout_s: 10,
+        }
+    }
+}
+
+impl fmt::Debug for Tls {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Tls")
+            .field("sni", &self.sni)
+            .field("insecure", &self.insecure)
+            .field("alpn", &self.alpn)
+            .field("required_alpn", &self.required_alpn)
+            .field(
+                "client_certificate",
+                &self.client_certificate.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "client_private_key",
+                &self.client_private_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field("handshake_timeout_s", &self.handshake_timeout_s)
+            .finish()
+    }
+}
+
+impl Drop for Tls {
+    fn drop(&mut self) {
+        if let Some(certificate) = self.client_certificate.as_mut() {
+            certificate.zeroize();
+        }
+        if let Some(key) = self.client_private_key.as_mut() {
+            key.zeroize();
         }
     }
 }
@@ -459,7 +530,7 @@ mod tests {
 
     const FULL: &str = r#"
     {
-      "version": 1,
+      "version": 2,
       "limits": {
         "max_connections": 16,
         "handshake_timeout_s": 3,
@@ -474,10 +545,10 @@ mod tests {
           "listen": "127.0.0.1:443",
           "uuid": "00000000-0000-0000-0000-000000000001",
           "tls": {
-            "certificate": "cert.pem",
-            "private_key": "key.pem",
+            "certificate": "-----BEGIN CERTIFICATE----- x -----END CERTIFICATE-----",
+            "private_key": "-----BEGIN PRIVATE KEY----- x -----END PRIVATE KEY-----",
             "alpn": ["h2", "http/1.1"],
-            "client_ca": "ca.pem",
+            "client_ca": "-----BEGIN CERTIFICATE----- x -----END CERTIFICATE-----",
             "client_auth": "required"
           },
           "transport": {
@@ -516,7 +587,7 @@ mod tests {
     #[test]
     fn parses_defaults() {
         let config = Config::from_json("{}").expect("parse");
-        assert_eq!(config.version, 1);
+        assert_eq!(config.version, 2);
         assert_eq!(config.limits, Limits::default());
         assert!(config.inbounds.is_empty());
         assert!(config.outbounds.is_empty());
@@ -558,6 +629,17 @@ mod tests {
     }
 
     #[test]
+    fn redacts_tls_private_key_in_debug() {
+        let mut tls = Tls::default();
+        tls.client_private_key = Some("SECRET-KEY".into());
+        tls.client_certificate = Some("SECRET-CERT".into());
+        let text = format!("{tls:?}");
+        assert!(!text.contains("SECRET-KEY"));
+        assert!(!text.contains("SECRET-CERT"));
+        assert!(text.contains("<redacted>"));
+    }
+
+    #[test]
     fn rejects_unknown_fields() {
         let error = Config::from_json(r#"{"unknown": true}"#).expect_err("unknown");
         match error {
@@ -577,7 +659,7 @@ mod tests {
 
     #[test]
     fn rejects_duplicate_fields() {
-        let error = Config::from_json(r#"{"version":1,"version":2}"#).expect_err("duplicate");
+        let error = Config::from_json(r#"{"version":2,"version":2}"#).expect_err("duplicate");
         assert!(matches!(error, ConfigError::Json { .. }));
     }
 
@@ -618,7 +700,7 @@ mod tests {
     #[test]
     fn from_str_matches_from_json() {
         let config: Config = "{}".parse().expect("parse");
-        assert_eq!(config.version, 1);
+        assert_eq!(config.version, 2);
     }
 
     #[test]

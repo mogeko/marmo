@@ -6,8 +6,10 @@
 //! ```
 //! Client (SOCKS5 front):
 //! ```sh
-//! cargo run -p marmo --example trojan -- client 127.0.0.1:1080 proxy.example:443 secret
+//! cargo run -p marmo --example trojan -- client 127.0.0.1:1080 proxy.example:443 secret [sni] [insecure]
 //! ```
+//! `insecure` skips certificate verification and is accepted only for a
+//! loopback test server.
 
 #[path = "common/mod.rs"]
 mod common;
@@ -41,10 +43,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let listen = common::required(2, "front listen")?;
             let server = common::required(3, "server endpoint")?;
             let password = common::required(4, "password")?;
-            let tls = match common::arg(5) {
-                Some(sni) => format!(r#"{{ "sni": "{sni}" }}"#),
-                None => r#"{ "insecure": true }"#.into(),
-            };
+            let mut fields = Vec::new();
+            if let Some(sni) = common::arg(5) {
+                fields.push(format!(r#""sni": "{sni}""#));
+            }
+            if common::arg(6).as_deref() == Some("insecure") {
+                fields.push(r#""insecure": true"#.into());
+            }
+            let tls = format!("{{ {} }}", fields.join(", "));
             let json = format!(
                 r#"{{ "inbounds": [ {{ "tag": "socks", "protocol": "socks5", "listen": "{listen}" }} ],
                       "outbounds": [ {{ "tag": "trojan", "protocol": "trojan",

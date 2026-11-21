@@ -1,5 +1,6 @@
 //! Datagram outbounds: direct sockets and Shadowsocks 2022 framing.
 
+use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 
@@ -11,10 +12,17 @@ use crate::outbound::trojan::TrojanUdpClient;
 use crate::outbound::vless::{VlessUdpClient, VlessXudpClient};
 use crate::shadowsocks::SsUdpClient;
 
+/// Bound on cached direct-UDP resolutions per association.
+const DIRECT_CACHE: usize = 64;
+
 /// An established datagram path to one outbound.
 pub(crate) enum UdpOutbound {
     /// A socket that sends to resolved targets directly.
-    Direct { socket: UdpSocket, ipv4: bool },
+    Direct {
+        socket: UdpSocket,
+        ipv4: bool,
+        cache: HashMap<Endpoint, SocketAddr>,
+    },
     /// A Shadowsocks 2022 association with one server.
     Shadowsocks(SsUdpClient),
     /// A Trojan UDP association over one TLS stream.
@@ -36,14 +44,29 @@ impl UdpOutbound {
         Ok(Self::Direct {
             socket: UdpSocket::bind(bind).await?,
             ipv4,
+            cache: HashMap::new(),
         })
     }
 
     /// Sends one datagram to `target`.
     pub(crate) async fn send_to(&mut self, target: &Endpoint, payload: &[u8]) -> io::Result<()> {
         match self {
-            Self::Direct { socket, ipv4 } => {
-                let address = direct::resolve_udp(target, *ipv4).await?;
+            Self::Direct {
+                socket,
+                ipv4,
+                cache,
+            } => {
+                let address = match cache.get(target) {
+                    Some(address) => *address,
+                    None => {
+                        let address = direct::resolve_udp(target, *ipv4).await?;
+                        if cache.len() >= DIRECT_CACHE {
+                            cache.clear();
+                        }
+                        cache.insert(target.clone(), address);
+                        address
+                    }
+                };
                 socket.send_to(payload, address).await?;
                 Ok(())
             }

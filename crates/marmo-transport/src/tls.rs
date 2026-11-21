@@ -8,6 +8,7 @@
 
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
@@ -37,7 +38,7 @@ pub enum ClientAuth {
 }
 
 /// Parameters for a TLS client.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Default)]
 pub struct TlsClientOptions<'a> {
     /// SNI name or IP address; must match the server certificate.
     pub server_name: &'a str,
@@ -51,10 +52,12 @@ pub struct TlsClientOptions<'a> {
     pub client_certificate: Option<&'a str>,
     /// PEM or DER client private key.
     pub client_private_key: Option<&'a str>,
+    /// Optional handshake deadline; `None` leaves it to the caller.
+    pub handshake_timeout: Option<Duration>,
 }
 
 /// Parameters for a TLS server.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct TlsServerOptions<'a> {
     /// PEM or DER certificate chain, leaf first.
     pub certificate: &'a str,
@@ -66,6 +69,41 @@ pub struct TlsServerOptions<'a> {
     pub client_ca: Option<&'a str>,
     /// Client-certificate policy.
     pub client_auth: ClientAuth,
+    /// Optional handshake deadline; `None` leaves it to the caller.
+    pub handshake_timeout: Option<Duration>,
+}
+
+impl std::fmt::Debug for TlsClientOptions<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TlsClientOptions")
+            .field("server_name", &self.server_name)
+            .field("alpn", &self.alpn)
+            .field("required_alpn", &self.required_alpn)
+            .field("insecure", &self.insecure)
+            .field(
+                "client_certificate",
+                &self.client_certificate.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "client_private_key",
+                &self.client_private_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field("handshake_timeout", &self.handshake_timeout)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for TlsServerOptions<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TlsServerOptions")
+            .field("certificate", &"<redacted>")
+            .field("private_key", &"<redacted>")
+            .field("alpn", &self.alpn)
+            .field("client_ca", &self.client_ca.as_ref().map(|_| "<redacted>"))
+            .field("client_auth", &self.client_auth)
+            .field("handshake_timeout", &self.handshake_timeout)
+            .finish()
+    }
 }
 
 /// A TLS client with a fixed configuration; clone the `Arc` to share it.
@@ -74,6 +112,7 @@ pub struct TlsClient {
     connector: TlsConnector,
     server_name: ServerName<'static>,
     required_alpn: Option<Vec<u8>>,
+    handshake_timeout: Option<Duration>,
 }
 
 impl std::fmt::Debug for TlsClient {
@@ -123,15 +162,25 @@ impl TlsClient {
             connector: TlsConnector::from(Arc::new(config)),
             server_name,
             required_alpn,
+            handshake_timeout: options.handshake_timeout,
         })
     }
 
     /// Wraps `inner` in TLS and enforces `required_alpn` when configured.
     pub async fn connect(&self, inner: BoxStream) -> Result<BoxStream, TlsError> {
-        let stream = self
-            .connector
-            .connect(self.server_name.clone(), inner)
-            .await?;
+        let stream = match self.handshake_timeout {
+            Some(limit) => tokio::time::timeout(
+                limit,
+                self.connector.connect(self.server_name.clone(), inner),
+            )
+            .await
+            .map_err(|_| TlsError::Timeout)??,
+            None => {
+                self.connector
+                    .connect(self.server_name.clone(), inner)
+                    .await?
+            }
+        };
         if let Some(required) = self.required_alpn.as_deref() {
             let negotiated = stream.get_ref().1.alpn_protocol();
             if negotiated != Some(required) {
@@ -146,6 +195,7 @@ impl TlsClient {
 #[derive(Clone)]
 pub struct TlsServer {
     acceptor: TlsAcceptor,
+    handshake_timeout: Option<Duration>,
 }
 
 impl std::fmt::Debug for TlsServer {
@@ -168,6 +218,7 @@ impl TlsServer {
 
         Ok(Self {
             acceptor: TlsAcceptor::from(Arc::new(config)),
+            handshake_timeout: options.handshake_timeout,
         })
     }
 
@@ -176,7 +227,12 @@ impl TlsServer {
     /// The caller owns the handshake deadline; `Instance` applies the ADR-0015
     /// reaper instead of a timer inside the adapter.
     pub async fn accept(&self, inner: BoxStream) -> Result<AcceptedTls, TlsError> {
-        let stream = self.acceptor.clone().accept(inner).await?;
+        let stream = match self.handshake_timeout {
+            Some(limit) => tokio::time::timeout(limit, self.acceptor.clone().accept(inner))
+                .await
+                .map_err(|_| TlsError::Timeout)??,
+            None => self.acceptor.clone().accept(inner).await?,
+        };
         let alpn = stream.get_ref().1.alpn_protocol().map(<[u8]>::to_vec);
         Ok(AcceptedTls {
             stream: Box::new(stream),
@@ -235,6 +291,9 @@ pub enum TlsError {
     /// The handshake failed.
     #[error("TLS handshake failed: {0}")]
     Handshake(#[source] io::Error),
+    /// The handshake exceeded its configured deadline.
+    #[error("TLS handshake timed out")]
+    Timeout,
 }
 
 impl From<rustls::Error> for TlsError {
@@ -388,6 +447,7 @@ mod tests {
             alpn,
             client_ca: ca,
             client_auth: auth,
+            handshake_timeout: None,
         })
         .expect("server")
     }
@@ -400,6 +460,7 @@ mod tests {
             insecure: true,
             client_certificate: None,
             client_private_key: None,
+            handshake_timeout: None,
         })
         .expect("client")
     }
@@ -499,6 +560,7 @@ mod tests {
             insecure: true,
             client_certificate: Some(CLIENT_CERT),
             client_private_key: Some(CLIENT_KEY),
+            handshake_timeout: None,
         })
         .expect("client");
         assert_eq!(echo(address, &client).await, b"ping");
@@ -519,9 +581,35 @@ mod tests {
             connector: TlsConnector::from(Arc::new(config)),
             server_name: ServerName::try_from("localhost".to_owned()).expect("name"),
             required_alpn: None,
+            handshake_timeout: None,
         };
         assert_eq!(echo(address, &client).await, b"ping");
         task.await.expect("server task");
+    }
+
+    #[test]
+    fn debug_redacts_private_key_material() {
+        let client = TlsClientOptions {
+            client_private_key: Some("SECRET-KEY"),
+            client_certificate: Some("SECRET-CERT"),
+            ..TlsClientOptions::default()
+        };
+        let text = format!("{client:?}");
+        assert!(!text.contains("SECRET-KEY"));
+        assert!(!text.contains("SECRET-CERT"));
+
+        let server = TlsServerOptions {
+            certificate: "SECRET-CERT",
+            private_key: "SECRET-KEY",
+            alpn: &[],
+            client_ca: Some("SECRET-CA"),
+            client_auth: ClientAuth::None,
+            handshake_timeout: None,
+        };
+        let text = format!("{server:?}");
+        assert!(!text.contains("SECRET-KEY"));
+        assert!(!text.contains("SECRET-CERT"));
+        assert!(!text.contains("SECRET-CA"));
     }
 
     #[test]
@@ -545,6 +633,7 @@ mod tests {
                 alpn: &[],
                 client_ca: None,
                 client_auth: ClientAuth::None,
+                handshake_timeout: None,
             }),
             Err(TlsError::Certificate)
         ));
@@ -555,6 +644,7 @@ mod tests {
                 alpn: &[],
                 client_ca: None,
                 client_auth: ClientAuth::None,
+                handshake_timeout: None,
             }),
             Err(TlsError::Config(_))
         ));
@@ -565,6 +655,7 @@ mod tests {
                 alpn: &[],
                 client_ca: None,
                 client_auth: ClientAuth::Required,
+                handshake_timeout: None,
             }),
             Err(TlsError::ClientCaRequired)
         ));

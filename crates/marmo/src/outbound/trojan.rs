@@ -1,7 +1,7 @@
 //! Trojan outbound: TLS, authentication line, and CONNECT request.
 
 use std::io;
-use std::net::SocketAddr;
+use std::sync::Arc;
 
 use marmo_net::Endpoint;
 use marmo_proto::trojan::{
@@ -20,7 +20,7 @@ pub(crate) async fn connect(
     tls: &TlsClient,
     password: &PasswordHash,
     target: &Endpoint,
-) -> io::Result<(BoxStream, Option<SocketAddr>)> {
+) -> io::Result<(BoxStream, Option<std::net::SocketAddr>)> {
     let inner = crate::direct::connect(server).await?;
     let bound = inner.local_addr().ok();
     let mut stream = tls.connect(Box::new(inner)).await.map_err(tls_error)?;
@@ -32,6 +32,36 @@ pub(crate) async fn connect(
     header.zeroize();
     written?;
     Ok((stream, bound))
+}
+
+/// A Trojan outbound node.
+pub(crate) struct TrojanOutbound {
+    pub(crate) server: Endpoint,
+    pub(crate) password: Arc<PasswordHash>,
+    pub(crate) tls: Arc<TlsClient>,
+}
+
+impl crate::outbound::Outbound for TrojanOutbound {
+    fn connect<'a>(
+        &'a self,
+        target: &'a Endpoint,
+    ) -> marmo_transport::BoxFuture<'a, io::Result<crate::outbound::Connected>> {
+        Box::pin(async move {
+            let (stream, bound) = connect(&self.server, &self.tls, &self.password, target).await?;
+            Ok(crate::outbound::Connected::with_bound(stream, bound))
+        })
+    }
+
+    fn connect_datagram<'a>(
+        &'a self,
+        target: &'a Endpoint,
+        _ipv4: bool,
+    ) -> marmo_transport::BoxFuture<'a, io::Result<Option<crate::outbound::udp::UdpOutbound>>> {
+        Box::pin(async move {
+            let client = connect_udp(&self.server, &self.tls, &self.password, target).await?;
+            Ok(Some(crate::outbound::udp::UdpOutbound::Trojan(client)))
+        })
+    }
 }
 
 /// A Trojan UDP association carried over one TLS stream.

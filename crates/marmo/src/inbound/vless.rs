@@ -9,18 +9,14 @@ use marmo_proto::vless::{
     Uuid, is_mux_target, request_progress,
 };
 use marmo_proto::xudp::{STATUS_END, STATUS_KEEP, STATUS_KEEPALIVE, STATUS_NEW};
-use marmo_transport::h2::H2Server;
-use marmo_transport::tls::TlsServer;
-use marmo_transport::ws::WsServer;
-use marmo_transport::{BoxStream, RelayOptions, relay};
+use marmo_transport::{BoxStream, Layer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
-use tokio::time::timeout;
+use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
+use crate::deadline::{Deadline, wait_for_activity};
 use crate::instance::Context;
-use crate::outbound::trojan::tls_error;
 use crate::outbound::udp::UdpOutbound;
 use crate::routing::{Action, Metadata};
 use crate::vless::{UotReader, write_udp_frame};
@@ -37,18 +33,14 @@ pub(crate) async fn handle(
     context: Arc<Context>,
     inbound: Arc<str>,
     uuid: Arc<Uuid>,
-    tls: Arc<TlsServer>,
-    ws: Option<Arc<WsServer>>,
-    h2: Option<Arc<H2Server>>,
+    layers: Arc<[Arc<dyn Layer>]>,
+    deadline: Deadline,
 ) {
     let token = context.supervisor.token();
     let source = client.peer_addr().ok().map(Endpoint::from);
     let prepared = tokio::select! {
         _ = token.cancelled() => return,
-        result = timeout(
-            context.limits.handshake_timeout,
-            prepare(client, &tls, ws.as_deref(), h2.as_deref(), &uuid),
-        ) => result,
+        result = deadline.run(prepare(client, &layers, &uuid)) => result,
     };
     let (
         Ok(Ok(Prepared::Request {
@@ -65,16 +57,22 @@ pub(crate) async fn handle(
 
     match command {
         COMMAND_TCP => {
-            connect_relay(stream, &context, &inbound, source, target, leftover, token).await;
+            connect_relay(
+                stream, &context, &inbound, source, target, leftover, token, deadline,
+            )
+            .await;
         }
         COMMAND_UDP => {
-            handle_udp(stream, context, inbound, source, target, leftover, token).await;
+            handle_udp(
+                stream, context, inbound, source, target, leftover, token, deadline,
+            )
+            .await;
         }
         COMMAND_MUX => {
             if !is_mux_target(&target) {
                 return;
             }
-            handle_xudp(stream, context, inbound, source, leftover, token).await;
+            handle_xudp(stream, context, inbound, source, leftover, token, deadline).await;
         }
         _ => {}
     }
@@ -91,17 +89,12 @@ enum Prepared {
 
 async fn prepare(
     client: TcpStream,
-    tls: &TlsServer,
-    ws: Option<&WsServer>,
-    h2: Option<&H2Server>,
+    layers: &[Arc<dyn Layer>],
     uuid: &Uuid,
 ) -> io::Result<Prepared> {
-    let accepted = tls.accept(Box::new(client)).await.map_err(tls_error)?;
-    let mut stream = accepted.stream;
-    if let Some(ws) = ws {
-        stream = ws.accept(stream).await.map_err(io::Error::other)?.stream;
-    } else if let Some(h2) = h2 {
-        stream = h2.accept(stream).await.map_err(io::Error::other)?;
+    let mut stream: BoxStream = Box::new(client);
+    for layer in layers {
+        stream = layer.accept(stream).await.map_err(io::Error::other)?;
     }
     let mut buffer = [0_u8; REQUEST_HEADER_MAX];
     let mut filled = 0;
@@ -140,6 +133,7 @@ async fn prepare(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn connect_relay(
     mut stream: BoxStream,
     context: &Context,
@@ -148,17 +142,19 @@ async fn connect_relay(
     target: Endpoint,
     leftover: Vec<u8>,
     token: CancellationToken,
+    deadline: Deadline,
 ) {
     let Some(action) = route(context, inbound, source, &target, Network::Tcp) else {
         return;
     };
     let connected = tokio::select! {
         _ = token.cancelled() => return,
-        result = timeout(context.limits.handshake_timeout, context.connect(action, &target)) => result,
+        result = deadline.run(context.connect(action, &target)) => result,
     };
-    let Ok(Ok((mut remote, _bound))) = connected else {
+    let Ok(Ok(connected)) = connected else {
         return;
     };
+    let mut remote = connected.stream;
     if stream.write_all(&RESPONSE).await.is_err() {
         return;
     }
@@ -168,6 +164,7 @@ async fn connect_relay(
     relay_streams(stream, remote, context, token).await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_udp(
     mut stream: BoxStream,
     context: Arc<Context>,
@@ -176,6 +173,7 @@ async fn handle_udp(
     target: Endpoint,
     leftover: Vec<u8>,
     token: CancellationToken,
+    deadline: Deadline,
 ) {
     let ipv4 = source.ip().is_none_or(|ip| ip.is_ipv4());
     let Some(action) = route(&context, &inbound, source, &target, Network::Udp) else {
@@ -183,10 +181,7 @@ async fn handle_udp(
     };
     let outbound = tokio::select! {
         _ = token.cancelled() => return,
-        result = timeout(
-            context.limits.handshake_timeout,
-            context.udp_outbound(action, ipv4, &target),
-        ) => result,
+        result = deadline.run(context.udp_outbound(action, ipv4, &target)) => result,
     };
     let Ok(Ok(Some(outbound))) = outbound else {
         return;
@@ -199,6 +194,7 @@ async fn handle_udp(
     let Ok(mut frames) = UotReader::new(&leftover) else {
         return;
     };
+    let activity = Arc::new(Notify::new());
     let (sender, receiver) = mpsc::channel(UDP_QUEUE);
     let reply = tokio::spawn(reply_loop(
         writer,
@@ -207,11 +203,18 @@ async fn handle_udp(
         target,
         token.clone(),
         false,
+        Arc::clone(&activity),
     ));
 
     loop {
         let next = tokio::select! {
             _ = token.cancelled() => break,
+            idle = wait_for_activity(context.limits.idle_timeout, &activity) => {
+                if idle {
+                    break;
+                }
+                continue;
+            }
             result = frames.next(&mut reader) => result,
         };
         let Ok(Some(payload)) = next else {
@@ -236,6 +239,7 @@ async fn handle_xudp(
     source: Endpoint,
     leftover: Vec<u8>,
     token: CancellationToken,
+    deadline: Deadline,
 ) {
     let ipv4 = source.ip().is_none_or(|ip| ip.is_ipv4());
     let Ok(mut frames) = XudpReader::new(&leftover) else {
@@ -259,10 +263,7 @@ async fn handle_xudp(
     };
     let outbound = tokio::select! {
         _ = token.cancelled() => return,
-        result = timeout(
-            context.limits.handshake_timeout,
-            context.udp_outbound(action, ipv4, &target),
-        ) => result,
+        result = deadline.run(context.udp_outbound(action, ipv4, &target)) => result,
     };
     let Ok(Ok(Some(mut outbound))) = outbound else {
         return;
@@ -275,6 +276,7 @@ async fn handle_xudp(
     }
 
     let (mut reader, writer) = tokio::io::split(stream);
+    let activity = Arc::new(Notify::new());
     let (sender, receiver) = mpsc::channel(UDP_QUEUE);
     let reply = tokio::spawn(reply_loop(
         writer,
@@ -283,11 +285,18 @@ async fn handle_xudp(
         target.clone(),
         token.clone(),
         true,
+        Arc::clone(&activity),
     ));
 
     loop {
         let next = tokio::select! {
             _ = token.cancelled() => break,
+            idle = wait_for_activity(context.limits.idle_timeout, &activity) => {
+                if idle {
+                    break;
+                }
+                continue;
+            }
             result = frames.next(&mut reader) => result,
         };
         let Ok(Some(frame)) = next else {
@@ -326,6 +335,7 @@ async fn reply_loop(
     target: Endpoint,
     token: CancellationToken,
     xudp: bool,
+    activity: Arc<Notify>,
 ) {
     let mut buffer = vec![0_u8; MAX_UDP_PAYLOAD];
     loop {
@@ -341,6 +351,7 @@ async fn reply_loop(
                 let Ok((length, _source)) = received else {
                     continue;
                 };
+                activity.notify_one();
                 let written = if xudp {
                     write_keep(&mut writer, &buffer[..length]).await
                 } else {
@@ -378,15 +389,7 @@ async fn relay_streams(
     context: &Context,
     token: CancellationToken,
 ) {
-    let options = RelayOptions {
-        idle_timeout: context.limits.idle_timeout,
-        uplink_grace: context.limits.uplink_grace,
-        downlink_grace: context.limits.downlink_grace,
-    };
-    tokio::select! {
-        _ = token.cancelled() => {}
-        _ = relay(client, remote, options) => {}
-    }
+    context.relay_streams(client, remote, &token).await;
 }
 
 fn invalid(message: &str) -> io::Error {

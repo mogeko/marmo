@@ -16,9 +16,10 @@ domain/IP-CIDR/port routing, relay, metrics, TLS ALPN, HTTP/2 and WebSocket
 transport packages, and global connection limits/timeouts (ADR-0015).
 
 > **Migration in progress (2026-11-21).** G1 passed: the Rust target is
-> accepted (ADR-0017..ADR-0020); R1 (address layer, relay, limits, TCP engine)
-> is complete on `rusty`. The Zig tree is frozen and remains the 0.0.2
-> implementation; `master` stays Zig-only until the parity integration merge.
+> accepted (ADR-0017..ADR-0023). R2 and R3 are complete and R4 hardening is in
+> progress on `rusty` (interfaces, selectors/health, metrics, schema v2). The
+> Zig tree is frozen and remains the 0.0.2 implementation; `master` stays
+> Zig-only until the parity integration merge.
 > See [docs/architecture.md](docs/architecture.md) for the target design and
 > [docs/rust-migration.md](docs/rust-migration.md) for the roadmap.
 

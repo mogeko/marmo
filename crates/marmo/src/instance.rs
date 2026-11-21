@@ -15,24 +15,27 @@ use marmo_net::{Endpoint, Network};
 use marmo_proto::shadowsocks::{Key, Method};
 use marmo_proto::trojan::PasswordHash;
 use marmo_proto::vless::Uuid;
-use marmo_transport::BoxStream;
 use marmo_transport::h2::{H2Client, H2ClientOptions, H2Server, H2ServerOptions};
 use marmo_transport::tls::{TlsClient, TlsClientOptions, TlsServer, TlsServerOptions};
 use marmo_transport::ws::{WsClient, WsClientOptions, WsServer, WsServerOptions};
+use marmo_transport::{BoxStream, Layer, RelayError, RelayOptions, relay};
 use thiserror::Error;
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::net::{TcpListener, UdpSocket};
 use tokio::runtime::Handle;
 use tokio::task::JoinSet;
 use tokio::time::{interval, timeout};
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{Config, ConfigError, InboundProtocol, OutboundProtocol, StreamNetwork};
-use crate::direct;
+use crate::config::{
+    Config, ConfigError, HealthCheck, InboundProtocol, OutboundProtocol, Strategy, StreamNetwork,
+};
+use crate::deadline::Deadline;
 use crate::inbound::{self, http, socks5};
 use crate::limits::Limits;
-use crate::outbound::{self, http_connect, udp::UdpOutbound};
+use crate::metrics::{MetricEvent, Metrics, MetricsSink, MetricsSnapshot};
+use crate::outbound::{self, Outbound, http_connect, udp::UdpOutbound};
 use crate::routing::{Action, Router, RoutingError};
-use crate::shadowsocks::{SsUdpClient, credentials};
+use crate::shadowsocks::credentials;
 use crate::supervisor::Supervisor;
 
 /// A built instance; no sockets are open yet.
@@ -41,6 +44,7 @@ pub struct Instance {
     limits: Limits,
     supervisor: Arc<Supervisor>,
     router: Arc<Router>,
+    metrics: Arc<Metrics>,
     outbounds: Vec<OutboundSpec>,
     inbounds: Vec<InboundSpec>,
 }
@@ -53,6 +57,7 @@ impl Instance {
             config,
             runtime: None,
             shutdown_grace: None,
+            metrics: None,
         }
     }
 
@@ -61,7 +66,14 @@ impl Instance {
     pub fn handle(&self) -> InstanceHandle {
         InstanceHandle {
             token: self.supervisor.token(),
+            metrics: Arc::clone(&self.metrics),
         }
+    }
+
+    /// Returns a point-in-time copy of the instance counters.
+    #[must_use]
+    pub fn metrics(&self) -> MetricsSnapshot {
+        self.metrics.snapshot()
     }
 
     /// Binds every inbound, builds TLS configurations, and returns the
@@ -72,14 +84,37 @@ impl Instance {
             limits,
             supervisor,
             router,
+            metrics,
             outbounds,
             inbounds,
         } = self;
 
-        let mut kinds = Vec::with_capacity(outbounds.len());
-        for spec in outbounds {
-            kinds.push(spec.build()?);
+        let mut specs: Vec<Option<OutboundSpec>> = outbounds.into_iter().map(Some).collect();
+        let mut kinds: Vec<Option<Arc<dyn Outbound>>> = (0..specs.len()).map(|_| None).collect();
+        let mut built = std::collections::HashMap::new();
+        for (index, slot) in specs.iter_mut().enumerate() {
+            let Some(spec) = slot.as_ref() else {
+                continue;
+            };
+            if spec.is_selector() {
+                continue;
+            }
+            let tag = spec.tag.to_string();
+            let spec = slot.take().expect("checked above");
+            let outbound = spec.build_node()?;
+            built.insert(tag, Arc::clone(&outbound));
+            kinds[index] = Some(outbound);
         }
+        for (index, slot) in specs.iter_mut().enumerate() {
+            let Some(spec) = slot.take() else {
+                continue;
+            };
+            kinds[index] = Some(spec.build_selector(&built, Arc::clone(&metrics))?);
+        }
+        let kinds: Vec<Arc<dyn Outbound>> = kinds
+            .into_iter()
+            .map(|kind| kind.expect("every outbound is built"))
+            .collect();
 
         let mut bound = Vec::with_capacity(inbounds.len());
         for spec in inbounds {
@@ -124,6 +159,7 @@ impl Instance {
             limits,
             supervisor,
             router,
+            metrics,
             outbounds: kinds,
             inbounds: bound,
         })
@@ -148,6 +184,7 @@ pub struct InstanceBuilder {
     config: Config,
     runtime: Option<Handle>,
     shutdown_grace: Option<Duration>,
+    metrics: Option<Arc<dyn MetricsSink>>,
 }
 
 impl InstanceBuilder {
@@ -163,6 +200,13 @@ impl InstanceBuilder {
     #[must_use]
     pub fn shutdown_grace(mut self, grace: Duration) -> Self {
         self.shutdown_grace = Some(grace);
+        self
+    }
+
+    /// Installs an optional metrics sink.
+    #[must_use]
+    pub fn metrics(mut self, sink: Arc<dyn MetricsSink>) -> Self {
+        self.metrics = Some(sink);
         self
     }
 
@@ -454,12 +498,11 @@ impl InstanceBuilder {
                         h2,
                     }
                 }
-                OutboundProtocol::Selector => {
-                    return Err(BuildError::UnsupportedOutbound {
-                        tag: outbound.tag.clone(),
-                        protocol: OutboundProtocol::Selector,
-                    });
-                }
+                OutboundProtocol::Selector => OutboundConfig::Selector {
+                    nodes: outbound.nodes.clone().unwrap_or_default(),
+                    strategy: outbound.strategy.unwrap_or(Strategy::Manual),
+                    health_check: outbound.health_check.clone(),
+                },
             };
             outbounds.push(OutboundSpec {
                 tag: Arc::from(outbound.tag.as_str()),
@@ -468,14 +511,34 @@ impl InstanceBuilder {
         }
 
         let supervisor = Arc::new(Supervisor::new(limits.max_connections));
+        let metrics = Arc::new(Metrics::new(self.metrics));
         Ok(Instance {
             runtime,
             limits,
             supervisor,
             router: Arc::new(router),
+            metrics,
             outbounds,
             inbounds,
         })
+    }
+}
+
+/// Aborts selector health tasks when serving ends or the future is dropped.
+#[derive(Default)]
+struct HealthTasks(Vec<tokio::task::JoinHandle<()>>);
+
+impl HealthTasks {
+    fn abort_all(&mut self) {
+        for task in self.0.drain(..) {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for HealthTasks {
+    fn drop(&mut self) {
+        self.abort_all();
     }
 }
 
@@ -485,7 +548,8 @@ pub struct BoundInstance {
     limits: Limits,
     supervisor: Arc<Supervisor>,
     router: Arc<Router>,
-    outbounds: Vec<OutboundKind>,
+    metrics: Arc<Metrics>,
+    outbounds: Vec<Arc<dyn Outbound>>,
     inbounds: Vec<BoundInbound>,
 }
 
@@ -517,7 +581,14 @@ impl BoundInstance {
     pub fn handle(&self) -> InstanceHandle {
         InstanceHandle {
             token: self.supervisor.token(),
+            metrics: Arc::clone(&self.metrics),
         }
+    }
+
+    /// Returns a point-in-time copy of the instance counters.
+    #[must_use]
+    pub fn metrics(&self) -> MetricsSnapshot {
+        self.metrics.snapshot()
     }
 
     /// Accepts until the handle shuts down or a listener fails.
@@ -529,10 +600,18 @@ impl BoundInstance {
             runtime: runtime.clone(),
             supervisor: Arc::clone(&supervisor),
             router: self.router,
+            metrics: self.metrics,
+            direct: Arc::new(crate::direct::DirectOutbound),
             outbounds: self.outbounds,
             limits,
         });
         let token = supervisor.token();
+        let mut health = HealthTasks::default();
+        for outbound in &context.outbounds {
+            if let Some(task) = outbound.start_health(&context.runtime, &token) {
+                health.0.push(task);
+            }
+        }
 
         let mut tasks = JoinSet::new();
         for inbound in self.inbounds {
@@ -562,6 +641,7 @@ impl BoundInstance {
         }
 
         supervisor.cancel();
+        health.abort_all();
         let grace = limits.shutdown_grace;
         let drain = async { while tasks.join_next().await.is_some() {} };
         if timeout(grace, drain).await.is_err() {
@@ -596,6 +676,7 @@ impl BoundInstance {
 #[derive(Clone)]
 pub struct InstanceHandle {
     token: CancellationToken,
+    metrics: Arc<Metrics>,
 }
 
 impl InstanceHandle {
@@ -608,6 +689,12 @@ impl InstanceHandle {
     #[must_use]
     pub fn is_shutdown(&self) -> bool {
         self.token.is_cancelled()
+    }
+
+    /// Returns a point-in-time copy of the instance counters.
+    #[must_use]
+    pub fn metrics(&self) -> MetricsSnapshot {
+        self.metrics.snapshot()
     }
 }
 
@@ -626,18 +713,20 @@ pub(crate) struct Context {
     pub(crate) runtime: Handle,
     pub(crate) supervisor: Arc<Supervisor>,
     pub(crate) router: Arc<Router>,
-    pub(crate) outbounds: Vec<OutboundKind>,
+    pub(crate) metrics: Arc<Metrics>,
+    pub(crate) direct: Arc<dyn Outbound>,
+    pub(crate) outbounds: Vec<Arc<dyn Outbound>>,
     pub(crate) limits: Limits,
 }
 
 impl Context {
     pub(crate) fn udp_direct(&self, action: Action) -> bool {
         match action {
-            Action::Direct => true,
-            Action::Route(id) => matches!(
-                self.outbounds.get(id.index() as usize),
-                Some(OutboundKind::Direct)
-            ),
+            Action::Direct => self.direct.is_direct(),
+            Action::Route(id) => self
+                .outbounds
+                .get(id.index() as usize)
+                .is_some_and(|outbound| outbound.is_direct()),
             Action::Reject(_) => false,
         }
     }
@@ -646,52 +735,11 @@ impl Context {
         &self,
         action: Action,
         target: &Endpoint,
-    ) -> io::Result<(BoxStream, Option<SocketAddr>)> {
+    ) -> io::Result<outbound::Connected> {
         match action {
-            Action::Direct => direct::connect(target).await.map(boxed),
+            Action::Direct => self.direct.connect(target).await,
             Action::Route(id) => match self.outbounds.get(id.index() as usize) {
-                Some(OutboundKind::Direct) => direct::connect(target).await.map(boxed),
-                Some(OutboundKind::Http { server }) => {
-                    http_connect::connect(server, target).await.map(boxed)
-                }
-                Some(OutboundKind::Trojan {
-                    server,
-                    password,
-                    tls,
-                }) => {
-                    let (stream, bound) =
-                        outbound::trojan::connect(server, tls, password, target).await?;
-                    Ok((stream, bound))
-                }
-                Some(OutboundKind::Vless {
-                    server,
-                    uuid,
-                    tls,
-                    ws,
-                    h2,
-                    ..
-                }) => {
-                    let (stream, bound) = outbound::vless::connect(
-                        server,
-                        tls.as_deref(),
-                        ws.as_deref(),
-                        h2.as_deref(),
-                        uuid,
-                        target,
-                    )
-                    .await?;
-                    Ok((stream, bound))
-                }
-                Some(OutboundKind::Shadowsocks {
-                    server,
-                    method,
-                    key,
-                }) => {
-                    let (stream, bound) =
-                        outbound::shadowsocks::connect(server, *method, Arc::clone(key), target)
-                            .await?;
-                    Ok((Box::new(stream), bound))
-                }
+                Some(outbound) => outbound.connect(target).await,
                 None => Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "outbound id is out of range",
@@ -708,6 +756,34 @@ impl Context {
     ///
     /// `target` seeds protocols whose association header carries a
     /// destination, such as Trojan UDP ASSOCIATE.
+    /// Relays a TCP pair with the instance limits and cancellation.
+    pub(crate) async fn relay_streams(
+        &self,
+        client: BoxStream,
+        remote: BoxStream,
+        token: &CancellationToken,
+    ) {
+        let options = RelayOptions {
+            idle_timeout: self.limits.idle_timeout,
+            uplink_grace: self.limits.uplink_grace,
+            downlink_grace: self.limits.downlink_grace,
+        };
+        let result = tokio::select! {
+            _ = token.cancelled() => return,
+            result = relay(client, remote, options) => result,
+        };
+        match result {
+            Ok(stats) => self.metrics.record(MetricEvent::BytesRelayed {
+                client_to_remote: stats.client_to_remote,
+                remote_to_client: stats.remote_to_client,
+            }),
+            Err(RelayError::Idle | RelayError::HalfClose) => {
+                self.metrics.record(MetricEvent::RelayTimeout);
+            }
+            Err(_) => {}
+        }
+    }
+
     pub(crate) async fn udp_outbound(
         &self,
         action: Action,
@@ -715,58 +791,9 @@ impl Context {
         target: &Endpoint,
     ) -> io::Result<Option<UdpOutbound>> {
         match action {
-            Action::Direct => Ok(Some(UdpOutbound::direct(ipv4).await?)),
+            Action::Direct => self.direct.connect_datagram(target, ipv4).await,
             Action::Route(id) => match self.outbounds.get(id.index() as usize) {
-                Some(OutboundKind::Direct) => Ok(Some(UdpOutbound::direct(ipv4).await?)),
-                Some(OutboundKind::Shadowsocks {
-                    server,
-                    method,
-                    key,
-                }) => Ok(Some(UdpOutbound::Shadowsocks(
-                    SsUdpClient::connect(server, *method, Arc::clone(key)).await?,
-                ))),
-                Some(OutboundKind::Trojan {
-                    server,
-                    password,
-                    tls,
-                }) => Ok(Some(UdpOutbound::Trojan(
-                    outbound::trojan::connect_udp(server, tls, password, target).await?,
-                ))),
-                Some(OutboundKind::Vless {
-                    server,
-                    uuid,
-                    tls,
-                    xudp,
-                    ws,
-                    h2,
-                }) => {
-                    if *xudp {
-                        Ok(Some(UdpOutbound::VlessXudp(
-                            outbound::vless::connect_xudp(
-                                server,
-                                tls.as_deref(),
-                                ws.as_deref(),
-                                h2.as_deref(),
-                                uuid,
-                                target,
-                            )
-                            .await?,
-                        )))
-                    } else {
-                        Ok(Some(UdpOutbound::Vless(
-                            outbound::vless::connect_udp(
-                                server,
-                                tls.as_deref(),
-                                ws.as_deref(),
-                                h2.as_deref(),
-                                uuid,
-                                target,
-                            )
-                            .await?,
-                        )))
-                    }
-                }
-                Some(OutboundKind::Http { .. }) => Ok(None),
+                Some(outbound) => outbound.connect_datagram(target, ipv4).await,
                 None => Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "outbound id is out of range",
@@ -775,37 +802,6 @@ impl Context {
             Action::Reject(_) => Ok(None),
         }
     }
-}
-
-fn boxed(stream: TcpStream) -> (BoxStream, Option<SocketAddr>) {
-    let bound = stream.local_addr().ok();
-    (Box::new(stream), bound)
-}
-
-#[derive(Clone, Debug)]
-pub(crate) enum OutboundKind {
-    Direct,
-    Http {
-        server: Endpoint,
-    },
-    Shadowsocks {
-        server: Endpoint,
-        method: Method,
-        key: Arc<Key>,
-    },
-    Trojan {
-        server: Endpoint,
-        password: Arc<PasswordHash>,
-        tls: Arc<TlsClient>,
-    },
-    Vless {
-        server: Endpoint,
-        uuid: Arc<Uuid>,
-        tls: Option<Arc<TlsClient>>,
-        xudp: bool,
-        ws: Option<Arc<WsClient>>,
-        h2: Option<Arc<H2Client>>,
-    },
 }
 
 #[derive(Clone)]
@@ -823,9 +819,7 @@ enum InboundKind {
     },
     Vless {
         uuid: Arc<Uuid>,
-        tls: Arc<TlsServer>,
-        ws: Option<Arc<WsServer>>,
-        h2: Option<Arc<H2Server>>,
+        layers: Arc<[Arc<dyn Layer>]>,
     },
 }
 
@@ -861,6 +855,7 @@ struct InboundTlsConfig {
     alpn: Vec<String>,
     client_ca: Option<String>,
     client_auth: crate::config::ClientAuth,
+    handshake_timeout: Duration,
 }
 
 impl InboundTlsConfig {
@@ -871,6 +866,7 @@ impl InboundTlsConfig {
             alpn: tls.alpn.clone().unwrap_or_default(),
             client_ca: tls.client_ca.clone(),
             client_auth: tls.client_auth,
+            handshake_timeout: Duration::from_secs(u64::from(tls.handshake_timeout_s)),
         }
     }
 }
@@ -890,12 +886,20 @@ impl InboundConfig {
                 tls: build_tls_server(&tls, tag)?,
                 fallback,
             },
-            Self::Vless { uuid, tls, ws, h2 } => InboundKind::Vless {
-                uuid,
-                tls: build_tls_server(&tls, tag)?,
-                ws: ws.map(|options| Arc::new(WsServer::new(options))),
-                h2: h2.map(|options| Arc::new(H2Server::new(options))),
-            },
+            Self::Vless { uuid, tls, ws, h2 } => {
+                let mut layers: Vec<Arc<dyn Layer>> = Vec::new();
+                layers.push(build_tls_server(&tls, tag)?);
+                if let Some(options) = ws {
+                    layers.push(Arc::new(WsServer::new(options)));
+                }
+                if let Some(options) = h2 {
+                    layers.push(Arc::new(H2Server::new(options)));
+                }
+                InboundKind::Vless {
+                    uuid,
+                    layers: Arc::from(layers),
+                }
+            }
         })
     }
 }
@@ -928,6 +932,11 @@ enum OutboundConfig {
         ws: Option<WsClientOptions>,
         h2: Option<H2ClientOptions>,
     },
+    Selector {
+        nodes: Vec<String>,
+        strategy: Strategy,
+        health_check: Option<HealthCheck>,
+    },
 }
 
 struct OutboundTlsConfig {
@@ -937,32 +946,37 @@ struct OutboundTlsConfig {
     insecure: bool,
     client_certificate: Option<String>,
     client_private_key: Option<String>,
+    handshake_timeout: Duration,
 }
 
 impl OutboundSpec {
-    fn build(self) -> Result<OutboundKind, BindError> {
+    fn is_selector(&self) -> bool {
+        matches!(self.config, OutboundConfig::Selector { .. })
+    }
+
+    fn build_node(self) -> Result<Arc<dyn Outbound>, BindError> {
         let Self { tag, config } = self;
         Ok(match config {
-            OutboundConfig::Direct => OutboundKind::Direct,
-            OutboundConfig::Http { server } => OutboundKind::Http { server },
+            OutboundConfig::Direct => Arc::new(crate::direct::DirectOutbound),
+            OutboundConfig::Http { server } => Arc::new(http_connect::HttpOutbound { server }),
             OutboundConfig::Shadowsocks {
                 server,
                 method,
                 key,
-            } => OutboundKind::Shadowsocks {
+            } => Arc::new(outbound::shadowsocks::ShadowsocksOutbound {
                 server,
                 method,
                 key,
-            },
+            }),
             OutboundConfig::Trojan {
                 server,
                 password,
                 tls,
-            } => OutboundKind::Trojan {
+            } => Arc::new(outbound::trojan::TrojanOutbound {
                 server,
                 password,
                 tls: build_tls_client(&tls, &tag)?,
-            },
+            }),
             OutboundConfig::Vless {
                 server,
                 uuid,
@@ -970,18 +984,61 @@ impl OutboundSpec {
                 xudp,
                 ws,
                 h2,
-            } => OutboundKind::Vless {
-                server,
-                uuid,
-                tls: tls
-                    .as_ref()
-                    .map(|tls| build_tls_client(tls, &tag))
-                    .transpose()?,
-                xudp,
-                ws: ws.map(|options| Arc::new(WsClient::new(options))),
-                h2: h2.map(|options| Arc::new(H2Client::new(options))),
-            },
+            } => {
+                let mut layers: Vec<Arc<dyn Layer>> = Vec::new();
+                if let Some(tls) = tls.as_ref() {
+                    layers.push(build_tls_client(tls, &tag)?);
+                }
+                if let Some(options) = ws {
+                    layers.push(Arc::new(WsClient::new(options)));
+                }
+                if let Some(options) = h2 {
+                    layers.push(Arc::new(H2Client::new(options)));
+                }
+                Arc::new(outbound::vless::VlessOutbound {
+                    server,
+                    uuid,
+                    xudp,
+                    layers,
+                })
+            }
+            OutboundConfig::Selector { .. } => {
+                unreachable!("selectors are built in the second pass")
+            }
         })
+    }
+
+    fn build_selector(
+        self,
+        built: &std::collections::HashMap<String, Arc<dyn Outbound>>,
+        metrics: Arc<Metrics>,
+    ) -> Result<Arc<dyn Outbound>, BindError> {
+        let Self { tag, config } = self;
+        let OutboundConfig::Selector {
+            nodes,
+            strategy,
+            health_check,
+        } = config
+        else {
+            unreachable!("non-selectors are built in the first pass");
+        };
+        let mut resolved = Vec::with_capacity(nodes.len());
+        for node in nodes {
+            let Some(outbound) = built.get(&node) else {
+                return Err(BindError::Selector {
+                    tag: tag.to_string(),
+                    reason: format!("unknown selector node '{node}'"),
+                });
+            };
+            resolved.push(Arc::clone(outbound));
+        }
+        Ok(Arc::new(outbound::selector::SelectorOutbound::new(
+            tag.to_string(),
+            metrics,
+            resolved,
+            strategy,
+            health_check,
+        )))
     }
 }
 
@@ -1018,6 +1075,7 @@ fn build_tls_server(tls: &InboundTlsConfig, tag: &str) -> Result<Arc<TlsServer>,
         alpn: &tls.alpn,
         client_ca: tls.client_ca.as_deref(),
         client_auth: transport_client_auth(tls.client_auth),
+        handshake_timeout: Some(tls.handshake_timeout),
     };
     let server = TlsServer::new(&options).map_err(|error| BindError::Tls {
         tag: tag.to_owned(),
@@ -1034,6 +1092,7 @@ fn build_tls_client(tls: &OutboundTlsConfig, tag: &str) -> Result<Arc<TlsClient>
         insecure: tls.insecure,
         client_certificate: tls.client_certificate.as_deref(),
         client_private_key: tls.client_private_key.as_deref(),
+        handshake_timeout: Some(tls.handshake_timeout),
     };
     let client = TlsClient::new(&options).map_err(|error| BindError::Tls {
         tag: tag.to_owned(),
@@ -1072,6 +1131,7 @@ fn outbound_tls_config(
         insecure: tls.insecure,
         client_certificate: tls.client_certificate.clone(),
         client_private_key: tls.client_private_key.clone(),
+        handshake_timeout: Duration::from_secs(u64::from(tls.handshake_timeout_s)),
     })
 }
 
@@ -1138,21 +1198,28 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                 };
 
                 let Some(permit) = context.supervisor.try_acquire() else {
+                    context.metrics.record(MetricEvent::ConnectionRejected);
                     drop(stream);
                     continue;
                 };
+                context.metrics.record(MetricEvent::ConnectionAccepted);
                 let tag = Arc::clone(&inbound.tag);
                 let kind = inbound.kind.clone();
                 let task_context = Arc::clone(&context);
+                let deadline = Deadline::after(
+                    context.limits.handshake_timeout,
+                    Arc::clone(&context.metrics),
+                );
+                let metrics = Arc::clone(&context.metrics);
                 let runtime = context.runtime.clone();
                 let _ = connections.spawn_on(async move {
                     let _permit = permit;
                     match kind {
                         InboundKind::Socks5 => {
-                            socks5::handle(stream, task_context, tag).await;
+                            socks5::handle(stream, task_context, tag, deadline).await;
                         }
                         InboundKind::Http => {
-                            http::handle(stream, task_context, tag).await;
+                            http::handle(stream, task_context, tag, deadline).await;
                         }
                         InboundKind::Shadowsocks { method, key } => {
                             inbound::shadowsocks::handle(
@@ -1161,6 +1228,7 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                                 tag,
                                 method,
                                 key,
+                                deadline,
                             )
                             .await;
                         }
@@ -1176,27 +1244,23 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                                 tls,
                                 password,
                                 fallback,
+                                deadline,
                             )
                             .await;
                         }
-                        InboundKind::Vless {
-                            uuid,
-                            tls,
-                            ws,
-                            h2,
-                        } => {
+                        InboundKind::Vless { uuid, layers } => {
                             inbound::vless::handle(
                                 stream,
                                 task_context,
                                 tag,
                                 uuid,
-                                tls,
-                                ws,
-                                h2,
+                                layers,
+                                deadline,
                             )
                             .await;
                         }
                     }
+                    metrics.record(MetricEvent::ConnectionClosed);
                 }, &runtime);
             }
         }
@@ -1234,14 +1298,6 @@ pub enum BuildError {
         tag: String,
         /// Configured protocol.
         protocol: InboundProtocol,
-    },
-    /// The outbound protocol is not implemented yet.
-    #[error("outbound '{tag}' protocol {protocol:?} is not implemented")]
-    UnsupportedOutbound {
-        /// Outbound tag.
-        tag: String,
-        /// Configured protocol.
-        protocol: OutboundProtocol,
     },
     /// The listen endpoint is not an IP literal.
     #[error("inbound '{tag}' listen is not an IP endpoint: {listen}")]
@@ -1289,6 +1345,14 @@ pub enum BuildError {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum BindError {
+    /// A selector graph was rejected while binding.
+    #[error("selector '{tag}' failed: {reason}")]
+    Selector {
+        /// Selector tag.
+        tag: String,
+        /// Why the selector was rejected.
+        reason: String,
+    },
     /// A TLS configuration was rejected while binding.
     #[error("'{tag}' TLS setup failed: {reason}")]
     Tls {

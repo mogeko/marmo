@@ -10,47 +10,42 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use httparse::Status;
-use marmo_net::{Endpoint, Network};
-use marmo_transport::{BoxStream, RelayOptions, relay};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
-use tokio::time::timeout;
-
+use crate::deadline::Deadline;
 use crate::instance::Context;
 use crate::routing::{Action, Metadata};
+use httparse::Status;
+use marmo_net::{Endpoint, Network};
+use marmo_transport::BoxStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 const HEAD_MAX: usize = 8192;
 const FORWARD_HEAD_MAX: usize = HEAD_MAX + 1024;
 const MAX_HEADERS: usize = 64;
 
 /// Handles one accepted HTTP proxy connection.
-pub(crate) async fn handle(mut client: TcpStream, context: Arc<Context>, inbound: Arc<str>) {
+pub(crate) async fn handle(
+    mut client: TcpStream,
+    context: Arc<Context>,
+    inbound: Arc<str>,
+    deadline: Deadline,
+) {
     let token = context.supervisor.token();
     let handshake = tokio::select! {
         _ = token.cancelled() => return,
-        result = timeout(
-            context.limits.handshake_timeout,
-            prepare(&mut client, &context, &inbound),
-        ) => result,
+        result = deadline.run(prepare(&mut client, &context, &inbound)) => result,
     };
     let Ok(Ok(Some(remote))) = handshake else {
         return;
     };
 
-    let options = RelayOptions {
-        idle_timeout: context.limits.idle_timeout,
-        uplink_grace: context.limits.uplink_grace,
-        downlink_grace: context.limits.downlink_grace,
-    };
-    tokio::select! {
-        _ = token.cancelled() => {}
-        _ = relay(
+    context
+        .relay_streams(
             Box::new(client) as BoxStream,
             Box::new(remote) as BoxStream,
-            options,
-        ) => {}
-    }
+            &token,
+        )
+        .await;
 }
 
 async fn prepare(
@@ -140,7 +135,7 @@ async fn connect_tunnel(
         return Ok(None);
     };
     let mut remote = match context.connect(action, &destination).await {
-        Ok((remote, _bound)) => remote,
+        Ok(connected) => connected.stream,
         Err(_) => {
             let _ = respond(client, "502 Bad Gateway").await;
             return Ok(None);
@@ -198,7 +193,7 @@ async fn forward(
         return Ok(None);
     };
     let mut remote = match context.connect(action, &target.endpoint).await {
-        Ok((remote, _bound)) => remote,
+        Ok(connected) => connected.stream,
         Err(_) => {
             let _ = respond(client, "502 Bad Gateway").await;
             return Ok(None);

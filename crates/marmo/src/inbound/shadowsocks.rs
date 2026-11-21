@@ -2,15 +2,14 @@
 
 use std::sync::Arc;
 
-use marmo_net::{Endpoint, Network};
-use marmo_proto::shadowsocks::{Key, Method};
-use marmo_transport::{BoxStream, RelayOptions, relay};
-use tokio::net::TcpStream;
-use tokio::time::timeout;
-
+use crate::deadline::Deadline;
 use crate::instance::Context;
 use crate::routing::Metadata;
 use crate::shadowsocks::SsStream;
+use marmo_net::{Endpoint, Network};
+use marmo_proto::shadowsocks::{Key, Method};
+use marmo_transport::BoxStream;
+use tokio::net::TcpStream;
 
 /// Handles one accepted Shadowsocks 2022 connection.
 pub(crate) async fn handle(
@@ -19,6 +18,7 @@ pub(crate) async fn handle(
     inbound: Arc<str>,
     method: Method,
     key: Arc<Key>,
+    deadline: Deadline,
 ) {
     let token = context.supervisor.token();
     let source = match client.peer_addr() {
@@ -27,7 +27,7 @@ pub(crate) async fn handle(
     };
     let accepted = tokio::select! {
         _ = token.cancelled() => return,
-        result = timeout(context.limits.handshake_timeout, SsStream::accept(client, method, key)) => result,
+        result = deadline.run(SsStream::accept(client, method, key)) => result,
     };
     let Ok(Ok((stream, target))) = accepted else {
         return;
@@ -44,23 +44,13 @@ pub(crate) async fn handle(
     let action = context.router.route(&metadata);
     let connected = tokio::select! {
         _ = token.cancelled() => return,
-        result = timeout(context.limits.handshake_timeout, context.connect(action, &target)) => result,
+        result = deadline.run(context.connect(action, &target)) => result,
     };
-    let Ok(Ok((remote, _bound))) = connected else {
+    let Ok(Ok(connected)) = connected else {
         return;
     };
 
-    let options = RelayOptions {
-        idle_timeout: context.limits.idle_timeout,
-        uplink_grace: context.limits.uplink_grace,
-        downlink_grace: context.limits.downlink_grace,
-    };
-    tokio::select! {
-        _ = token.cancelled() => {}
-        _ = relay(
-            Box::new(stream) as BoxStream,
-            remote,
-            options,
-        ) => {}
-    }
+    context
+        .relay_streams(Box::new(stream) as BoxStream, connected.stream, &token)
+        .await;
 }

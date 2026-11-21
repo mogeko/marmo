@@ -21,11 +21,14 @@ impl Config {
     /// [`Config::from_json`] calls this, so a parsed config is ready for
     /// `Instance`. A programmatically built `Config` must call it explicitly.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.version != 1 {
-            return Err(fail(
-                "version",
-                format!("unsupported version {}", self.version),
-            ));
+        if self.version != 2 {
+            let message = if self.version == 1 {
+                "version 1 is not supported by the Rust schema; version 2 carries inline PEM TLS credentials (ADR-0023)"
+                    .to_owned()
+            } else {
+                format!("unsupported version {}", self.version)
+            };
+            return Err(fail("version", message));
         }
         validate_limits(&self.limits)?;
         validate_inbounds(&self.inbounds)?;
@@ -169,7 +172,7 @@ fn validate_trojan_inbound(inbound: &Inbound, index: usize) -> Result<(), Config
         .tls
         .as_ref()
         .ok_or_else(|| fail(format!("inbounds[{index}].tls"), "required for trojan"))?;
-    validate_inbound_tls_files(tls, index)?;
+    validate_inbound_tls(tls, index)?;
     validate_inbound_tls_auth(tls, index)?;
 
     if let Some(fallback) = inbound.fallback.as_deref() {
@@ -207,26 +210,23 @@ fn validate_vless_inbound(inbound: &Inbound, index: usize) -> Result<(), ConfigE
         .tls
         .as_ref()
         .ok_or_else(|| fail(format!("inbounds[{index}].tls"), "required for vless"))?;
-    validate_inbound_tls_files(tls, index)?;
+    validate_inbound_tls(tls, index)?;
     validate_inbound_tls_auth(tls, index)?;
     validate_alpn(tls.alpn.as_deref(), None, &format!("inbounds[{index}].tls"))?;
     validate_inbound_transport(inbound, index)
 }
 
-fn validate_inbound_tls_files(
-    tls: &crate::config::InboundTls,
-    index: usize,
-) -> Result<(), ConfigError> {
-    if tls.certificate.is_empty() {
+fn validate_inbound_tls(tls: &crate::config::InboundTls, index: usize) -> Result<(), ConfigError> {
+    if !valid_pem(&tls.certificate) {
         return Err(fail(
             format!("inbounds[{index}].tls.certificate"),
-            "must not be empty",
+            "must be inline PEM (ADR-0023); file paths are not accepted",
         ));
     }
-    if tls.private_key.is_empty() {
+    if !valid_pem(&tls.private_key) {
         return Err(fail(
             format!("inbounds[{index}].tls.private_key"),
-            "must not be empty",
+            "must be inline PEM (ADR-0023); file paths are not accepted",
         ));
     }
     if tls.handshake_timeout_s == 0 {
@@ -256,9 +256,9 @@ fn validate_inbound_tls_auth(
             format!("inbounds[{index}].tls.client_ca"),
             "required when client_auth is enabled",
         )),
-        (_, Some("")) => Err(fail(
+        (_, Some(value)) if !valid_pem(value) => Err(fail(
             format!("inbounds[{index}].tls.client_ca"),
-            "must not be empty",
+            "must be inline PEM (ADR-0023); file paths are not accepted",
         )),
         (_, Some(_)) => Ok(()),
     }
@@ -586,6 +586,12 @@ fn validate_outbound_tls(tls: &Tls, server: &Endpoint, index: usize) -> Result<(
             "required for an IP server",
         ));
     }
+    if tls.insecure && !is_loopback(server) {
+        return Err(fail(
+            format!("outbounds[{index}].tls.insecure"),
+            "only allowed for a loopback test server; use a trusted certificate",
+        ));
+    }
     if tls.handshake_timeout_s == 0 {
         return Err(fail(
             format!("outbounds[{index}].tls.handshake_timeout_s"),
@@ -600,19 +606,19 @@ fn validate_outbound_tls(tls: &Tls, server: &Endpoint, index: usize) -> Result<(
             "requires client_private_key and vice versa",
         ));
     }
-    if let Some(path) = tls.client_certificate.as_deref() {
-        if path.is_empty() {
+    if let Some(value) = tls.client_certificate.as_deref() {
+        if !valid_pem(value) {
             return Err(fail(
                 format!("outbounds[{index}].tls.client_certificate"),
-                "must not be empty",
+                "must be inline PEM (ADR-0023); file paths are not accepted",
             ));
         }
     }
-    if let Some(path) = tls.client_private_key.as_deref() {
-        if path.is_empty() {
+    if let Some(value) = tls.client_private_key.as_deref() {
+        if !valid_pem(value) {
             return Err(fail(
                 format!("outbounds[{index}].tls.client_private_key"),
-                "must not be empty",
+                "must be inline PEM (ADR-0023); file paths are not accepted",
             ));
         }
     }
@@ -892,6 +898,15 @@ fn valid_uuid(text: &str) -> bool {
     }
 }
 
+fn is_loopback(endpoint: &Endpoint) -> bool {
+    endpoint.ip().is_some_and(|ip| ip.is_loopback()) || endpoint.domain() == Some("localhost")
+}
+
+fn valid_pem(text: &str) -> bool {
+    let text = text.trim_start();
+    text.starts_with("-----BEGIN ") && text.contains("-----END ")
+}
+
 fn valid_path(path: &str) -> bool {
     !path.is_empty()
         && path.len() <= 255
@@ -963,7 +978,8 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_version() {
-        assert_path(error(r#"{"version":2}"#), "version");
+        assert_path(error(r#"{"version":1}"#), "version");
+        assert_path(error(r#"{"version":3}"#), "version");
     }
 
     #[test]
@@ -1030,11 +1046,30 @@ mod tests {
     }
 
     #[test]
+    fn rejects_file_paths_as_credentials() {
+        let inbound_path = r#"{"inbounds":[{
+            "tag":"vl","protocol":"vless","listen":"127.0.0.1:443",
+            "uuid":"00000000-0000-0000-0000-000000000001",
+            "tls":{"certificate":"/etc/marmo/server.pem",
+                   "private_key":"-----BEGIN PRIVATE KEY----- x -----END PRIVATE KEY-----"}
+        }]}"#;
+        assert_path(error(inbound_path), "inbounds[0].tls.certificate");
+
+        let outbound_path = r#"{"outbounds":[{
+            "tag":"vl","protocol":"vless","server":"example.com:443",
+            "uuid":"00000000-0000-0000-0000-000000000001",
+            "tls":{"client_certificate":"/etc/marmo/client.pem",
+                   "client_private_key":"-----BEGIN PRIVATE KEY----- x -----END PRIVATE KEY-----"}
+        }]}"#;
+        assert_path(error(outbound_path), "outbounds[0].tls.client_certificate");
+    }
+
+    #[test]
     fn validates_trojan_inbound() {
         let good = r#"{"inbounds":[{
             "tag":"tj","protocol":"trojan","listen":"127.0.0.1:443",
             "password":"secret",
-            "tls":{"certificate":"cert.pem","private_key":"key.pem"}
+            "tls":{"certificate":"-----BEGIN CERTIFICATE----- x -----END CERTIFICATE-----","private_key":"-----BEGIN PRIVATE KEY----- x -----END PRIVATE KEY-----"}
         }]}"#;
         assert!(parse(good).is_ok());
 
@@ -1047,7 +1082,7 @@ mod tests {
         let bad_fallback = r#"{"inbounds":[{
             "tag":"tj","protocol":"trojan","listen":"127.0.0.1:443",
             "password":"secret","fallback":"not-an-endpoint",
-            "tls":{"certificate":"cert.pem","private_key":"key.pem"}
+            "tls":{"certificate":"-----BEGIN CERTIFICATE----- x -----END CERTIFICATE-----","private_key":"-----BEGIN PRIVATE KEY----- x -----END PRIVATE KEY-----"}
         }]}"#;
         assert_path(error(bad_fallback), "inbounds[0].fallback");
     }
@@ -1057,21 +1092,21 @@ mod tests {
         let good = r#"{"inbounds":[{
             "tag":"vl","protocol":"vless","listen":"127.0.0.1:443",
             "uuid":"00000000-0000-0000-0000-000000000001",
-            "tls":{"certificate":"cert.pem","private_key":"key.pem"}
+            "tls":{"certificate":"-----BEGIN CERTIFICATE----- x -----END CERTIFICATE-----","private_key":"-----BEGIN PRIVATE KEY----- x -----END PRIVATE KEY-----"}
         }]}"#;
         assert!(parse(good).is_ok());
 
         let bad_uuid = r#"{"inbounds":[{
             "tag":"vl","protocol":"vless","listen":"127.0.0.1:443",
             "uuid":"nope",
-            "tls":{"certificate":"cert.pem","private_key":"key.pem"}
+            "tls":{"certificate":"-----BEGIN CERTIFICATE----- x -----END CERTIFICATE-----","private_key":"-----BEGIN PRIVATE KEY----- x -----END PRIVATE KEY-----"}
         }]}"#;
         assert_path(error(bad_uuid), "inbounds[0].uuid");
 
         let missing_ca = r#"{"inbounds":[{
             "tag":"vl","protocol":"vless","listen":"127.0.0.1:443",
             "uuid":"00000000-0000-0000-0000-000000000001",
-            "tls":{"certificate":"cert.pem","private_key":"key.pem","client_auth":"required"}
+            "tls":{"certificate":"-----BEGIN CERTIFICATE----- x -----END CERTIFICATE-----","private_key":"-----BEGIN PRIVATE KEY----- x -----END PRIVATE KEY-----","client_auth":"required"}
         }]}"#;
         assert_path(error(missing_ca), "inbounds[0].tls.client_ca");
     }
@@ -1081,7 +1116,7 @@ mod tests {
         let tcp_with_path = r#"{"inbounds":[{
             "tag":"vl","protocol":"vless","listen":"127.0.0.1:443",
             "uuid":"00000000-0000-0000-0000-000000000001",
-            "tls":{"certificate":"cert.pem","private_key":"key.pem"},
+            "tls":{"certificate":"-----BEGIN CERTIFICATE----- x -----END CERTIFICATE-----","private_key":"-----BEGIN PRIVATE KEY----- x -----END PRIVATE KEY-----"},
             "transport":{"network":"tcp","path":"/x"}
         }]}"#;
         assert_path(error(tcp_with_path), "inbounds[0].transport");
@@ -1171,10 +1206,25 @@ mod tests {
     }
 
     #[test]
+    fn restricts_insecure_tls_to_loopback() {
+        let loopback = r#"{"outbounds":[{
+            "tag":"t","protocol":"trojan","server":"127.0.0.1:443",
+            "password":"secret","tls":{"insecure":true}
+        }]}"#;
+        assert!(parse(loopback).is_ok());
+
+        let public = r#"{"outbounds":[{
+            "tag":"t","protocol":"trojan","server":"example.com:443",
+            "password":"secret","tls":{"insecure":true}
+        }]}"#;
+        assert_path(error(public), "outbounds[0].tls.insecure");
+    }
+
+    #[test]
     fn validates_tls_and_alpn() {
         let certificate_without_key = r#"{"outbounds":[{
             "tag":"t","protocol":"trojan","server":"example.com:443",
-            "password":"secret","tls":{"client_certificate":"x"}
+            "password":"secret","tls":{"client_certificate":"-----BEGIN CERTIFICATE----- x -----END CERTIFICATE-----"}
         }]}"#;
         assert_path(
             error(certificate_without_key),

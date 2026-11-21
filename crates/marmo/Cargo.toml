@@ -25,6 +25,7 @@ zeroize.workspace = true
 
 [dev-dependencies]
 marmo-transport.workspace = true
+proptest.workspace = true
 
 [lints]
 workspace = true

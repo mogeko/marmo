@@ -122,9 +122,9 @@ Rules:
 - **Dropping is cancellation.** A dropped connection future must leave the
   session table, metrics, and peer stream in a consistent state. Every
   `select!` branch is either cancel-safe or is not dropped (ADR-0017).
-- **No blocking on the executor.** Certificate and key files are read with
-  `spawn_blocking` during `start`; anything that can block stays outside the
-  connection path.
+- **No filesystem I/O in the library.** TLS credentials arrive as inline PEM
+  in the configuration and are parsed during `bind()`; the embedder reads
+  files or fetches secrets (ADR-0023).
 - **Config is immutable per instance in parity.** Reload is post-parity: it
   builds a new `CompiledConfig` and publishes it through `ArcSwap`, so the data
   plane never locks.
@@ -193,7 +193,7 @@ nothing.
 | Crate | Published | Contents |
 | --- | --- | --- |
 | `marmo` | yes | public facade, `Instance`, config, routing, inbounds, outbounds, metrics |
-| `marmo-proto` | yes | SOCKS5, HTTP/1, SS2022, Trojan, VLESS, XUDP codecs; no I/O, no tokio |
+| `marmo-proto` | yes | SOCKS5, SS2022, Trojan, VLESS, XUDP codecs; no I/O, no tokio |
 | `marmo-net` | yes | `Endpoint`, CIDR, socket options, resolver interface |
 | `marmo-transport` | yes | stream/datagram traits, TLS/WS/H2/QUIC adapters, relay |
 | `marmo-testkit` | no | fake streams, fixture loader, loopback helpers |
@@ -201,6 +201,8 @@ nothing.
 Five crates. `inbound`, `outbound`, `routing`, and `config` stay inside
 `marmo` because `Instance` wires all of them and splitting would only add
 re-export churn. All crates version together at `0.x` until the API is stable.
+The minimal HTTP/1 inbound still parses in `marmo`; moving that parser into
+`marmo-proto` is follow-up work so it can share the fuzz harness.
 
 ### 8.2 Streams and datagrams
 
@@ -608,7 +610,7 @@ future cancels it but does not wait.
 pub struct Config { /* owned; no borrows */ }
 
 impl Config {
-    /// Strict JSON, version 1. Unknown fields and duplicate keys are errors.
+    /// Strict JSON, version 2. Unknown fields and duplicate keys are errors.
     pub fn from_json(text: &str) -> Result<Self, ConfigError>;
 }
 
@@ -686,14 +688,15 @@ are the runtime-chosen traits, and `tower` compatibility is not promised.
 
 ### 14.4 Configuration and secrets
 
-- Config is strict JSON (`"version": 1`): unknown fields rejected, duplicate
-  keys rejected, defaults documented. The Rust schema stays compatible with the
-  Zig v1 schema; file reading is the embedder's job.
+- Config is strict JSON (`"version": 2`): unknown fields rejected, duplicate
+  keys rejected, defaults documented. TLS credentials are inline PEM in the
+  configuration (ADR-0023), so a Zig v1 document with file paths is rejected
+  explicitly rather than parsed as DER.
 - Global `limits` (`max_connections`, `handshake_timeout_s`,
   `idle_timeout_s`, `uplink_only_s`, `downlink_only_s`) are validated in
   `build()`. UDP session caps remain per-inbound fixed bounds in parity.
-- Credentials are loaded in `bind()` with `spawn_blocking`; `build()` never
-  touches the filesystem.
+- The library performs no filesystem I/O for credentials: `build()` and
+  `bind()` never read files, and `spawn_blocking` is not needed on this path.
 - Secrets use `SecretString`/`zeroize`; `Debug` redacts passwords, UUIDs, and
   keys. No payload, credential, or SNI is logged at `info`.
 - The library installs no global tracing subscriber and no signal handler; the

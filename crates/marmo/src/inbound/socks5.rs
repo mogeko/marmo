@@ -9,12 +9,13 @@ use marmo_proto::socks5::{
     Command, Greeting, METHOD_NO_ACCEPTABLE, METHOD_NO_AUTH, ReplyStatus, Request, VERSION,
     encode_method_selection, encode_reply, encode_udp, parse_udp,
 };
-use marmo_transport::{BoxStream, RelayOptions, relay};
+use marmo_transport::BoxStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
+use crate::deadline::Deadline;
 use crate::instance::Context;
 use crate::outbound::udp::UdpOutbound;
 use crate::routing::{Action, Metadata};
@@ -26,11 +27,16 @@ const UDP_BUFFER: usize = 65_535;
 const UDP_REPLY_BUFFER: usize = 65_535 + 262;
 
 /// Handles one accepted SOCKS5 connection.
-pub(crate) async fn handle(mut client: TcpStream, context: Arc<Context>, inbound: Arc<str>) {
+pub(crate) async fn handle(
+    mut client: TcpStream,
+    context: Arc<Context>,
+    inbound: Arc<str>,
+    deadline: Deadline,
+) {
     let token = context.supervisor.token();
     let handshake = tokio::select! {
         _ = token.cancelled() => return,
-        result = timeout(context.limits.handshake_timeout, handshake(&mut client)) => result,
+        result = deadline.run(handshake(&mut client)) => result,
     };
     let Ok(Ok(Some(request))) = handshake else {
         return;
@@ -40,27 +46,20 @@ pub(crate) async fn handle(mut client: TcpStream, context: Arc<Context>, inbound
         Command::Connect => {
             let connect = tokio::select! {
                 _ = token.cancelled() => return,
-                result = timeout(
-                    context.limits.handshake_timeout,
+                result = deadline.run(
                     connect_target(&mut client, &context, &inbound, request.destination),
                 ) => result,
             };
             let Ok(Ok(Some(remote))) = connect else {
                 return;
             };
-            let options = RelayOptions {
-                idle_timeout: context.limits.idle_timeout,
-                uplink_grace: context.limits.uplink_grace,
-                downlink_grace: context.limits.downlink_grace,
-            };
-            tokio::select! {
-                _ = token.cancelled() => {}
-                _ = relay(
+            context
+                .relay_streams(
                     Box::new(client) as BoxStream,
                     Box::new(remote) as BoxStream,
-                    options,
-                ) => {}
-            }
+                    &token,
+                )
+                .await;
         }
         Command::UdpAssociate => {
             udp_associate(client, context, inbound, token).await;
@@ -87,14 +86,14 @@ async fn connect_target(
     let action = context.router.route(&metadata);
 
     match context.connect(action, &destination).await {
-        Ok((remote, bound)) => {
-            if send_reply(client, ReplyStatus::Succeeded, bound)
+        Ok(connected) => {
+            if send_reply(client, ReplyStatus::Succeeded, connected.bound)
                 .await
                 .is_err()
             {
                 return Ok(None);
             }
-            Ok(Some(remote))
+            Ok(Some(connected.stream))
         }
         Err(error) => {
             let _ = send_reply(client, reply_status(&error), None).await;

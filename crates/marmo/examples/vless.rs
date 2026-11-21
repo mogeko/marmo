@@ -6,10 +6,11 @@
 //! ```
 //! Client (SOCKS5 front):
 //! ```sh
-//! cargo run -p marmo --example vless -- client 127.0.0.1:1080 proxy.example:443 UUID [tcp|ws|h2] [path] [xudp]
+//! cargo run -p marmo --example vless -- client 127.0.0.1:1080 proxy.example:443 UUID [tcp|ws|h2] [path] [xudp] [insecure]
 //! ```
-//! The client uses `tls.insecure` for self-signed test certificates;
-//! `xudp` selects XUDP framing for UDP instead of simple UoT.
+//! `xudp` selects XUDP framing for UDP instead of simple UoT. `insecure`
+//! skips certificate verification and is accepted only for a loopback test
+//! server.
 
 #[path = "common/mod.rs"]
 mod common;
@@ -47,11 +48,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let network = common::arg(5).unwrap_or_else(|| "tcp".into());
             let path = common::arg(6).unwrap_or_else(|| "/".into());
             let xudp = common::arg(7).as_deref() == Some("xudp");
+            let insecure = common::arg(8).as_deref() == Some("insecure");
             let transport = transport_json(&network, &path)?;
             let json = format!(
                 r#"{{ "inbounds": [ {{ "tag": "socks", "protocol": "socks5", "listen": "{listen}" }} ],
                       "outbounds": [ {{ "tag": "vless", "protocol": "vless", "server": "{server}",
-                                        "uuid": "{uuid}", "tls": {{ "insecure": true }},
+                                        "uuid": "{uuid}", "tls": {{ "insecure": {insecure} }},
                                         "xudp": {xudp}, "transport": {transport} }} ],
                       "route": {{ "final": "vless" }} }}"#
             );
