@@ -138,9 +138,9 @@ flavors; no design decision may assume a work-stealing scheduler.
 
 There is no `app` layer. `Instance` is the composition root: it parses config,
 owns listeners and selector state, and wires the layers together. Dependency
-direction is strictly downward: `marmo` → every crate, `marmo-transport` →
-`marmo-net`, `marmo-proto` → `marmo-net` (address parsing only), `marmo-net` →
-nothing.
+direction is strictly downward: `marmo` → every crate, `marmo-proto` →
+`marmo-net` (address parsing only), `marmo-net` → nothing. `marmo-transport`
+depends only on upstream crates and the erased stream boundary.
 
 ## 7. Component overview
 
@@ -188,9 +188,8 @@ nothing.
 | `marmo-proto` | yes | HTTP/1, SOCKS5, SS2022, Trojan, VLESS, XUDP codecs; no I/O, no tokio |
 | `marmo-net` | yes | `Endpoint`, CIDR, `Network` |
 | `marmo-transport` | yes | stream traits, TLS/WS/H2 layers, relay |
-| `marmo-testkit` | no | fake streams, fixture loader, loopback helpers |
 
-Five crates. `inbound`, `outbound`, `routing`, and `config` stay inside
+Four crates. `inbound`, `outbound`, `routing`, and `config` stay inside
 `marmo` because `Instance` wires all of them and splitting would only add
 re-export churn. All crates version together at `0.x` until the API is stable.
 
@@ -707,7 +706,6 @@ crates/
   marmo-proto/             codecs, no I/O
   marmo-net/               endpoints, CIDR, network
   marmo-transport/         stream traits, Layer adapters, relay
-  marmo-testkit/           test-only helpers
 fuzz/                      cargo-fuzz crate and corpus
 docs/
   architecture.md          this file

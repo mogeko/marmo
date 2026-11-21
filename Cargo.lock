@@ -635,13 +635,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "marmo-testkit"
-version = "0.0.3"
-dependencies = [
- "tokio",
-]
-
-[[package]]
 name = "marmo-transport"
 version = "0.0.3"
 dependencies = [

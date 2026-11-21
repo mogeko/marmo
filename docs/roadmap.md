@@ -185,9 +185,8 @@ order:
 2. `marmo-proto` and `marmo-transport`
 3. `marmo`
 
-`marmo-testkit` is `publish = false`. `marmo-transport` must not dev-depend on
-an unpublished path crate; `cargo package -p marmo-transport` is the release
-check for that.
+`marmo-transport` must not dev-depend on an unpublished path crate;
+`cargo package -p marmo-transport` is the release check for that.
 
 ## Out of scope
 

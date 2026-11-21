@@ -5,8 +5,8 @@ and behavior may change between minor releases.
 
 ## 0.0.3 - 2026-11-21
 
-- Rust workspace: `marmo`, `marmo-proto`, `marmo-net`, `marmo-transport`, and
-  `marmo-testkit` (ADR-0019).
+- Rust workspace: `marmo`, `marmo-proto`, `marmo-net`, and `marmo-transport`
+  (ADR-0019, ADR-0024).
 - Inbounds: SOCKS5 TCP/UDP, HTTP CONNECT/forward, Shadowsocks 2022 TCP/UDP,
   Trojan TCP/UDP with routed fallback, and VLESS TCP/UoT/XUDP over TLS, WS,
   and HTTP/2.

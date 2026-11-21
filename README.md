@@ -28,7 +28,6 @@ proxy protocols, rule-based routing, and latency-aware outbound selection.
 | `marmo-proto`     | HTTP/1, SOCKS5, SS2022, Trojan, VLESS, and XUDP codecs; no I/O           |
 | `marmo-net`       | `Endpoint`, CIDR, and `Network`                                          |
 | `marmo-transport` | Stream traits, TLS/WS/H2 layers, and the relay                           |
-| `marmo-testkit`   | Test-only helpers                                                        |
 
 ## Example
 

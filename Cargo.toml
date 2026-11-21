@@ -15,7 +15,6 @@ authors = ["Zheng Junyi"]
 marmo-net = { path = "crates/marmo-net", version = "=0.0.3" }
 marmo-proto = { path = "crates/marmo-proto", version = "=0.0.3" }
 marmo-transport = { path = "crates/marmo-transport", version = "=0.0.3" }
-marmo-testkit = { path = "crates/marmo-testkit", version = "=0.0.3" }
 rustls = { version = "0.23", default-features = false, features = [
     "aws_lc_rs",
     "logging",

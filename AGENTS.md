@@ -17,8 +17,8 @@ selection.
 
 ## Repo state
 
-- The workspace is `crates/` with five crates: `marmo`, `marmo-proto`,
-  `marmo-net`, `marmo-transport`, and `marmo-testkit`.
+- The workspace is `crates/` with four published crates: `marmo`,
+  `marmo-proto`, `marmo-net`, and `marmo-transport`.
 - The Rust implementation is the only implementation. The release line is
   `master`; unreleased changes may land on short-lived topic branches.
 - Config schema is version 2; TLS credentials are inline PEM (ADR-0023).
