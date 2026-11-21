@@ -652,9 +652,7 @@ impl Context {
             Action::Direct => direct::connect(target).await.map(boxed),
             Action::Route(id) => match self.outbounds.get(id.index() as usize) {
                 Some(OutboundKind::Direct) => direct::connect(target).await.map(boxed),
-                Some(OutboundKind::Http { server }) => {
-                    http_connect::connect(server, target).await.map(boxed)
-                }
+                Some(OutboundKind::Http { server }) => http_connect::connect(server, target).await,
                 Some(OutboundKind::Trojan {
                     server,
                     password,
