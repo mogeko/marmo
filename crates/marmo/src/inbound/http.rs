@@ -79,7 +79,7 @@ async fn prepare(
 
     let leftover = &buffer[head_len..];
     if request.method.eq_ignore_ascii_case("CONNECT") {
-        return connect_tunnel(client, context, inbound, &request.target, leftover).await;
+        return connect_tunnel(client, context, inbound, request.target, leftover).await;
     }
     forward(client, context, inbound, &request, leftover).await
 }
@@ -123,10 +123,10 @@ async fn forward(
     client: &mut TcpStream,
     context: &Context,
     inbound: &str,
-    request: &RequestHead,
+    request: &RequestHead<'_>,
     leftover: &[u8],
 ) -> io::Result<Option<BoxStream>> {
-    let target = match parse_absolute(&request.target) {
+    let target = match parse_absolute(request.target) {
         Ok(target) => target,
         Err(HttpError::UnsupportedScheme) => {
             let _ = respond(client, "501 Not Implemented").await;
@@ -137,7 +137,7 @@ async fn forward(
             return Ok(None);
         }
     };
-    let head = match build_forward_head(&request.method, request.version, &target, &request.headers)
+    let head = match build_forward_head(request.method, request.version, &target, request.headers())
     {
         Ok(head) => head,
         Err(HttpError::TooLarge) => {
