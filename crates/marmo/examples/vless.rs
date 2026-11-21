@@ -10,7 +10,7 @@
 //! ```
 //! `xudp` selects XUDP framing for UDP instead of simple UoT. `insecure`
 //! skips certificate verification and is accepted only for a loopback test
-//! server.
+//! server; it is the default when the server is loopback.
 
 #[path = "common/mod.rs"]
 mod common;
@@ -48,7 +48,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let network = common::arg(5).unwrap_or_else(|| "tcp".into());
             let path = common::arg(6).unwrap_or_else(|| "/".into());
             let xudp = common::arg(7).as_deref() == Some("xudp");
-            let insecure = common::arg(8).as_deref() == Some("insecure");
+            let insecure =
+                common::arg(8).as_deref() == Some("insecure") || common::is_loopback(&server);
             let transport = transport_json(&network, &path)?;
             let json = format!(
                 r#"{{ "inbounds": [ {{ "tag": "socks", "protocol": "socks5", "listen": "{listen}" }} ],

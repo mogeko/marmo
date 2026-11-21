@@ -9,7 +9,7 @@
 //! cargo run -p marmo --example trojan -- client 127.0.0.1:1080 proxy.example:443 secret [sni] [insecure]
 //! ```
 //! `insecure` skips certificate verification and is accepted only for a
-//! loopback test server.
+//! loopback test server; it is the default when the server is loopback.
 
 #[path = "common/mod.rs"]
 mod common;
@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             if let Some(sni) = common::arg(5) {
                 fields.push(format!(r#""sni": "{sni}""#));
             }
-            if common::arg(6).as_deref() == Some("insecure") {
+            if common::arg(6).as_deref() == Some("insecure") || common::is_loopback(&server) {
                 fields.push(r#""insecure": true"#.into());
             }
             let tls = format!("{{ {} }}", fields.join(", "));
