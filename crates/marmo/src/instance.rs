@@ -14,6 +14,7 @@ use std::time::Duration;
 use marmo_net::{Endpoint, Network};
 use marmo_proto::shadowsocks::{Key, Method};
 use marmo_proto::trojan::PasswordHash;
+use marmo_proto::vless::Uuid;
 use marmo_transport::BoxStream;
 use marmo_transport::tls::{TlsClient, TlsClientOptions, TlsServer, TlsServerOptions};
 use thiserror::Error;
@@ -23,7 +24,7 @@ use tokio::task::JoinSet;
 use tokio::time::{interval, timeout};
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{Config, ConfigError, InboundProtocol, OutboundProtocol};
+use crate::config::{Config, ConfigError, InboundProtocol, OutboundProtocol, StreamNetwork};
 use crate::direct;
 use crate::inbound::{self, http, socks5};
 use crate::limits::Limits;
@@ -221,11 +222,37 @@ impl InstanceBuilder {
                         fallback,
                     }
                 }
-                protocol => {
-                    return Err(BuildError::UnsupportedInbound {
+                InboundProtocol::Vless => {
+                    if inbound
+                        .transport
+                        .as_ref()
+                        .is_some_and(|transport| transport.network != StreamNetwork::Tcp)
+                    {
+                        return Err(BuildError::InboundOption {
+                            tag: inbound.tag.clone(),
+                            reason: "ws/h2 transport is not implemented yet".into(),
+                        });
+                    }
+                    let Some(tls) = inbound.tls.as_ref() else {
+                        return Err(BuildError::InboundOption {
+                            tag: inbound.tag.clone(),
+                            reason: "tls is required for vless".into(),
+                        });
+                    };
+                    let Some(uuid) = inbound.uuid.as_deref() else {
+                        return Err(BuildError::InboundOption {
+                            tag: inbound.tag.clone(),
+                            reason: "uuid is required for vless".into(),
+                        });
+                    };
+                    let uuid = Uuid::parse(uuid).map_err(|_| BuildError::InboundOption {
                         tag: inbound.tag.clone(),
-                        protocol,
-                    });
+                        reason: "invalid vless uuid".into(),
+                    })?;
+                    InboundConfig::Vless {
+                        uuid: Arc::new(uuid),
+                        tls: InboundTlsConfig::new(tls),
+                    }
                 }
             };
             let endpoint =
@@ -312,32 +339,66 @@ impl InstanceBuilder {
                             reason: "tls is required for trojan".into(),
                         });
                     };
-                    let server_name = tls
-                        .sni
-                        .clone()
-                        .or_else(|| server.domain().map(str::to_owned))
-                        .or_else(|| server.ip().map(|ip| ip.to_string()))
-                        .ok_or_else(|| BuildError::OutboundOption {
-                            tag: outbound.tag.clone(),
-                            reason: "tls.sni is required".into(),
-                        })?;
+                    let tls = outbound_tls_config(tls, &server, &outbound.tag)?;
                     OutboundConfig::Trojan {
                         server,
                         password: Arc::new(PasswordHash::derive(password)),
-                        tls: OutboundTlsConfig {
-                            server_name,
-                            alpn: tls.alpn.clone().unwrap_or_default(),
-                            required_alpn: tls.required_alpn.clone(),
-                            insecure: tls.insecure,
-                            client_certificate: tls.client_certificate.clone(),
-                            client_private_key: tls.client_private_key.clone(),
-                        },
+                        tls,
                     }
                 }
-                protocol => {
+                OutboundProtocol::Vless => {
+                    if outbound.xudp {
+                        return Err(BuildError::OutboundOption {
+                            tag: outbound.tag.clone(),
+                            reason: "xudp is not implemented yet".into(),
+                        });
+                    }
+                    if outbound
+                        .transport
+                        .as_ref()
+                        .is_some_and(|transport| transport.network != StreamNetwork::Tcp)
+                    {
+                        return Err(BuildError::OutboundOption {
+                            tag: outbound.tag.clone(),
+                            reason: "ws/h2 transport is not implemented yet".into(),
+                        });
+                    }
+                    let Some(server) = outbound.server.as_deref() else {
+                        return Err(BuildError::OutboundEndpoint {
+                            tag: outbound.tag.clone(),
+                            value: String::new(),
+                        });
+                    };
+                    let server =
+                        Endpoint::parse(server).map_err(|_| BuildError::OutboundEndpoint {
+                            tag: outbound.tag.clone(),
+                            value: server.to_string(),
+                        })?;
+                    let Some(uuid) = outbound.uuid.as_deref() else {
+                        return Err(BuildError::OutboundOption {
+                            tag: outbound.tag.clone(),
+                            reason: "uuid is required for vless".into(),
+                        });
+                    };
+                    let uuid = Uuid::parse(uuid).map_err(|_| BuildError::OutboundOption {
+                        tag: outbound.tag.clone(),
+                        reason: "invalid vless uuid".into(),
+                    })?;
+                    let tls = outbound
+                        .tls
+                        .as_ref()
+                        .map(|tls| outbound_tls_config(tls, &server, &outbound.tag))
+                        .transpose()?;
+                    OutboundConfig::Vless {
+                        server,
+                        uuid: Arc::new(uuid),
+                        tls,
+                    }
+                }
+                OutboundProtocol::Selector => {
                     return Err(BuildError::UnsupportedOutbound {
                         tag: outbound.tag.clone(),
-                        protocol,
+                        protocol: OutboundProtocol::Selector,
                     });
                 }
             };
@@ -543,6 +604,11 @@ impl Context {
                         outbound::trojan::connect(server, tls, password, target).await?;
                     Ok((stream, bound))
                 }
+                Some(OutboundKind::Vless { server, uuid, tls }) => {
+                    let (stream, bound) =
+                        outbound::vless::connect(server, tls.as_deref(), uuid, target).await?;
+                    Ok((stream, bound))
+                }
                 Some(OutboundKind::Shadowsocks {
                     server,
                     method,
@@ -593,6 +659,9 @@ impl Context {
                 }) => Ok(Some(UdpOutbound::Trojan(
                     outbound::trojan::connect_udp(server, tls, password, target).await?,
                 ))),
+                Some(OutboundKind::Vless { server, uuid, tls }) => Ok(Some(UdpOutbound::Vless(
+                    outbound::vless::connect_udp(server, tls.as_deref(), uuid, target).await?,
+                ))),
                 Some(OutboundKind::Http { .. }) => Ok(None),
                 None => Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -625,6 +694,11 @@ pub(crate) enum OutboundKind {
         password: Arc<PasswordHash>,
         tls: Arc<TlsClient>,
     },
+    Vless {
+        server: Endpoint,
+        uuid: Arc<Uuid>,
+        tls: Option<Arc<TlsClient>>,
+    },
 }
 
 #[derive(Clone)]
@@ -639,6 +713,10 @@ enum InboundKind {
         password: Arc<PasswordHash>,
         tls: Arc<TlsServer>,
         fallback: Option<Endpoint>,
+    },
+    Vless {
+        uuid: Arc<Uuid>,
+        tls: Arc<TlsServer>,
     },
 }
 
@@ -659,6 +737,10 @@ enum InboundConfig {
         password: Arc<PasswordHash>,
         tls: InboundTlsConfig,
         fallback: Option<Endpoint>,
+    },
+    Vless {
+        uuid: Arc<Uuid>,
+        tls: InboundTlsConfig,
     },
 }
 
@@ -692,24 +774,15 @@ impl InboundConfig {
                 password,
                 tls,
                 fallback,
-            } => {
-                let options = TlsServerOptions {
-                    certificate: &tls.certificate,
-                    private_key: &tls.private_key,
-                    alpn: &tls.alpn,
-                    client_ca: tls.client_ca.as_deref(),
-                    client_auth: transport_client_auth(tls.client_auth),
-                };
-                let server = TlsServer::new(&options).map_err(|error| BindError::Tls {
-                    tag: tag.to_owned(),
-                    reason: error.to_string(),
-                })?;
-                InboundKind::Trojan {
-                    password,
-                    tls: Arc::new(server),
-                    fallback,
-                }
-            }
+            } => InboundKind::Trojan {
+                password,
+                tls: build_tls_server(&tls, tag)?,
+                fallback,
+            },
+            Self::Vless { uuid, tls } => InboundKind::Vless {
+                uuid,
+                tls: build_tls_server(&tls, tag)?,
+            },
         })
     }
 }
@@ -733,6 +806,11 @@ enum OutboundConfig {
         server: Endpoint,
         password: Arc<PasswordHash>,
         tls: OutboundTlsConfig,
+    },
+    Vless {
+        server: Endpoint,
+        uuid: Arc<Uuid>,
+        tls: Option<OutboundTlsConfig>,
     },
 }
 
@@ -764,27 +842,76 @@ impl OutboundSpec {
                 server,
                 password,
                 tls,
-            } => {
-                let options = TlsClientOptions {
-                    server_name: &tls.server_name,
-                    alpn: &tls.alpn,
-                    required_alpn: tls.required_alpn.as_deref(),
-                    insecure: tls.insecure,
-                    client_certificate: tls.client_certificate.as_deref(),
-                    client_private_key: tls.client_private_key.as_deref(),
-                };
-                let client = TlsClient::new(&options).map_err(|error| BindError::Tls {
-                    tag: tag.to_string(),
-                    reason: error.to_string(),
-                })?;
-                OutboundKind::Trojan {
-                    server,
-                    password,
-                    tls: Arc::new(client),
-                }
-            }
+            } => OutboundKind::Trojan {
+                server,
+                password,
+                tls: build_tls_client(&tls, &tag)?,
+            },
+            OutboundConfig::Vless { server, uuid, tls } => OutboundKind::Vless {
+                server,
+                uuid,
+                tls: tls
+                    .as_ref()
+                    .map(|tls| build_tls_client(tls, &tag))
+                    .transpose()?,
+            },
         })
     }
+}
+
+fn build_tls_server(tls: &InboundTlsConfig, tag: &str) -> Result<Arc<TlsServer>, BindError> {
+    let options = TlsServerOptions {
+        certificate: &tls.certificate,
+        private_key: &tls.private_key,
+        alpn: &tls.alpn,
+        client_ca: tls.client_ca.as_deref(),
+        client_auth: transport_client_auth(tls.client_auth),
+    };
+    let server = TlsServer::new(&options).map_err(|error| BindError::Tls {
+        tag: tag.to_owned(),
+        reason: error.to_string(),
+    })?;
+    Ok(Arc::new(server))
+}
+
+fn build_tls_client(tls: &OutboundTlsConfig, tag: &str) -> Result<Arc<TlsClient>, BindError> {
+    let options = TlsClientOptions {
+        server_name: &tls.server_name,
+        alpn: &tls.alpn,
+        required_alpn: tls.required_alpn.as_deref(),
+        insecure: tls.insecure,
+        client_certificate: tls.client_certificate.as_deref(),
+        client_private_key: tls.client_private_key.as_deref(),
+    };
+    let client = TlsClient::new(&options).map_err(|error| BindError::Tls {
+        tag: tag.to_owned(),
+        reason: error.to_string(),
+    })?;
+    Ok(Arc::new(client))
+}
+
+fn outbound_tls_config(
+    tls: &crate::config::Tls,
+    server: &Endpoint,
+    tag: &str,
+) -> Result<OutboundTlsConfig, BuildError> {
+    let server_name = tls
+        .sni
+        .clone()
+        .or_else(|| server.domain().map(str::to_owned))
+        .or_else(|| server.ip().map(|ip| ip.to_string()))
+        .ok_or_else(|| BuildError::OutboundOption {
+            tag: tag.to_owned(),
+            reason: "tls.sni is required".into(),
+        })?;
+    Ok(OutboundTlsConfig {
+        server_name,
+        alpn: tls.alpn.clone().unwrap_or_default(),
+        required_alpn: tls.required_alpn.clone(),
+        insecure: tls.insecure,
+        client_certificate: tls.client_certificate.clone(),
+        client_private_key: tls.client_private_key.clone(),
+    })
 }
 
 fn transport_client_auth(auth: crate::config::ClientAuth) -> marmo_transport::tls::ClientAuth {
@@ -890,6 +1017,9 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                                 fallback,
                             )
                             .await;
+                        }
+                        InboundKind::Vless { uuid, tls } => {
+                            inbound::vless::handle(stream, task_context, tag, uuid, tls).await;
                         }
                     }
                 }, &runtime);

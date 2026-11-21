@@ -16,6 +16,7 @@ mod shadowsocks;
 mod supervisor;
 mod trojan;
 mod validate;
+mod vless;
 
 pub use config::{Config, ConfigError};
 pub use instance::{
