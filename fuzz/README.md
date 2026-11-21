@@ -5,12 +5,12 @@ stays on stable.
 
 ```sh
 cargo +nightly fuzz run ss2022_tcp -- -runs=20000 -max_len=4096
-cargo +nightly fuzz run http -- -runs=20000 -max_len=8192
 cargo +nightly fuzz run ss2022_udp -- -runs=20000 -max_len=4096
 cargo +nightly fuzz run socks5 -- -runs=20000 -max_len=4096
 cargo +nightly fuzz run trojan -- -runs=20000 -max_len=4096
 cargo +nightly fuzz run vless -- -runs=20000 -max_len=4096
 cargo +nightly fuzz run xudp -- -runs=20000 -max_len=4096
+cargo +nightly fuzz run http -- -runs=20000 -max_len=8192
 ```
 
 Long runs use the same targets with wall-clock limits, e.g.
@@ -43,7 +43,7 @@ input.
 
 - encoder-produced greetings, requests, responses, chunks, UDP packets, and
   XUDP metadata with fixed keys and timestamps;
-- the synthetic Zig fixtures from `tests/fixtures/` (`zig-*`).
+- synthetic protocol fixtures (`fixture-*`) shared with the earlier test corpus.
 
 None is a capture of real traffic. libFuzzer writes newly minimised inputs
 into the corpus directory during a run; do not commit those.

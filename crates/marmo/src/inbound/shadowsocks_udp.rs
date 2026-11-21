@@ -18,7 +18,7 @@ use crate::instance::Context;
 use crate::routing::Metadata;
 use crate::shadowsocks::{random_bytes, unix_now};
 
-/// Fixed session-table capacity, matching the Zig tree.
+/// Fixed session-table capacity.
 const MAX_SESSIONS: usize = 128;
 /// Bound on cached direct-UDP resolutions per session.
 const DIRECT_CACHE: usize = 64;

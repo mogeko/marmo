@@ -17,7 +17,7 @@ use ws_net::{
 
 use crate::BoxStream;
 
-/// Largest WebSocket message accepted, matching the Zig package.
+/// Largest WebSocket message accepted.
 const MAX_MESSAGE: u64 = 1024 * 1024;
 /// Largest WebSocket frame accepted and emitted.
 const MAX_FRAME: u64 = 64 * 1024;

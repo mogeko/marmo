@@ -1,4 +1,0 @@
-GET http://example.com/hello?x=1 HTTP/1.1
-Host: example.com
-Proxy-Connection: keep-alive
-

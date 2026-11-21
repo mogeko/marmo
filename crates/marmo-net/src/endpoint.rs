@@ -1,6 +1,6 @@
 //! Destinations and sources: an IP literal or a validated domain, plus a port.
 //!
-//! Parsing follows the Zig tree: `host:port`, `1.2.3.4:port`, or `[::1]:port`.
+//! Parsing accepts `host:port`, `1.2.3.4:port`, or `[::1]:port`.
 //! Unbracketed IPv6 is rejected because the port separator is ambiguous.
 
 use std::fmt;
@@ -149,8 +149,8 @@ impl Endpoint {
 
     /// Parses `host:port`, `1.2.3.4:port`, or `[::1]:port`.
     ///
-    /// A host that is not a valid IPv4 literal is treated as a domain, which
-    /// matches the Zig tree's behaviour. Unbracketed IPv6 is rejected.
+    /// A host that is not a valid IPv4 literal is treated as a domain.
+    /// Unbracketed IPv6 is rejected.
     pub fn parse(text: &str) -> Result<Self, EndpointError> {
         if text.is_empty() {
             return Err(EndpointError::EmptyEndpoint);
