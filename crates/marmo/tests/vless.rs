@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use marmo::{BuildError, Config, Instance, InstanceHandle, ServeError};
+use marmo::{Config, Instance, InstanceHandle, ServeError};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::task::JoinHandle;
@@ -181,6 +181,27 @@ fn vless_ws_outbound(server: SocketAddr) -> String {
              "uuid": "{UUID}", "tls": {{ "insecure": true }},
              "transport": {{ "network": "ws", "path": "/ws",
                              "subprotocols": ["marmo"] }} }}"#
+    )
+}
+
+fn vless_ws_compressed_inbound() -> String {
+    format!(
+        r#"{{ "tag": "vl", "protocol": "vless", "listen": "127.0.0.1:0",
+             "uuid": "{UUID}",
+             "tls": {{ "certificate": {}, "private_key": {} }},
+             "transport": {{ "network": "ws", "path": "/ws",
+                             "subprotocols": ["marmo"], "compression": true }} }}"#,
+        json_string(SERVER_CERT),
+        json_string(SERVER_KEY)
+    )
+}
+
+fn vless_ws_compressed_outbound(server: SocketAddr) -> String {
+    format!(
+        r#"{{ "tag": "vl", "protocol": "vless", "server": "{server}",
+             "uuid": "{UUID}", "tls": {{ "insecure": true }},
+             "transport": {{ "network": "ws", "path": "/ws",
+                             "subprotocols": ["marmo"], "compression": true }} }}"#
     )
 }
 
@@ -443,35 +464,26 @@ async fn relays_vless_uot_over_websocket() {
 }
 
 #[tokio::test]
-async fn rejects_ws_compression() {
-    let outbound = format!(
-        r#"{{ "tag": "vl", "protocol": "vless", "server": "192.0.2.1:443",
-             "uuid": "{UUID}", "tls": {{ "insecure": true }},
-             "transport": {{ "network": "ws", "path": "/ws", "compression": true }} }}"#
-    );
-    let config = Config::from_json(&format!(
-        r#"{{ "outbounds": [ {outbound} ], "route": {{ "final": "vl" }} }}"#
-    ))
-    .expect("config");
-    assert!(matches!(
-        Instance::builder(config).build(),
-        Err(BuildError::OutboundOption { .. })
-    ));
+async fn relays_vless_over_compressed_websocket() {
+    let (echo, echo_task) = echo_server().await;
+    let (front, front_handle, front_task, proxy_handle, proxy_task) =
+        ws_chain(vless_ws_compressed_inbound(), vless_ws_compressed_outbound).await;
 
-    let inbound = format!(
-        r#"{{ "tag": "vl", "protocol": "vless", "listen": "127.0.0.1:0",
-             "uuid": "{UUID}",
-             "tls": {{ "certificate": {}, "private_key": {} }},
-             "transport": {{ "network": "ws", "path": "/ws", "compression": true }} }}"#,
-        json_string(SERVER_CERT),
-        json_string(SERVER_KEY)
-    );
-    let config = Config::from_json(&format!(
-        r#"{{ "inbounds": [ {inbound} ], "route": {{ "final": "direct" }} }}"#
-    ))
-    .expect("config");
-    assert!(matches!(
-        Instance::builder(config).build(),
-        Err(BuildError::InboundOption { .. })
-    ));
+    let mut client = TcpStream::connect(front).await.expect("connect");
+    socks5_connect(&mut client, echo).await;
+    let payload = vec![b'a'; 100_000];
+    let (mut reader, mut writer) = client.into_split();
+    let write = writer.write_all(&payload);
+    let read = async {
+        let mut received = vec![0_u8; payload.len()];
+        reader.read_exact(&mut received).await.expect("read");
+        received
+    };
+    let (written, echoed) = tokio::join!(write, read);
+    written.expect("write");
+    assert_eq!(echoed, payload);
+
+    stop(front_handle, front_task).await;
+    stop(proxy_handle, proxy_task).await;
+    echo_task.abort();
 }

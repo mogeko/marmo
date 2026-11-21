@@ -1,38 +1,30 @@
-//! RFC 6455 WebSocket adapters on `tokio-tungstenite` (ADR-0016).
+//! RFC 6455 WebSocket adapters on the `ws-net` sans-IO engine.
 //!
-//! The adapters expose a byte stream: text messages are rejected, binary
-//! messages are concatenated on read, and writes become binary messages.
-//! Path and subprotocol negotiation are enforced for the server; the client
-//! rejects a selection it did not offer. Permessage-deflate is not supported
-//! by the current backend and is rejected during configuration.
+//! Spike branch: same public shape as the tokio-tungstenite version, plus
+//! perframe-deflate through `ws-net`'s `deflate` feature. The caller drives
+//! the socket; this module owns the handshake and the byte-stream pump.
 
 use std::io;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
 use std::task::{Context as TaskContext, Poll, ready};
 
-use futures_util::{Sink, Stream};
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio_tungstenite::tungstenite::Bytes;
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
-use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
-use tokio_tungstenite::tungstenite::http::{HeaderValue, Response as HttpResponse, StatusCode};
-use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
-use tokio_tungstenite::{WebSocketStream, accept_hdr_async_with_config, client_async_with_config};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use ws_net::{
+    AcceptPolicy, Acceptor, ClientHandshake, Connection, DeflateConfig, Event, HeadReader, Limits,
+    OriginPolicy,
+};
 
 use crate::BoxStream;
 
 /// Largest WebSocket message accepted, matching the Zig package.
-const MAX_MESSAGE: usize = 1024 * 1024;
-/// Largest WebSocket frame accepted, matching the Zig package.
-const MAX_FRAME: usize = 64 * 1024;
-/// Read buffer for the underlying WebSocket stream.
-const READ_BUFFER: usize = 16 * 1024;
-/// Write buffer for the underlying WebSocket stream.
-const WRITE_BUFFER: usize = 16 * 1024;
+const MAX_MESSAGE: u64 = 1024 * 1024;
+/// Largest WebSocket frame accepted and emitted.
+const MAX_FRAME: u64 = 64 * 1024;
+/// Largest pending output buffer.
+const MAX_OUTPUT: u64 = 1024 * 1024;
+/// Largest handshake head.
+const MAX_HEAD: usize = 8 * 1024;
 
 /// Parameters for a WebSocket client.
 #[derive(Clone, Debug)]
@@ -43,6 +35,8 @@ pub struct WsClientOptions {
     pub path: String,
     /// Subprotocols offered in preference order.
     pub subprotocols: Vec<String>,
+    /// Offer permessage-deflate.
+    pub compression: bool,
 }
 
 /// Parameters for a WebSocket server.
@@ -52,20 +46,25 @@ pub struct WsServerOptions {
     pub path: String,
     /// Subprotocols in server preference order.
     pub subprotocols: Vec<String>,
+    /// Accept permessage-deflate.
+    pub compression: bool,
 }
 
-/// A connected WebSocket stream and its negotiated subprotocol.
+/// A connected WebSocket stream and its negotiated parameters.
 pub struct WsConnection {
     /// The byte stream over WebSocket messages.
     pub stream: BoxStream,
     /// The selected subprotocol, if any.
     pub subprotocol: Option<String>,
+    /// Whether permessage-deflate was negotiated.
+    pub compression: bool,
 }
 
 impl std::fmt::Debug for WsConnection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WsConnection")
             .field("subprotocol", &self.subprotocol)
+            .field("compression", &self.compression)
             .finish_non_exhaustive()
     }
 }
@@ -84,26 +83,42 @@ impl WsClient {
     }
 
     /// Performs the opening handshake over `inner`.
-    pub async fn connect(&self, inner: BoxStream) -> Result<WsConnection, WsError> {
-        let uri = format!("ws://{}{}", self.options.host, self.options.path);
-        let mut request = uri
-            .into_client_request()
-            .map_err(|error| WsError::Request(error.to_string()))?;
-        if !self.options.subprotocols.is_empty() {
-            let value = self.options.subprotocols.join(", ");
-            let value = HeaderValue::from_str(&value)
-                .map_err(|error| WsError::Request(error.to_string()))?;
-            request.headers_mut().insert(SEC_WEBSOCKET_PROTOCOL, value);
+    pub async fn connect(&self, mut inner: BoxStream) -> Result<WsConnection, WsError> {
+        let mut handshake =
+            ClientHandshake::try_new().map_err(|error| WsError::Handshake(error.to_string()))?;
+        let protocols: Vec<&str> = self
+            .options
+            .subprotocols
+            .iter()
+            .map(String::as_str)
+            .collect();
+        if !protocols.is_empty() {
+            handshake = handshake.with_protocols(&protocols);
+        }
+        if self.options.compression {
+            handshake = handshake.with_deflate(DeflateConfig::new());
         }
 
-        let (stream, response) = client_async_with_config(request, inner, Some(ws_config()))
-            .await
-            .map_err(WsError::Handshake)?;
-        let selected = response
-            .headers()
-            .get(SEC_WEBSOCKET_PROTOCOL)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
+        let mut request = Vec::new();
+        handshake
+            .write_request(&self.options.host, &self.options.path, &mut request)
+            .map_err(|error| WsError::Handshake(error.to_string()))?;
+        inner.write_all(&request).await?;
+
+        let mut buffer = Vec::new();
+        let (verified, consumed) = loop {
+            read_more(&mut inner, &mut buffer).await?;
+            if let Some(found) = HeadReader::new()
+                .client(&handshake, &buffer)
+                .map_err(|error| WsError::Handshake(error.to_string()))?
+            {
+                break found;
+            }
+            if buffer.len() > MAX_HEAD {
+                return Err(WsError::Handshake("response head is too large".into()));
+            }
+        };
+        let selected = verified.protocol.map(str::to_owned);
         if let Some(selected) = selected.as_deref() {
             if !self
                 .options
@@ -114,9 +129,15 @@ impl WsClient {
                 return Err(WsError::Subprotocol(selected.to_owned()));
             }
         }
+        let compression = verified.extensions.deflate().is_some();
+        let mut conn = handshake.connection(&verified);
+        if consumed < buffer.len() {
+            let _ = conn.feed(&buffer[consumed..]);
+        }
         Ok(WsConnection {
-            stream: Box::new(WsStream::new(stream)),
+            stream: Box::new(WsStream::new(inner, conn)),
             subprotocol: selected,
+            compression,
         })
     }
 }
@@ -135,45 +156,67 @@ impl WsServer {
     }
 
     /// Performs the opening handshake over `inner`.
-    #[allow(clippy::result_large_err)]
-    pub async fn accept(&self, inner: BoxStream) -> Result<WsConnection, WsError> {
-        let path = self.options.path.clone();
-        let protocols = self.options.subprotocols.clone();
-        let selected = Arc::new(Mutex::new(None));
-        let recorded = Arc::clone(&selected);
-        let stream = accept_hdr_async_with_config(
-            inner,
-            move |request: &Request, mut response: Response| {
-                if request.uri().path() != path {
-                    return Err(error_response(StatusCode::NOT_FOUND));
+    pub async fn accept(&self, mut inner: BoxStream) -> Result<WsConnection, WsError> {
+        let mut policy = AcceptPolicy::new()
+            .with_origins(OriginPolicy::any_origin())
+            .with_limits(
+                Limits::new()
+                    .with_max_message(MAX_MESSAGE)
+                    .with_max_frame(MAX_FRAME)
+                    .with_max_output(MAX_OUTPUT),
+            );
+        let protocols: Vec<&str> = self
+            .options
+            .subprotocols
+            .iter()
+            .map(String::as_str)
+            .collect();
+        if !protocols.is_empty() {
+            policy = policy
+                .with_protocols(&protocols)
+                .map_err(|error| WsError::Handshake(error.to_string()))?
+                .require_protocol();
+        }
+        if self.options.compression {
+            policy = policy.with_deflate(DeflateConfig::new());
+        }
+
+        let mut acceptor = Acceptor::with_policy(policy);
+        let mut buffer = Vec::new();
+        loop {
+            read_more(&mut inner, &mut buffer).await?;
+            match acceptor.accept(&buffer) {
+                Ok(Some(accepted)) => {
+                    if accepted.handshake.target() != self.options.path {
+                        inner
+                            .write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n")
+                            .await?;
+                        return Err(WsError::Path);
+                    }
+                    inner.write_all(&accepted.response).await?;
+                    let selected = accepted
+                        .handshake
+                        .select_protocol(&protocols)
+                        .map(str::to_owned);
+                    let compression = accepted.connection.negotiated().deflate().is_some();
+                    return Ok(WsConnection {
+                        stream: Box::new(WsStream::new(inner, accepted.connection)),
+                        subprotocol: selected,
+                        compression,
+                    });
                 }
-                if protocols.is_empty() {
-                    return Ok(response);
+                Ok(None) => {}
+                Err(error) => {
+                    let mut out = Vec::new();
+                    error.write_response(&mut out);
+                    let _ = inner.write_all(&out).await;
+                    return Err(WsError::Handshake(error.to_string()));
                 }
-                let offered = offered_subprotocols(request);
-                let Some(chosen) = protocols
-                    .iter()
-                    .find(|protocol| offered.iter().any(|value| value == *protocol))
-                else {
-                    return Err(error_response(StatusCode::BAD_REQUEST));
-                };
-                let value = HeaderValue::from_str(chosen)
-                    .map_err(|_| error_response(StatusCode::BAD_REQUEST))?;
-                response.headers_mut().insert(SEC_WEBSOCKET_PROTOCOL, value);
-                if let Ok(mut slot) = recorded.lock() {
-                    *slot = Some(chosen.clone());
-                }
-                Ok(response)
-            },
-            Some(ws_config()),
-        )
-        .await
-        .map_err(WsError::Handshake)?;
-        let subprotocol = selected.lock().ok().and_then(|slot| slot.clone());
-        Ok(WsConnection {
-            stream: Box::new(WsStream::new(stream)),
-            subprotocol,
-        })
+            }
+            if buffer.len() > MAX_HEAD {
+                return Err(WsError::Handshake("request head is too large".into()));
+            }
+        }
     }
 }
 
@@ -187,65 +230,88 @@ pub enum WsError {
     /// The server selected a subprotocol the client did not offer.
     #[error("unexpected WebSocket subprotocol '{0}'")]
     Subprotocol(String),
+    /// The server rejected the request path.
+    #[error("wrong WebSocket path")]
+    Path,
     /// The opening handshake failed.
     #[error("WebSocket handshake failed: {0}")]
-    Handshake(#[source] tokio_tungstenite::tungstenite::Error),
+    Handshake(String),
     /// The byte stream failed.
     #[error("WebSocket stream failed: {0}")]
     Io(#[from] io::Error),
 }
 
-fn ws_config() -> WebSocketConfig {
-    WebSocketConfig::default()
-        .max_message_size(Some(MAX_MESSAGE))
-        .max_frame_size(Some(MAX_FRAME))
-        .read_buffer_size(READ_BUFFER)
-        .write_buffer_size(WRITE_BUFFER)
-        .max_write_buffer_size(MAX_MESSAGE)
-}
-
-fn error_response(status: StatusCode) -> ErrorResponse {
-    let mut response = HttpResponse::new(Some("websocket handshake rejected".into()));
-    *response.status_mut() = status;
-    response
-}
-
-fn offered_subprotocols(request: &Request) -> Vec<String> {
-    request
-        .headers()
-        .get_all(SEC_WEBSOCKET_PROTOCOL)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
-fn ws_io(error: tokio_tungstenite::tungstenite::Error) -> io::Error {
-    match error {
-        tokio_tungstenite::tungstenite::Error::Io(error) => error,
-        other => io::Error::new(io::ErrorKind::InvalidData, other),
+async fn read_more<S>(stream: &mut S, buffer: &mut Vec<u8>) -> Result<(), WsError>
+where
+    S: AsyncRead + Unpin,
+{
+    let mut chunk = [0_u8; 4096];
+    let read = stream.read(&mut chunk).await?;
+    if read == 0 {
+        return Err(WsError::Handshake(
+            "connection closed during handshake".into(),
+        ));
     }
-}
-
-fn invalid(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
+    buffer.extend_from_slice(&chunk[..read]);
+    Ok(())
 }
 
 struct WsStream<S> {
-    inner: WebSocketStream<S>,
+    inner: S,
+    conn: Connection,
     read: Vec<u8>,
     read_pos: usize,
+    flush: Vec<u8>,
+    flush_pos: usize,
+    eof: bool,
 }
 
 impl<S> WsStream<S> {
-    fn new(inner: WebSocketStream<S>) -> Self {
+    fn new(inner: S, conn: Connection) -> Self {
         Self {
             inner,
+            conn,
             read: Vec::new(),
             read_pos: 0,
+            flush: Vec::new(),
+            flush_pos: 0,
+            eof: false,
+        }
+    }
+
+    fn poll_flush_output(&mut self, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        loop {
+            if self.flush_pos == self.flush.len() {
+                self.flush.clear();
+                self.flush_pos = 0;
+                let output = self.conn.output();
+                if output.is_empty() {
+                    return Poll::Ready(Ok(()));
+                }
+                self.flush.extend_from_slice(output);
+                let length = self.flush.len();
+                self.conn.advance_output(length);
+            }
+            let Self {
+                inner,
+                flush,
+                flush_pos,
+                ..
+            } = self;
+            match Pin::new(inner).poll_write(cx, &flush[*flush_pos..]) {
+                Poll::Ready(Ok(0)) => {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "WebSocket stream closed",
+                    )));
+                }
+                Poll::Ready(Ok(written)) => *flush_pos += written,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending => return Poll::Pending,
+            }
         }
     }
 }
@@ -267,19 +333,57 @@ where
                 me.read_pos += copied;
                 return Poll::Ready(Ok(()));
             }
-            match ready!(Pin::new(&mut me.inner).poll_next(cx)) {
-                Some(Ok(Message::Binary(data))) => {
+            if me.eof {
+                return Poll::Ready(Ok(()));
+            }
+            match me.conn.poll() {
+                Ok(Event::Binary(data)) => {
                     me.read.clear();
-                    me.read.extend_from_slice(&data);
+                    me.read.extend_from_slice(data);
                     me.read_pos = 0;
                 }
-                Some(Ok(Message::Text(_))) => {
-                    return Poll::Ready(Err(invalid("unexpected WebSocket text message")));
+                Ok(Event::Text(_)) => {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "unexpected WebSocket text message",
+                    )));
                 }
-                Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => continue,
-                Some(Ok(Message::Close(_))) => return Poll::Ready(Ok(())),
-                Some(Err(error)) => return Poll::Ready(Err(ws_io(error))),
-                None => return Poll::Ready(Ok(())),
+                Ok(Event::Ping(_) | Event::Pong(_)) => {
+                    if let Poll::Ready(Err(error)) = me.poll_flush_output(cx) {
+                        return Poll::Ready(Err(error));
+                    }
+                }
+                Ok(Event::Close(_) | Event::Closed) => {
+                    me.eof = true;
+                    let _ = me.poll_flush_output(cx);
+                    return Poll::Ready(Ok(()));
+                }
+                Ok(Event::NeedInput) => {
+                    if let Poll::Ready(Err(error)) = me.poll_flush_output(cx) {
+                        return Poll::Ready(Err(error));
+                    }
+                    let mut chunk = [0_u8; 16 * 1024];
+                    let mut bound = ReadBuf::new(&mut chunk);
+                    match Pin::new(&mut me.inner).poll_read(cx, &mut bound) {
+                        Poll::Ready(Ok(())) => {
+                            let filled = bound.filled().len();
+                            if filled == 0 {
+                                me.conn.feed_eof();
+                            } else {
+                                let _ = me.conn.feed(&chunk[..filled]);
+                            }
+                        }
+                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                Err(error) => {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        error.to_string(),
+                    )));
+                }
+                Ok(_) => {}
             }
         }
     }
@@ -298,25 +402,24 @@ where
             return Poll::Ready(Ok(0));
         }
         let me = self.get_mut();
-        ready!(Pin::new(&mut me.inner).poll_ready(cx)).map_err(ws_io)?;
-        let length = buf.len().min(MAX_FRAME);
-        Pin::new(&mut me.inner)
-            .start_send(Message::Binary(Bytes::copy_from_slice(&buf[..length])))
-            .map_err(ws_io)?;
-        ready!(Pin::new(&mut me.inner).poll_flush(cx)).map_err(ws_io)?;
+        ready!(me.poll_flush_output(cx))?;
+        let length = buf.len().min(MAX_FRAME as usize);
+        me.conn
+            .send_binary(&buf[..length])
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        ready!(me.poll_flush_output(cx))?;
         Poll::Ready(Ok(length))
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().inner)
-            .poll_flush(cx)
-            .map_err(ws_io)
+        self.get_mut().poll_flush_output(cx)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().inner)
-            .poll_close(cx)
-            .map_err(ws_io)
+        let me = self.get_mut();
+        let _ = me.conn.close(ws_net::CloseCode::NORMAL, "");
+        ready!(me.poll_flush_output(cx))?;
+        Pin::new(&mut me.inner).poll_shutdown(cx)
     }
 }
 
@@ -325,36 +428,43 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 
-    fn client(path: &str, protocols: &[&str]) -> WsClient {
+    fn client(path: &str, protocols: &[&str], compression: bool) -> WsClient {
         WsClient::new(WsClientOptions {
             host: "localhost".into(),
             path: path.into(),
             subprotocols: protocols.iter().map(|value| value.to_string()).collect(),
+            compression,
         })
     }
 
-    fn server(path: &str, protocols: &[&str]) -> WsServer {
+    fn server(path: &str, protocols: &[&str], compression: bool) -> WsServer {
         WsServer::new(WsServerOptions {
             path: path.into(),
             subprotocols: protocols.iter().map(|value| value.to_string()).collect(),
+            compression,
         })
     }
 
     #[tokio::test]
     async fn echoes_over_websocket() {
         let (client_io, server_io) = duplex(64 * 1024);
-        let server = server("/ws", &["marmo", "other"]);
-        let client = client("/ws", &["other", "marmo"]);
         let task = tokio::spawn(async move {
-            let connection = server.accept(Box::new(server_io)).await.expect("accept");
+            let connection = server("/ws", &["marmo", "other"], false)
+                .accept(Box::new(server_io))
+                .await
+                .expect("accept");
             assert_eq!(connection.subprotocol.as_deref(), Some("marmo"));
+            assert!(!connection.compression);
             let mut stream = connection.stream;
             let mut buffer = [0_u8; 4];
             stream.read_exact(&mut buffer).await.expect("read");
             stream.write_all(&buffer).await.expect("write");
         });
 
-        let connection = client.connect(Box::new(client_io)).await.expect("connect");
+        let connection = client("/ws", &["other", "marmo"], false)
+            .connect(Box::new(client_io))
+            .await
+            .expect("connect");
         assert_eq!(connection.subprotocol.as_deref(), Some("marmo"));
         let mut stream = connection.stream;
         stream.write_all(b"ping").await.expect("write");
@@ -365,10 +475,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn negotiates_compression() {
+        let (client_io, server_io) = duplex(2 * 1024 * 1024);
+        let task = tokio::spawn(async move {
+            let connection = server("/", &[], true)
+                .accept(Box::new(server_io))
+                .await
+                .expect("accept");
+            assert!(connection.compression);
+            let mut stream = connection.stream;
+            let mut buffer = vec![0_u8; 100_000];
+            stream.read_exact(&mut buffer).await.expect("read");
+            stream.write_all(&buffer).await.expect("write");
+        });
+
+        let connection = client("/", &[], true)
+            .connect(Box::new(client_io))
+            .await
+            .expect("connect");
+        assert!(connection.compression);
+        let mut stream = connection.stream;
+        let payload = vec![b'a'; 100_000];
+        stream.write_all(&payload).await.expect("write");
+        let mut buffer = vec![0_u8; payload.len()];
+        stream.read_exact(&mut buffer).await.expect("read");
+        assert_eq!(buffer, payload);
+        task.await.expect("server task");
+    }
+
+    #[tokio::test]
     async fn works_without_subprotocols() {
         let (client_io, server_io) = duplex(16 * 1024);
         let task = tokio::spawn(async move {
-            let connection = server("/", &[])
+            let connection = server("/", &[], false)
                 .accept(Box::new(server_io))
                 .await
                 .expect("accept");
@@ -379,7 +518,7 @@ mod tests {
             stream.write_all(&buffer).await.expect("write");
         });
 
-        let connection = client("/", &[])
+        let connection = client("/", &[], false)
             .connect(Box::new(client_io))
             .await
             .expect("connect");
@@ -396,14 +535,14 @@ mod tests {
         let (client_io, server_io) = duplex(16 * 1024);
         let task = tokio::spawn(async move {
             assert!(
-                server("/expected", &[])
+                server("/expected", &[], false)
                     .accept(Box::new(server_io))
                     .await
                     .is_err()
             );
         });
         assert!(
-            client("/other", &[])
+            client("/other", &[], false)
                 .connect(Box::new(client_io))
                 .await
                 .is_err()
@@ -416,13 +555,18 @@ mod tests {
         let (client_io, server_io) = duplex(16 * 1024);
         let task = tokio::spawn(async move {
             assert!(
-                server("/", &["marmo"])
+                server("/", &["marmo"], false)
                     .accept(Box::new(server_io))
                     .await
                     .is_err()
             );
         });
-        assert!(client("/", &[]).connect(Box::new(client_io)).await.is_err());
+        assert!(
+            client("/", &[], false)
+                .connect(Box::new(client_io))
+                .await
+                .is_err()
+        );
         task.await.expect("server task");
     }
 
@@ -430,7 +574,7 @@ mod tests {
     async fn carries_a_large_message() {
         let (client_io, server_io) = duplex(2 * 1024 * 1024);
         let task = tokio::spawn(async move {
-            let connection = server("/", &[])
+            let connection = server("/", &[], false)
                 .accept(Box::new(server_io))
                 .await
                 .expect("accept");
@@ -440,7 +584,7 @@ mod tests {
             stream.write_all(&buffer).await.expect("write");
         });
 
-        let connection = client("/", &[])
+        let connection = client("/", &[], false)
             .connect(Box::new(client_io))
             .await
             .expect("connect");

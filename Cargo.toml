@@ -14,7 +14,6 @@ authors = ["Zheng Junyi"]
 marmo-net = { path = "crates/marmo-net" }
 marmo-proto = { path = "crates/marmo-proto" }
 marmo-transport = { path = "crates/marmo-transport" }
-futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "logging", "std"] }
 rustls-pki-types = "1.16"
 rustls-platform-verifier = "0.7"
@@ -39,9 +38,9 @@ tokio = { version = "1.54", default-features = false, features = [
     "time",
 ] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "logging"] }
-tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 zeroize = "1.9"
+ws-net = { version = "0.10", features = ["deflate"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

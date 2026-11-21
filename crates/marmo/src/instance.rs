@@ -228,23 +228,11 @@ impl InstanceBuilder {
                         None => None,
                         Some(transport) => match transport.network {
                             StreamNetwork::Tcp => None,
-                            StreamNetwork::Ws => {
-                                if transport.compression {
-                                    return Err(BuildError::InboundOption {
-                                        tag: inbound.tag.clone(),
-                                        reason:
-                                            "ws compression is not supported by the current backend"
-                                                .into(),
-                                    });
-                                }
-                                Some(WsServerOptions {
-                                    path: transport.path.clone(),
-                                    subprotocols: transport
-                                        .subprotocols
-                                        .clone()
-                                        .unwrap_or_default(),
-                                })
-                            }
+                            StreamNetwork::Ws => Some(WsServerOptions {
+                                path: transport.path.clone(),
+                                subprotocols: transport.subprotocols.clone().unwrap_or_default(),
+                                compression: transport.compression,
+                            }),
                             StreamNetwork::H2 => {
                                 return Err(BuildError::InboundOption {
                                     tag: inbound.tag.clone(),
@@ -394,14 +382,6 @@ impl InstanceBuilder {
                         Some(transport) => match transport.network {
                             StreamNetwork::Tcp => None,
                             StreamNetwork::Ws => {
-                                if transport.compression {
-                                    return Err(BuildError::OutboundOption {
-                                        tag: outbound.tag.clone(),
-                                        reason:
-                                            "ws compression is not supported by the current backend"
-                                                .into(),
-                                    });
-                                }
                                 let host = transport
                                     .host
                                     .clone()
@@ -421,6 +401,7 @@ impl InstanceBuilder {
                                         .subprotocols
                                         .clone()
                                         .unwrap_or_default(),
+                                    compression: transport.compression,
                                 })
                             }
                             StreamNetwork::H2 => {
