@@ -259,8 +259,8 @@ async fn handle_mux(
     let Ok(padding) = random::<64>() else {
         return;
     };
-    let client = ChunkStream::server(stream, &request, padding, &leftover);
-    super::mux::serve(client, context, inbound, source, token).await;
+    let client: BoxStream = Box::new(ChunkStream::server(stream, &request, padding, &leftover));
+    super::mux::serve(client, &[], context, inbound, source, token).await;
 }
 
 async fn reply_loop(

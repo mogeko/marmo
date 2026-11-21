@@ -14,8 +14,9 @@ proxy protocols, rule-based routing, and latency-aware outbound selection.
   and selectors with manual, round-robin, random, fallback, and least-latency
   strategies.
 - Transports: TCP, TLS 1.3 (`rustls`), WebSocket (`ws-net`), and HTTP/2 (`h2`).
-  VLESS supports TCP, simple UoT, and XUDP; VMess supports TCP, direct UDP,
-  and Mux.Cool termination, both over TCP, TLS, WebSocket, and HTTP/2.
+  VLESS supports TCP, simple UoT, XUDP, and inbound Mux.Cool; VMess supports
+  TCP, direct UDP, and inbound Mux.Cool, both over TCP, TLS, WebSocket, and
+  HTTP/2.
 - Routing: exact and suffix domains, IP CIDR, destination port, and network.
 - Limits: global connection cap plus handshake, idle, and half-close timeouts.
 - Metrics: connection, byte, timeout, UDP-session, and health-probe counters

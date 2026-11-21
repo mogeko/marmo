@@ -80,7 +80,7 @@ Everything else is post-1.0 work (§19):
 | HTTP CONNECT outbound | gRPC and XHTTP transports |
 | Shadowsocks 2022 TCP/UDP | DNS cache, DoH/DoT |
 | Trojan inbound/outbound (TLS, TCP/UDP, fallback) | GEOIP/GEOSITE rule sets |
-| VLESS inbound/outbound (TCP/TLS/WS/H2, TCP/UoT/XUDP) | sniffer, process rules |
+| VLESS inbound/outbound (TCP/TLS/WS/H2, TCP/UoT/XUDP, inbound Mux.Cool) | sniffer, process rules |
 | VMess inbound/outbound (AEAD, TCP/UDP, Mux.Cool, TLS/WS/H2) | — |
 | TLS 1.3 client/server, ALPN, mTLS | `http_head` probes, jitter, backoff |
 | manual/RR/random/fallback/least-latency, TCP probes | root-level H2 pooling |
@@ -470,8 +470,11 @@ and interop suite. `Future` means it is not part of the current release.
 | Hysteria2 | QUIC + TLS | — | — | — | — | future |
 
 VLESS supports TCP, simple UoT, and XUDP over TCP, TLS, WebSocket, and HTTP/2,
-with the strict `transport` object of ADR-0016. `Instance` serves one VLESS
-stream per HTTP/2 connection; root-level multiplexing/pooling is future work.
+with the strict `transport` object of ADR-0016. Its inbound terminates full
+Mux.Cool for TCP and UDP sessions (ADR-0026); the outbound opens one stream per
+TCP connection or UDP association and has no client-side pooling. `Instance`
+serves one VLESS stream per HTTP/2 connection; root-level multiplexing/pooling
+is future work.
 gRPC is future work built on `h2`/`tonic`. XHTTP is future work for current
 Xray compatibility (roadmap P3-6); it needs an ADR and `h3` depends on the QUIC
 adapter. VMess implements the AEAD header only; legacy CFB is not planned. Its
@@ -803,7 +806,7 @@ Open questions:
 
 ## 21. Decision index
 
-Current decisions are ADR-0017 through ADR-0025. Historical decisions from the
+Current decisions are ADR-0017 through ADR-0026. Historical decisions from the
 initial implementation are ADR-0001 through ADR-0016 and remain in
 [`docs/decisions/`](decisions/README.md); their bodies are unchanged.
 
@@ -818,3 +821,4 @@ initial implementation are ADR-0001 through ADR-0016 and remain in
 | [0023](decisions/0023-tls-credentials-inline.md) | TLS credentials as inline configuration | Accepted |
 | [0024](decisions/0024-drop-testkit.md) | Drop the unused testkit crate | Accepted |
 | [0025](decisions/0025-vmess-aead.md) | VMess AEAD, UDP, and Mux.Cool | Accepted |
+| [0026](decisions/0026-vless-mux.md) | VLESS inbound Mux.Cool | Accepted |

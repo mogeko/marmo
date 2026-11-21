@@ -56,7 +56,7 @@ any order after their dependencies.
 
 | ID | Item | Status | Depends on | Exit criteria |
 | --- | --- | --- | --- | --- |
-| P2-1 | VLESS inbound/outbound: TCP, simple UoT, XUDP | Done | P1 | TCP/UDP/XUDP tests and reference interop |
+| P2-1 | VLESS inbound/outbound: TCP, simple UoT, XUDP, inbound Mux.Cool | Done | P1 | TCP/UDP/XUDP/mux tests and reference interop |
 | P2-2 | Trojan inbound/outbound: TCP, UDP, routed fallback | Done | P1 | Loopback TCP/UDP and fallback tests |
 | P2-3 | TLS 1.3: ALPN, mTLS, platform verifier | Done | P1 | `rustls` tests and TLS interop |
 | P2-4 | WebSocket and HTTP/2 transports | Done | P1 | WS/H2 loopback, interop, VLESS over both |
@@ -178,6 +178,7 @@ criteria. They are tracked here so they do not disappear from the docs.
 | P5-10 | Windows-specific process matching | Planned | with P2-10, best-effort |
 | P5-11 | VMess client-side Mux.Cool pooling | Deferred | inbound mux works; outbound uses direct UDP |
 | P5-12 | VMess authenticated-length option | Deferred | only if a reference client enables Opt A |
+| P5-13 | VLESS client-side Mux.Cool pooling | Deferred | inbound mux works; outbound uses UoT/XUDP |
 
 ## Release packaging order
 

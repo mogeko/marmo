@@ -49,6 +49,7 @@ ADR-0017 onward.
 | [0023](0023-tls-credentials-inline.md) | TLS credentials as inline configuration | Accepted | inline PEM; schema v2 |
 | [0024](0024-drop-testkit.md) | Drop the unused testkit crate | Accepted (2026-11-21) | four published crates |
 | [0025](0025-vmess-aead.md) | VMess AEAD, UDP, and Mux.Cool | Accepted (2026-11-22) | AEAD inbound/outbound; Mux.Cool inbound |
+| [0026](0026-vless-mux.md) | VLESS inbound Mux.Cool | Accepted (2026-11-22) | shared Mux.Cool dispatcher |
 
 ADR-0001, 0003, 0007, 0010, 0013, and 0014 are superseded. ADR-0009 is
 superseded only in its license half; its clean-room protocol rule remains in

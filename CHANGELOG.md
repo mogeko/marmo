@@ -9,6 +9,8 @@ and behavior may change between minor releases.
   termination, AES-128-GCM and ChaCha20-Poly1305, bounded auth-ID replay
   filter, and TLS/WebSocket/HTTP2 transports (ADR-0025).
 - `marmo-proto` adds the `vmess` and `mux` codecs and a `vmess` fuzz target.
+- VLESS inbound terminates full Mux.Cool for TCP and UDP sessions, sharing the
+  VMess dispatcher (ADR-0026). The VLESS outbound keeps UoT/XUDP.
 
 ## 0.0.3 - 2026-11-21
 

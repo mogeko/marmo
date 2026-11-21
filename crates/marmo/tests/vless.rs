@@ -4,6 +4,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use marmo::{Config, Instance, InstanceHandle, ServeError};
+use marmo_transport::Layer;
+use marmo_transport::tls::{TlsClient, TlsClientOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::task::JoinHandle;
@@ -556,4 +558,151 @@ async fn relays_vless_uot_over_http2() {
     stop(front_handle, front_task).await;
     stop(proxy_handle, proxy_task).await;
     echo_task.abort();
+}
+
+/// Accumulates Mux.Cool frames from a byte stream.
+#[derive(Default)]
+struct MuxFrames {
+    buffer: Vec<u8>,
+}
+
+impl MuxFrames {
+    async fn next<R: tokio::io::AsyncRead + Unpin>(
+        &mut self, stream: &mut R,
+    ) -> (marmo_proto::mux::Meta, Vec<u8>) {
+        loop {
+            if let Some(frame) = self.take() {
+                return frame;
+            }
+            let mut extra = [0_u8; 4096];
+            let read = stream.read(&mut extra).await.expect("frame read");
+            assert!(read > 0, "eof before mux frame");
+            self.buffer.extend_from_slice(&extra[..read]);
+        }
+    }
+
+    fn take(&mut self) -> Option<(marmo_proto::mux::Meta, Vec<u8>)> {
+        if self.buffer.len() < 2 {
+            return None;
+        }
+        let meta_len = usize::from(u16::from_be_bytes([self.buffer[0], self.buffer[1]]));
+        if self.buffer.len() < 2 + meta_len {
+            return None;
+        }
+        let meta = marmo_proto::mux::parse_meta(&self.buffer[2..2 + meta_len]).ok()?;
+        let offset = 2 + meta_len;
+        let data_len = if meta.option & marmo_proto::mux::OPTION_DATA != 0 {
+            if self.buffer.len() < offset + 2 {
+                return None;
+            }
+            let length = usize::from(u16::from_be_bytes([
+                self.buffer[offset],
+                self.buffer[offset + 1],
+            ]));
+            if self.buffer.len() < offset + 2 + length {
+                return None;
+            }
+            length
+        } else {
+            0
+        };
+        let data = self.buffer[offset + 2..offset + 2 + data_len].to_vec();
+        self.buffer.drain(..offset + 2 + data_len);
+        Some((meta, data))
+    }
+}
+
+fn mux_new(session: u16, target: &marmo_net::Endpoint, network: u8, data: &[u8]) -> Vec<u8> {
+    let mut meta = [0_u8; 512];
+    let length =
+        marmo_proto::mux::encode_new_meta(session, target, network, &mut meta).expect("new meta");
+    let mut header = [0_u8; 2 + 512 + 2];
+    let length =
+        marmo_proto::mux::encode_header(&meta[..length], data.len(), &mut header).expect("header");
+    let mut frame = header[..length].to_vec();
+    frame.extend_from_slice(data);
+    frame
+}
+
+fn mux_end(session: u16) -> Vec<u8> {
+    let mut meta = [0_u8; 512];
+    let length = marmo_proto::mux::encode_end_meta(session, &mut meta).expect("end meta");
+    let mut frame = (length as u16).to_be_bytes().to_vec();
+    frame.extend_from_slice(&meta[..length]);
+    frame
+}
+
+#[tokio::test]
+async fn terminates_vless_mux_tcp_and_udp_sessions() {
+    let (tcp_echo, tcp_task) = echo_server().await;
+    let (udp_echo, udp_task) = udp_echo().await;
+    let proxy = format!(
+        r#"{{
+          "limits": {{ "handshake_timeout_s": 5, "idle_timeout_s": 10 }},
+          "inbounds": [ {} ],
+          "outbounds": [ {{ "tag": "direct", "protocol": "direct" }} ],
+          "route": {{ "final": "direct" }}
+        }}"#,
+        vless_inbound()
+    );
+    let (proxy_address, proxy_handle, proxy_task) = start(&proxy).await;
+
+    let uuid = marmo_proto::vless::Uuid::parse(UUID).expect("uuid");
+    let tcp = TcpStream::connect(proxy_address).await.expect("connect");
+    let tls = TlsClient::new(&TlsClientOptions {
+        server_name: "localhost",
+        alpn: &[],
+        required_alpn: None,
+        insecure: true,
+        client_certificate: None,
+        client_private_key: None,
+        handshake_timeout: Some(Duration::from_secs(5)),
+    })
+    .expect("tls client");
+    let mut client = tls.wrap(Box::new(tcp)).await.expect("tls handshake");
+    let mut header = [0_u8; 64];
+    let length = marmo_proto::vless::encode_mux_request(&uuid, &mut header).expect("mux");
+    client.write_all(&header[..length]).await.expect("header");
+    let mut response = [0_u8; 2];
+    client.read_exact(&mut response).await.expect("response");
+    assert_eq!(response, [0, 0]);
+
+    let mut frames = MuxFrames::default();
+
+    // TCP session on id 1.
+    client
+        .write_all(&mux_new(
+            1,
+            &marmo_net::Endpoint::from(tcp_echo),
+            marmo_proto::mux::NETWORK_TCP,
+            b"hello mux",
+        ))
+        .await
+        .expect("tcp new");
+    let (meta, data) = frames.next(&mut client).await;
+    assert_eq!(meta.session, 1);
+    assert_eq!(meta.status, marmo_proto::mux::STATUS_KEEP);
+    assert_eq!(data, b"hello mux");
+    client.write_all(&mux_end(1)).await.expect("tcp end");
+
+    // UDP session on id 2 over the same physical connection.
+    client
+        .write_all(&mux_new(
+            2,
+            &marmo_net::Endpoint::from(udp_echo),
+            marmo_proto::mux::NETWORK_UDP,
+            b"datagram",
+        ))
+        .await
+        .expect("udp new");
+    let (meta, data) = frames.next(&mut client).await;
+    assert_eq!(meta.session, 2);
+    assert_eq!(meta.status, marmo_proto::mux::STATUS_KEEP);
+    assert_eq!(data, b"datagram");
+    client.write_all(&mux_end(2)).await.expect("udp end");
+
+    drop(client);
+    stop(proxy_handle, proxy_task).await;
+    tcp_task.abort();
+    udp_task.abort();
 }

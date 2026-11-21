@@ -55,6 +55,10 @@ not implemented in this revision (QUIC, TUIC, Hysteria2).
   120-second window, then inserted into a bounded 4,096-entry replay filter.
   The 16-bit chunk counter is capped at 65,536 per direction to prevent GCM
   nonce reuse. MD5 appears only in the protocol-mandated CmdKey derivation.
+- **Mux.Cool.** The VMess and VLESS inbounds share one dispatcher bounded to 128
+  sessions per physical connection, a 16-frame queue per session, 64 KiB
+  frames, 512-byte metadata, and the instance idle timeout. Sessions own one
+  task and are aborted with the physical connection.
 
 ## 3. Open obligations
 

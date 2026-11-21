@@ -56,9 +56,13 @@ uses `rustls` for both TLS roles, `ws-net` for WebSocket, and `h2` for HTTP/2
   destination and rejects a different `send_to` destination; the inbound
   creates one outbound `PacketConn` for the request destination and writes
   replies with the same framing.
-- XUDP is implemented for both directions. The inbound accepts VLESS Mux
-  command `3` with the synthetic `v1.mux.cool` target and parses New/Keep
-  frames; the outbound can opt into XUDP with `"xudp": true`.
+- The inbound terminates full Mux.Cool: command `3` with the synthetic
+  `v1.mux.cool` target carries New/Keep/End/KeepAlive frames for TCP and UDP,
+  with multiple session ids and XUDP session `0`. The dispatcher is shared with
+  the VMess inbound (ADR-0026).
+- The outbound can opt into XUDP with `"xudp": true`; it opens one stream per
+  TCP connection and one association per UDP target. Client-side mux pooling is
+  not implemented (roadmap P5-13).
 - The outbound defaults to simple UoT, which is more interoperable with
   non-Xray servers.
 - Zero-length UDP frames are skipped on receive and dropped on send, matching
@@ -152,7 +156,8 @@ The inbound always requires TLS; plaintext VLESS inbound is not supported.
   HTTP/2 WebSocket options. `Instance` serves one VLESS stream per H2
   connection even though the package supports multiple streams; root-level
   HTTP/2 multiplexing/pooling is a follow-up. gRPC is not implemented.
-- One request per stream and no multiplexing (Mux.Cool).
+- No client-side mux pooling; the outbound keeps one stream per connection and
+  one association per UDP target.
 - No custom CA file or pinning is exposed by the root config; verification uses
   the platform bundle. `tls.insecure` is restricted to loopback test servers.
 - TLS state, including read/write keys and `KeyUpdate`, is owned by `rustls`.
@@ -198,6 +203,10 @@ Planned scope when it is taken up:
 - Integration: SOCKS5 UDP ASSOCIATE -> VLESS UDP outbound (simple and XUDP) ->
   TLS -> VLESS UDP inbound (command `2` and XUDP command `3`) -> direct UDP
   echo.
+- Integration: raw VLESS Mux connection carrying a TCP session and a UDP
+  session on one physical stream, with End frames.
+- Reference interop: an Xray 26.11.9 client with mux enabled against the VLESS
+  inbound (TCP and UDP, TLS with a pinned test certificate).
 - Unit: XUDP New/Keep frame roundtrip and address encoding.
 - Local interop with Xray-core 26.11.9: TCP in both directions; UDP/XUDP in
   both directions.

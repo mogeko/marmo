@@ -12,6 +12,7 @@ use marmo_proto::mux::{
     NETWORK_TCP, NETWORK_UDP, STATUS_END, STATUS_KEEP, STATUS_KEEPALIVE, STATUS_NEW,
 };
 use marmo_proto::vless::MAX_UDP_PAYLOAD;
+use marmo_transport::BoxStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::sync::{Mutex, Notify, mpsc};
 use tokio::task::{AbortHandle, JoinSet};
@@ -21,7 +22,6 @@ use crate::deadline::wait_for_activity;
 use crate::instance::Context;
 use crate::mux::{Frame, MuxReader, MuxWriter};
 use crate::routing::{Action, Metadata};
-use crate::vmess::ChunkStream;
 
 /// Maximum sessions on one physical connection.
 const MAX_SESSIONS: usize = 128;
@@ -30,7 +30,7 @@ const QUEUE: usize = 16;
 /// Bytes read from one logical TCP stream per read.
 const READ_BUFFER: usize = 32 * 1024;
 
-type Writer = Arc<Mutex<MuxWriter<WriteHalf<ChunkStream>>>>;
+type Writer = Arc<Mutex<MuxWriter<WriteHalf<BoxStream>>>>;
 
 struct Uplink {
     target: Option<Endpoint>,
@@ -44,12 +44,14 @@ struct Session {
 }
 
 /// Serves Mux.Cool frames until the physical stream closes or fails.
+///
+/// `prefix` is bytes already read from `stream` after the protocol header.
 pub(crate) async fn serve(
-    stream: ChunkStream, context: Arc<Context>, inbound: Arc<str>, source: Endpoint,
+    stream: BoxStream, prefix: &[u8], context: Arc<Context>, inbound: Arc<str>, source: Endpoint,
     token: CancellationToken,
 ) {
     let (reader, writer) = tokio::io::split(stream);
-    let Ok(frames) = MuxReader::new(reader, &[]) else {
+    let Ok(frames) = MuxReader::new(reader, prefix) else {
         return;
     };
     let writer: Writer = Arc::new(Mutex::new(MuxWriter::new(writer)));
