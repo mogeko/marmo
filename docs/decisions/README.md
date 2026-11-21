@@ -42,11 +42,12 @@ ADR-0017 onward.
 | [0016](0016-protocol-transport-wiring.md) | Protocol transport wiring | Accepted; H2 method superseded by ADR-0022 | VLESS transport object |
 | [0017](0017-language-and-runtime.md) | Language, runtime, and interface model | Accepted | Rust + tokio |
 | [0018](0018-dependencies-and-crypto.md) | Dependencies and crypto backend | Accepted; amended | `rustls` + `aws-lc-rs` |
-| [0019](0019-workspace-and-packaging.md) | Workspace layout and packaging | Accepted | five crates |
+| [0019](0019-workspace-and-packaging.md) | Workspace layout and packaging | Accepted; fifth crate superseded by ADR-0024 | four published crates |
 | [0020](0020-license.md) | License change | Accepted; amended | MIT OR Apache-2.0 |
 | [0021](0021-websocket-backend.md) | WebSocket backend and permessage-deflate | Accepted | `ws-net` + tokio pump |
 | [0022](0022-vless-http2-method.md) | VLESS HTTP/2 transport method | Accepted | `PUT` client, no content type |
 | [0023](0023-tls-credentials-inline.md) | TLS credentials as inline configuration | Accepted | inline PEM; schema v2 |
+| [0024](0024-drop-testkit.md) | Drop the unused testkit crate | Proposed | remove `marmo-testkit`; four published crates |
 
 ADR-0001, 0003, 0007, 0010, 0013, and 0014 are superseded. ADR-0009 is
 superseded only in its license half; its clean-room protocol rule remains in
