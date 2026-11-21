@@ -147,35 +147,19 @@ impl State {
         }
         let (uplink, receiver) = mpsc::channel(QUEUE);
         let cancel = self.token.child_token();
-        let writer = Arc::clone(&self.writer);
-        let closed = self.closed.clone();
-        let context = Arc::clone(&self.context);
-        let inbound = Arc::clone(&self.inbound);
-        let source = self.source.clone();
-        let session_token = cancel.clone();
+        let session = SessionContext {
+            id,
+            target,
+            writer: Arc::clone(&self.writer),
+            context: Arc::clone(&self.context),
+            inbound: Arc::clone(&self.inbound),
+            source: self.source.clone(),
+            token: cancel.clone(),
+            closed: self.closed.clone(),
+        };
         let abort = match frame.meta.network {
-            NETWORK_TCP => self.tasks.spawn(run_tcp(
-                id,
-                target,
-                receiver,
-                writer,
-                context,
-                inbound,
-                source,
-                session_token,
-                closed,
-            )),
-            NETWORK_UDP => self.tasks.spawn(run_udp(
-                id,
-                target,
-                receiver,
-                writer,
-                context,
-                inbound,
-                source,
-                session_token,
-                closed,
-            )),
+            NETWORK_TCP => self.tasks.spawn(run_tcp(session, receiver)),
+            NETWORK_UDP => self.tasks.spawn(run_udp(session, receiver)),
             _ => return false,
         };
         self.sessions.insert(
@@ -221,146 +205,146 @@ impl State {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_tcp(
-    id: u16, target: Endpoint, mut receiver: mpsc::Receiver<Uplink>, writer: Writer,
-    context: Arc<Context>, inbound: Arc<str>, source: Endpoint, token: CancellationToken,
+/// Everything a session task needs except its uplink receiver.
+struct SessionContext {
+    id: u16,
+    target: Endpoint,
+    writer: Writer,
+    context: Arc<Context>,
+    inbound: Arc<str>,
+    source: Endpoint,
+    token: CancellationToken,
     closed: mpsc::Sender<u16>,
-) {
-    tcp_session(
-        id,
-        &target,
-        &mut receiver,
-        &writer,
-        &context,
-        &inbound,
-        &source,
-        &token,
-    )
-    .await;
-    let _ = closed.try_send(id);
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn tcp_session(
-    id: u16, target: &Endpoint, receiver: &mut mpsc::Receiver<Uplink>, writer: &Writer,
-    context: &Context, inbound: &str, source: &Endpoint, token: &CancellationToken,
-) {
-    let Some(action) = route(context, inbound, source, target, Network::Tcp) else {
-        let _ = writer.lock().await.end_error(id, b"no route").await;
-        return;
-    };
-    let connected = tokio::select! {
-        _ = token.cancelled() => return,
-        result = context.connect(action, target) => result,
-    };
-    let Ok(connected) = connected else {
-        let _ = writer.lock().await.end_error(id, b"connect failed").await;
-        return;
-    };
-    let (mut read, mut write) = tokio::io::split(connected.stream);
-    let mut buffer = vec![0_u8; READ_BUFFER];
-    loop {
-        tokio::select! {
-            _ = token.cancelled() => break,
-            message = receiver.recv() => {
-                let Some(message) = message else {
-                    break;
-                };
-                if write.write_all(&message.data).await.is_err() {
-                    break;
-                }
-            }
-            result = read.read(&mut buffer) => {
-                match result {
-                    Ok(0) => break,
-                    Ok(count) => {
-                        if writer
-                            .lock()
-                            .await
-                            .keep(id, None, &buffer[..count])
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
+async fn run_tcp(session: SessionContext, mut receiver: mpsc::Receiver<Uplink>) {
+    let id = session.id;
+    let closed = session.closed.clone();
+    let body = async {
+        let Some(action) = route(
+            &session.context,
+            &session.inbound,
+            &session.source,
+            &session.target,
+            Network::Tcp,
+        ) else {
+            let _ = session.writer.lock().await.end_error(id, b"no route").await;
+            return;
+        };
+        let connected = tokio::select! {
+            _ = session.token.cancelled() => return,
+            result = session.context.connect(action, &session.target) => result,
+        };
+        let Ok(connected) = connected else {
+            let _ = session
+                .writer
+                .lock()
+                .await
+                .end_error(id, b"connect failed")
+                .await;
+            return;
+        };
+        let (mut read, mut write) = tokio::io::split(connected.stream);
+        let mut buffer = vec![0_u8; READ_BUFFER];
+        loop {
+            tokio::select! {
+                _ = session.token.cancelled() => break,
+                message = receiver.recv() => {
+                    let Some(message) = message else {
+                        break;
+                    };
+                    if write.write_all(&message.data).await.is_err() {
+                        break;
                     }
-                    Err(_) => break,
+                }
+                result = read.read(&mut buffer) => {
+                    match result {
+                        Ok(0) => break,
+                        Ok(count) => {
+                            if session
+                                .writer
+                                .lock()
+                                .await
+                                .keep(id, None, &buffer[..count])
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
                 }
             }
         }
-    }
-    let _ = writer.lock().await.end(id).await;
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_udp(
-    id: u16, target: Endpoint, mut receiver: mpsc::Receiver<Uplink>, writer: Writer,
-    context: Arc<Context>, inbound: Arc<str>, source: Endpoint, token: CancellationToken,
-    closed: mpsc::Sender<u16>,
-) {
-    udp_session(
-        id,
-        &target,
-        &mut receiver,
-        &writer,
-        &context,
-        &inbound,
-        &source,
-        &token,
-    )
-    .await;
+        let _ = session.writer.lock().await.end(id).await;
+    };
+    body.await;
     let _ = closed.try_send(id);
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn udp_session(
-    id: u16, initial: &Endpoint, receiver: &mut mpsc::Receiver<Uplink>, writer: &Writer,
-    context: &Context, inbound: &str, source: &Endpoint, token: &CancellationToken,
-) {
-    let Some(action) = route(context, inbound, source, initial, Network::Udp) else {
-        let _ = writer.lock().await.end_error(id, b"no route").await;
-        return;
-    };
-    let ipv4 = source.ip().is_none_or(|ip| ip.is_ipv4());
-    let outbound = tokio::select! {
-        _ = token.cancelled() => return,
-        result = context.udp_outbound(action, ipv4, initial) => result,
-    };
-    let Ok(Some(mut outbound)) = outbound else {
-        let _ = writer.lock().await.end_error(id, b"udp unavailable").await;
-        return;
-    };
-    let mut buffer = vec![0_u8; MAX_UDP_PAYLOAD];
-    loop {
-        tokio::select! {
-            _ = token.cancelled() => break,
-            message = receiver.recv() => {
-                let Some(message) = message else {
-                    break;
-                };
-                let destination = message.target.as_ref().unwrap_or(initial);
-                if outbound.send_to(destination, &message.data).await.is_err() {
-                    break;
+async fn run_udp(session: SessionContext, mut receiver: mpsc::Receiver<Uplink>) {
+    let id = session.id;
+    let closed = session.closed.clone();
+    let body = async {
+        let Some(action) = route(
+            &session.context,
+            &session.inbound,
+            &session.source,
+            &session.target,
+            Network::Udp,
+        ) else {
+            let _ = session.writer.lock().await.end_error(id, b"no route").await;
+            return;
+        };
+        let ipv4 = session.source.ip().is_none_or(|ip| ip.is_ipv4());
+        let outbound = tokio::select! {
+            _ = session.token.cancelled() => return,
+            result = session.context.udp_outbound(action, ipv4, &session.target) => result,
+        };
+        let Ok(Some(mut outbound)) = outbound else {
+            let _ = session
+                .writer
+                .lock()
+                .await
+                .end_error(id, b"udp unavailable")
+                .await;
+            return;
+        };
+        let mut buffer = vec![0_u8; MAX_UDP_PAYLOAD];
+        loop {
+            tokio::select! {
+                _ = session.token.cancelled() => break,
+                message = receiver.recv() => {
+                    let Some(message) = message else {
+                        break;
+                    };
+                    let destination = message.target.as_ref().unwrap_or(&session.target);
+                    if outbound.send_to(destination, &message.data).await.is_err() {
+                        break;
+                    }
                 }
-            }
-            received = outbound.recv_from(&mut buffer) => {
-                let Ok((length, from)) = received else {
-                    break;
-                };
-                if writer
-                    .lock()
-                    .await
-                    .keep(id, Some(&from), &buffer[..length])
-                    .await
-                    .is_err()
-                {
-                    break;
+                received = outbound.recv_from(&mut buffer) => {
+                    let Ok((length, from)) = received else {
+                        break;
+                    };
+                    if session
+                        .writer
+                        .lock()
+                        .await
+                        .keep(id, Some(&from), &buffer[..length])
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
             }
         }
-    }
-    let _ = writer.lock().await.end(id).await;
+        let _ = session.writer.lock().await.end(id).await;
+    };
+    body.await;
+    let _ = closed.try_send(id);
 }
 
 fn route(
