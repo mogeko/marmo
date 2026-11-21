@@ -111,6 +111,9 @@ async fn handle_datagram(
             return;
         };
         sessions.insert(client_session, session);
+        context
+            .metrics
+            .record(crate::metrics::MetricEvent::UdpSessionOpened);
     }
     let Some(session) = sessions.get_mut(&client_session) else {
         return;

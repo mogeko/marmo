@@ -5,10 +5,14 @@ use std::net::SocketAddr;
 
 use marmo_net::Endpoint;
 use marmo_transport::{BoxFuture, BoxStream};
+use tokio::runtime::Handle;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::outbound::udp::UdpOutbound;
 
 pub(crate) mod http_connect;
+pub(crate) mod selector;
 pub(crate) mod shadowsocks;
 pub(crate) mod trojan;
 pub(crate) mod udp;
@@ -45,5 +49,14 @@ pub(crate) trait Outbound: Send + Sync {
     /// Whether this outbound is the direct dialer.
     fn is_direct(&self) -> bool {
         false
+    }
+
+    /// Starts an optional health-probe task owned by the instance.
+    fn start_health(
+        &self,
+        _runtime: &Handle,
+        _token: &CancellationToken,
+    ) -> Option<JoinHandle<()>> {
+        None
     }
 }

@@ -1,15 +1,19 @@
 //! Absolute deadlines for connection handshakes.
 
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::Notify;
 use tokio::time::{Instant, timeout_at};
 
+use crate::metrics::{MetricEvent, Metrics};
+
 /// A fixed point in time, shared by every phase of one handshake.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone)]
 pub(crate) struct Deadline {
     at: Instant,
+    metrics: Arc<Metrics>,
 }
 
 /// The deadline passed before the wrapped future finished.
@@ -18,9 +22,10 @@ pub(crate) struct Elapsed;
 
 impl Deadline {
     /// Starts a deadline `timeout` from now.
-    pub(crate) fn after(timeout: Duration) -> Self {
+    pub(crate) fn after(timeout: Duration, metrics: Arc<Metrics>) -> Self {
         Self {
             at: Instant::now() + timeout,
+            metrics,
         }
     }
 
@@ -29,7 +34,13 @@ impl Deadline {
     where
         F: Future,
     {
-        timeout_at(self.at, future).await.map_err(|_| Elapsed)
+        match timeout_at(self.at, future).await {
+            Ok(value) => Ok(value),
+            Err(_) => {
+                self.metrics.record(MetricEvent::HandshakeTimeout);
+                Err(Elapsed)
+            }
+        }
     }
 
     /// Returns true once the deadline has passed.

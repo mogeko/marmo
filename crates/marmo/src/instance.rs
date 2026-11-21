@@ -18,7 +18,7 @@ use marmo_proto::vless::Uuid;
 use marmo_transport::h2::{H2Client, H2ClientOptions, H2Server, H2ServerOptions};
 use marmo_transport::tls::{TlsClient, TlsClientOptions, TlsServer, TlsServerOptions};
 use marmo_transport::ws::{WsClient, WsClientOptions, WsServer, WsServerOptions};
-use marmo_transport::{BoxStream, Layer, RelayOptions, relay};
+use marmo_transport::{BoxStream, Layer, RelayError, RelayOptions, relay};
 use thiserror::Error;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::runtime::Handle;
@@ -26,10 +26,13 @@ use tokio::task::JoinSet;
 use tokio::time::{interval, timeout};
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{Config, ConfigError, InboundProtocol, OutboundProtocol, StreamNetwork};
+use crate::config::{
+    Config, ConfigError, HealthCheck, InboundProtocol, OutboundProtocol, Strategy, StreamNetwork,
+};
 use crate::deadline::Deadline;
 use crate::inbound::{self, http, socks5};
 use crate::limits::Limits;
+use crate::metrics::{MetricEvent, Metrics, MetricsSink, MetricsSnapshot};
 use crate::outbound::{self, Outbound, http_connect, udp::UdpOutbound};
 use crate::routing::{Action, Router, RoutingError};
 use crate::shadowsocks::credentials;
@@ -41,6 +44,7 @@ pub struct Instance {
     limits: Limits,
     supervisor: Arc<Supervisor>,
     router: Arc<Router>,
+    metrics: Arc<Metrics>,
     outbounds: Vec<OutboundSpec>,
     inbounds: Vec<InboundSpec>,
 }
@@ -53,6 +57,7 @@ impl Instance {
             config,
             runtime: None,
             shutdown_grace: None,
+            metrics: None,
         }
     }
 
@@ -64,6 +69,12 @@ impl Instance {
         }
     }
 
+    /// Returns a point-in-time copy of the instance counters.
+    #[must_use]
+    pub fn metrics(&self) -> MetricsSnapshot {
+        self.metrics.snapshot()
+    }
+
     /// Binds every inbound, builds TLS configurations, and returns the
     /// running-bound state. This is the only startup step that performs I/O.
     pub async fn bind(self) -> Result<BoundInstance, BindError> {
@@ -72,14 +83,37 @@ impl Instance {
             limits,
             supervisor,
             router,
+            metrics,
             outbounds,
             inbounds,
         } = self;
 
-        let mut kinds = Vec::with_capacity(outbounds.len());
-        for spec in outbounds {
-            kinds.push(spec.build()?);
+        let mut specs: Vec<Option<OutboundSpec>> = outbounds.into_iter().map(Some).collect();
+        let mut kinds: Vec<Option<Arc<dyn Outbound>>> = (0..specs.len()).map(|_| None).collect();
+        let mut built = std::collections::HashMap::new();
+        for (index, slot) in specs.iter_mut().enumerate() {
+            let Some(spec) = slot.as_ref() else {
+                continue;
+            };
+            if spec.is_selector() {
+                continue;
+            }
+            let tag = spec.tag.to_string();
+            let spec = slot.take().expect("checked above");
+            let outbound = spec.build_node()?;
+            built.insert(tag, Arc::clone(&outbound));
+            kinds[index] = Some(outbound);
         }
+        for (index, slot) in specs.iter_mut().enumerate() {
+            let Some(spec) = slot.take() else {
+                continue;
+            };
+            kinds[index] = Some(spec.build_selector(&built, Arc::clone(&metrics))?);
+        }
+        let kinds: Vec<Arc<dyn Outbound>> = kinds
+            .into_iter()
+            .map(|kind| kind.expect("every outbound is built"))
+            .collect();
 
         let mut bound = Vec::with_capacity(inbounds.len());
         for spec in inbounds {
@@ -124,6 +158,7 @@ impl Instance {
             limits,
             supervisor,
             router,
+            metrics,
             outbounds: kinds,
             inbounds: bound,
         })
@@ -148,6 +183,7 @@ pub struct InstanceBuilder {
     config: Config,
     runtime: Option<Handle>,
     shutdown_grace: Option<Duration>,
+    metrics: Option<Arc<dyn MetricsSink>>,
 }
 
 impl InstanceBuilder {
@@ -163,6 +199,13 @@ impl InstanceBuilder {
     #[must_use]
     pub fn shutdown_grace(mut self, grace: Duration) -> Self {
         self.shutdown_grace = Some(grace);
+        self
+    }
+
+    /// Installs an optional metrics sink.
+    #[must_use]
+    pub fn metrics(mut self, sink: Arc<dyn MetricsSink>) -> Self {
+        self.metrics = Some(sink);
         self
     }
 
@@ -454,12 +497,11 @@ impl InstanceBuilder {
                         h2,
                     }
                 }
-                OutboundProtocol::Selector => {
-                    return Err(BuildError::UnsupportedOutbound {
-                        tag: outbound.tag.clone(),
-                        protocol: OutboundProtocol::Selector,
-                    });
-                }
+                OutboundProtocol::Selector => OutboundConfig::Selector {
+                    nodes: outbound.nodes.clone().unwrap_or_default(),
+                    strategy: outbound.strategy.unwrap_or(Strategy::Manual),
+                    health_check: outbound.health_check.clone(),
+                },
             };
             outbounds.push(OutboundSpec {
                 tag: Arc::from(outbound.tag.as_str()),
@@ -468,11 +510,13 @@ impl InstanceBuilder {
         }
 
         let supervisor = Arc::new(Supervisor::new(limits.max_connections));
+        let metrics = Arc::new(Metrics::new(self.metrics));
         Ok(Instance {
             runtime,
             limits,
             supervisor,
             router: Arc::new(router),
+            metrics,
             outbounds,
             inbounds,
         })
@@ -485,6 +529,7 @@ pub struct BoundInstance {
     limits: Limits,
     supervisor: Arc<Supervisor>,
     router: Arc<Router>,
+    metrics: Arc<Metrics>,
     outbounds: Vec<Arc<dyn Outbound>>,
     inbounds: Vec<BoundInbound>,
 }
@@ -529,11 +574,18 @@ impl BoundInstance {
             runtime: runtime.clone(),
             supervisor: Arc::clone(&supervisor),
             router: self.router,
+            metrics: self.metrics,
             direct: Arc::new(crate::direct::DirectOutbound),
             outbounds: self.outbounds,
             limits,
         });
         let token = supervisor.token();
+        let mut health = Vec::new();
+        for outbound in &context.outbounds {
+            if let Some(task) = outbound.start_health(&context.runtime, &token) {
+                health.push(task);
+            }
+        }
 
         let mut tasks = JoinSet::new();
         for inbound in self.inbounds {
@@ -563,6 +615,9 @@ impl BoundInstance {
         }
 
         supervisor.cancel();
+        for task in health {
+            task.abort();
+        }
         let grace = limits.shutdown_grace;
         let drain = async { while tasks.join_next().await.is_some() {} };
         if timeout(grace, drain).await.is_err() {
@@ -627,6 +682,7 @@ pub(crate) struct Context {
     pub(crate) runtime: Handle,
     pub(crate) supervisor: Arc<Supervisor>,
     pub(crate) router: Arc<Router>,
+    pub(crate) metrics: Arc<Metrics>,
     pub(crate) direct: Arc<dyn Outbound>,
     pub(crate) outbounds: Vec<Arc<dyn Outbound>>,
     pub(crate) limits: Limits,
@@ -681,9 +737,19 @@ impl Context {
             uplink_grace: self.limits.uplink_grace,
             downlink_grace: self.limits.downlink_grace,
         };
-        tokio::select! {
-            _ = token.cancelled() => {}
-            _ = relay(client, remote, options) => {}
+        let result = tokio::select! {
+            _ = token.cancelled() => return,
+            result = relay(client, remote, options) => result,
+        };
+        match result {
+            Ok(stats) => self.metrics.record(MetricEvent::BytesRelayed {
+                client_to_remote: stats.client_to_remote,
+                remote_to_client: stats.remote_to_client,
+            }),
+            Err(RelayError::Idle | RelayError::HalfClose) => {
+                self.metrics.record(MetricEvent::RelayTimeout);
+            }
+            Err(_) => {}
         }
     }
 
@@ -835,6 +901,11 @@ enum OutboundConfig {
         ws: Option<WsClientOptions>,
         h2: Option<H2ClientOptions>,
     },
+    Selector {
+        nodes: Vec<String>,
+        strategy: Strategy,
+        health_check: Option<HealthCheck>,
+    },
 }
 
 struct OutboundTlsConfig {
@@ -848,7 +919,11 @@ struct OutboundTlsConfig {
 }
 
 impl OutboundSpec {
-    fn build(self) -> Result<Arc<dyn Outbound>, BindError> {
+    fn is_selector(&self) -> bool {
+        matches!(self.config, OutboundConfig::Selector { .. })
+    }
+
+    fn build_node(self) -> Result<Arc<dyn Outbound>, BindError> {
         let Self { tag, config } = self;
         Ok(match config {
             OutboundConfig::Direct => Arc::new(crate::direct::DirectOutbound),
@@ -896,7 +971,43 @@ impl OutboundSpec {
                     layers,
                 })
             }
+            OutboundConfig::Selector { .. } => {
+                unreachable!("selectors are built in the second pass")
+            }
         })
+    }
+
+    fn build_selector(
+        self,
+        built: &std::collections::HashMap<String, Arc<dyn Outbound>>,
+        metrics: Arc<Metrics>,
+    ) -> Result<Arc<dyn Outbound>, BindError> {
+        let Self { tag, config } = self;
+        let OutboundConfig::Selector {
+            nodes,
+            strategy,
+            health_check,
+        } = config
+        else {
+            unreachable!("non-selectors are built in the first pass");
+        };
+        let mut resolved = Vec::with_capacity(nodes.len());
+        for node in nodes {
+            let Some(outbound) = built.get(&node) else {
+                return Err(BindError::Selector {
+                    tag: tag.to_string(),
+                    reason: format!("unknown selector node '{node}'"),
+                });
+            };
+            resolved.push(Arc::clone(outbound));
+        }
+        Ok(Arc::new(outbound::selector::SelectorOutbound::new(
+            tag.to_string(),
+            metrics,
+            resolved,
+            strategy,
+            health_check,
+        )))
     }
 }
 
@@ -1056,13 +1167,19 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                 };
 
                 let Some(permit) = context.supervisor.try_acquire() else {
+                    context.metrics.record(MetricEvent::ConnectionRejected);
                     drop(stream);
                     continue;
                 };
+                context.metrics.record(MetricEvent::ConnectionAccepted);
                 let tag = Arc::clone(&inbound.tag);
                 let kind = inbound.kind.clone();
                 let task_context = Arc::clone(&context);
-                let deadline = Deadline::after(context.limits.handshake_timeout);
+                let deadline = Deadline::after(
+                    context.limits.handshake_timeout,
+                    Arc::clone(&context.metrics),
+                );
+                let metrics = Arc::clone(&context.metrics);
                 let runtime = context.runtime.clone();
                 let _ = connections.spawn_on(async move {
                     let _permit = permit;
@@ -1112,6 +1229,7 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                             .await;
                         }
                     }
+                    metrics.record(MetricEvent::ConnectionClosed);
                 }, &runtime);
             }
         }
@@ -1149,14 +1267,6 @@ pub enum BuildError {
         tag: String,
         /// Configured protocol.
         protocol: InboundProtocol,
-    },
-    /// The outbound protocol is not implemented yet.
-    #[error("outbound '{tag}' protocol {protocol:?} is not implemented")]
-    UnsupportedOutbound {
-        /// Outbound tag.
-        tag: String,
-        /// Configured protocol.
-        protocol: OutboundProtocol,
     },
     /// The listen endpoint is not an IP literal.
     #[error("inbound '{tag}' listen is not an IP endpoint: {listen}")]
@@ -1204,6 +1314,14 @@ pub enum BuildError {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum BindError {
+    /// A selector graph was rejected while binding.
+    #[error("selector '{tag}' failed: {reason}")]
+    Selector {
+        /// Selector tag.
+        tag: String,
+        /// Why the selector was rejected.
+        reason: String,
+    },
     /// A TLS configuration was rejected while binding.
     #[error("'{tag}' TLS setup failed: {reason}")]
     Tls {
