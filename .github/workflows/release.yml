@@ -1,0 +1,93 @@
+name: Release
+
+# Publish every published crate from a version tag. crates.io trusted
+# publishing must be configured for this repository, workflow file
+# (`.github/workflows/release.yml`), and job name (`publish`).
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.100.0
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Validate tag and workspace version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "release tags must look like vX.Y.Z, got '${tag}'" >&2
+            exit 1
+          fi
+          version="$(cargo metadata --no-deps --format-version 1 --locked \
+            | jq -r '.packages[] | select(.name == "marmo") | .version')"
+          if [[ "v${version}" != "${tag}" ]]; then
+            echo "tag ${tag} does not match workspace version ${version}" >&2
+            exit 1
+          fi
+
+      - name: Test the release tree
+        run: cargo test --workspace --locked
+
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
+      - name: Publish crates in dependency order
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --no-deps --format-version 1 --locked \
+            | jq -r '.packages[] | select(.name == "marmo") | .version')"
+
+          already_published() {
+            curl -fsS \
+              -H "User-Agent: marmo-release" \
+              "https://crates.io/api/v1/crates/$1/${version}" >/dev/null
+          }
+
+          publish() {
+            local crate="$1"
+            if already_published "${crate}"; then
+              echo "${crate} ${version} is already published; skipping"
+              return
+            fi
+            cargo publish -p "${crate}" --locked
+            for _ in $(seq 1 30); do
+              if already_published "${crate}"; then
+                echo "${crate} ${version} is visible in the index"
+                return
+              fi
+              sleep 5
+            done
+            echo "${crate} ${version} did not appear in the crates.io index" >&2
+            exit 1
+          }
+
+          publish marmo-net
+          publish marmo-proto
+          publish marmo-transport
+          publish marmo

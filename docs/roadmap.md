@@ -188,6 +188,11 @@ order:
 `marmo-transport` must not dev-depend on an unpublished path crate;
 `cargo package -p marmo-transport` is the release check for that.
 
+Pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`. The workflow
+checks that the tag matches the workspace version, runs the workspace tests,
+obtains a short-lived token through `crates-io-auth-action`, publishes the four
+crates in the order above, and skips versions that are already published.
+
 ## Out of scope
 
 - Snell (deferred; no official specification).
