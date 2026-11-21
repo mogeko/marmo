@@ -1,6 +1,7 @@
 [package]
 name = "marmo-proto"
 description = "Wire codecs for marmo proxy protocols"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,6 +1,7 @@
 [package]
 name = "marmo-net"
 description = "Endpoints, CIDR, and network types for marmo"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

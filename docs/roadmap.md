@@ -178,15 +178,17 @@ criteria. They are tracked here so they do not disappear from the docs.
 
 ## Release packaging order
 
-The published crates use exact workspace versions, so publish in dependency
-order:
+All four crates take their version from `[workspace.package]`, and path
+dependencies pin that version exactly (`=0.0.3`). Bump the workspace version
+once, then publish in dependency order, because a crate must be visible in the
+crates.io index before anything that depends on it.
 
-1. `marmo-net`
-2. `marmo-proto` and `marmo-transport`
-3. `marmo`
-
-`marmo-transport` must not dev-depend on an unpublished path crate;
-`cargo package -p marmo-transport` is the release check for that.
+| Step | Crate | Depends on |
+| --- | --- | --- |
+| 1 | `marmo-net` | nothing |
+| 2 | `marmo-proto` | `marmo-net` |
+| 3 | `marmo-transport` | upstream crates only |
+| 4 | `marmo` | the three crates above |
 
 ## Out of scope
 
