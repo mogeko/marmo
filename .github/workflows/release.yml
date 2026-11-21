@@ -6,7 +6,8 @@ name: Release
 on:
   push:
     tags:
-      - "v*.*.*"
+      # GitHub glob, not regex: one or more digits in each component.
+      - "v[0-9]+.[0-9]+.[0-9]+"
 
 concurrency:
   group: release-${{ github.ref }}
@@ -19,7 +20,26 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.tag.outputs.publish }}
+    steps:
+      - name: Decide whether this tag is a release
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "publish=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "publish=false" >> "${GITHUB_OUTPUT}"
+            echo "TAG ${GITHUB_REF_NAME} is not vX.Y.Z; skipping release" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
   publish:
+    needs: check
+    if: needs.check.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -32,15 +52,11 @@ jobs:
           toolchain: 1.100.0
       - uses: Swatinem/rust-cache@v2
 
-      - name: Validate tag and workspace version
+      - name: Validate workspace version
         shell: bash
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
-          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "release tags must look like vX.Y.Z, got '${tag}'" >&2
-            exit 1
-          fi
           version="$(cargo metadata --no-deps --format-version 1 --locked \
             | jq -r '.packages[] | select(.name == "marmo") | .version')"
           if [[ "v${version}" != "${tag}" ]]; then
