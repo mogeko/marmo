@@ -24,16 +24,17 @@ HTTP/2 use the first-party packages from ADR-0013 and ADR-0014.
 - Inbound UUID authentication uses a constant-time comparison, then routes and
   connects to the selected outbound. The empty response header is sent only
   after the outbound connection is established.
-- Inbound TLS credentials are loaded from PEM/DER certificate files and a PEM
-  PKCS#8 or SEC1 ECDSA P-256 private key. The leaf certificate must match the
-  key.
+- TLS credentials are inline PEM in the configuration (schema version 2):
+  inbound `tls.certificate`, `tls.private_key`, and `tls.client_ca`; outbound
+  `tls.client_certificate` and `tls.client_private_key`. The leaf certificate
+  must match the key. The library never reads credential files (ADR-0023).
 - Strict config validation:
   - outbound `server` is required and must be `host:port`;
   - `uuid` is required and accepts `8-4-4-4-12` or 32 hex digits;
   - outbound `tls` is optional; `tls.sni` is required for an IP `server` when
     verification is enabled;
-  - inbound `tls.certificate` and `tls.private_key` are required and must not
-    be empty;
+  - inbound `tls.certificate` and `tls.private_key` are required, must be
+    non-empty PEM, and are rejected when they look like a file path;
   - outbound `xudp` is optional and defaults to `false`;
   - inbound/outbound TLS `handshake_timeout_s` defaults to 10 and must be
     positive;

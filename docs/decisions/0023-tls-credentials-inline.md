@@ -1,6 +1,6 @@
 # ADR-0023: TLS credentials as inline configuration
 
-- Status: Proposed
+- Status: Accepted (2026-11-21)
 - Date: 2026-11-21
 - Deciders: @mogeko
 - Related: ADR-0008, ADR-0012, ADR-0018, ADR-0019
@@ -153,7 +153,7 @@ architecture text.
 
 ## Approval
 
-- [ ] Accept the recommendation (schema version 2, inline PEM only, no
+- [x] Accept the recommendation (schema version 2, inline PEM only, no
       filesystem I/O in the library, redacted and zeroized config secrets).
 - [ ] Choose an alternative: keep v1 paths, auto-detect, tagged object, or
       another approach.
