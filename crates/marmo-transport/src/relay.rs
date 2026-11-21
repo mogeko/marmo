@@ -213,7 +213,7 @@ mod tests {
     use tokio::io::DuplexStream;
 
     fn pair(capacity: usize) -> (BoxStream, BoxStream) {
-        let (a, b) = tokio::io::duplex(capacity);
+        let (a, b) = marmo_testkit::stream_pair(capacity);
         (Box::new(a), Box::new(b))
     }
 

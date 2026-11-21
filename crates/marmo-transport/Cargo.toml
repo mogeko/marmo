@@ -20,5 +20,8 @@ tokio.workspace = true
 ws-net.workspace = true
 tokio-rustls.workspace = true
 
+[dev-dependencies]
+marmo-testkit.workspace = true
+
 [lints]
 workspace = true
