@@ -17,8 +17,10 @@ HTTP/2 use the first-party packages from ADR-0013 and ADR-0014.
   before the VLESS header is parsed.
 - WebSocket transport uses `path` and `host`, and optionally
   `permessage-deflate` (`compression`) and subprotocols (`subprotocols`).
-  HTTP/2 uses a POST stream with `:authority` from `host`, `:path` from `path`,
-  and requires ALPN `h2` (defaulted when `tls.alpn` is absent).
+  HTTP/2 uses a `PUT` stream with `:authority` from `host` and `:path` from
+  `path`, and requires ALPN `h2` (defaulted when `tls.alpn` is absent). The
+  client sends no `content-type`; the server accepts `PUT` and `POST` and
+  ignores the header (ADR-0022).
 - Inbound UUID authentication uses a constant-time comparison, then routes and
   connects to the selected outbound. The empty response header is sent only
   after the outbound connection is established.

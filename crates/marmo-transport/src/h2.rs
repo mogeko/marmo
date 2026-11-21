@@ -15,7 +15,6 @@ use std::task::{Context as TaskContext, Poll, ready};
 
 use bytes::Bytes;
 use h2::{RecvStream, SendStream};
-use http::header::CONTENT_TYPE;
 use http::{Method, Request, Response, StatusCode};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf};
@@ -80,9 +79,8 @@ impl H2Client {
 
         let uri = format!("https://{}{}", self.options.host, self.options.path);
         let request = Request::builder()
-            .method(Method::POST)
+            .method(Method::PUT)
             .uri(uri)
-            .header(CONTENT_TYPE, "application/octet-stream")
             .body(())
             .map_err(|error| H2Error::Request(error.to_string()))?;
         let (response, send) = match sender.send_request(request, false) {
@@ -137,13 +135,8 @@ impl H2Server {
         let (request, mut respond) =
             accepted.map_err(|error| H2Error::Handshake(error.to_string()))?;
 
-        let valid = request.method() == Method::POST
-            && request.uri().path() == self.options.path
-            && request
-                .headers()
-                .get(CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                == Some("application/octet-stream");
+        let valid = matches!(*request.method(), Method::POST | Method::PUT)
+            && request.uri().path() == self.options.path;
         if !valid {
             let response = Response::builder()
                 .status(StatusCode::BAD_REQUEST)
@@ -159,7 +152,6 @@ impl H2Server {
 
         let response = Response::builder()
             .status(StatusCode::OK)
-            .header(CONTENT_TYPE, "application/octet-stream")
             .body(())
             .map_err(|error| H2Error::Response(error.to_string()))?;
         let send = respond
@@ -419,6 +411,47 @@ mod tests {
         });
         assert!(client("/other").connect(Box::new(client_io)).await.is_err());
         task.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn accepts_post_and_ignores_content_type() {
+        use http::header::CONTENT_TYPE;
+
+        let (client_io, server_io) = duplex(64 * 1024);
+        let server_task = tokio::spawn(async move {
+            let mut stream = server("/")
+                .accept(Box::new(server_io))
+                .await
+                .expect("accept");
+            let mut buffer = [0_u8; 4];
+            stream.read_exact(&mut buffer).await.expect("read");
+            stream.write_all(&buffer).await.expect("write");
+            stream.shutdown().await.expect("shutdown");
+        });
+
+        let (mut sender, connection) = h2::client::handshake(client_io).await.expect("handshake");
+        let connection_task = tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("https://localhost/")
+            .header(CONTENT_TYPE, "text/plain")
+            .body(())
+            .expect("request");
+        let (response, mut send) = sender.send_request(request, false).expect("send");
+        let response = response.await.expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut recv = response.into_body();
+        send.send_data(Bytes::from_static(b"ping"), false)
+            .expect("data");
+        let chunk = recv.data().await.expect("chunk").expect("bytes");
+        assert_eq!(&chunk[..], b"ping");
+        recv.flow_control()
+            .release_capacity(chunk.len())
+            .expect("release");
+        connection_task.abort();
+        server_task.await.expect("server task");
     }
 
     #[tokio::test]
