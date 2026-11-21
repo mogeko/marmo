@@ -586,6 +586,12 @@ fn validate_outbound_tls(tls: &Tls, server: &Endpoint, index: usize) -> Result<(
             "required for an IP server",
         ));
     }
+    if tls.insecure && !is_loopback(server) {
+        return Err(fail(
+            format!("outbounds[{index}].tls.insecure"),
+            "only allowed for a loopback test server; use a trusted certificate",
+        ));
+    }
     if tls.handshake_timeout_s == 0 {
         return Err(fail(
             format!("outbounds[{index}].tls.handshake_timeout_s"),
@@ -892,6 +898,10 @@ fn valid_uuid(text: &str) -> bool {
     }
 }
 
+fn is_loopback(endpoint: &Endpoint) -> bool {
+    endpoint.ip().is_some_and(|ip| ip.is_loopback()) || endpoint.domain() == Some("localhost")
+}
+
 fn valid_pem(text: &str) -> bool {
     let text = text.trim_start();
     text.starts_with("-----BEGIN ") && text.contains("-----END ")
@@ -1193,6 +1203,21 @@ mod tests {
              "health_check":{"target":"example.com:443","interval_s":5,"timeout_s":10}}
         ]}"#;
         assert_path(error(bad_health), "outbounds[1].health_check");
+    }
+
+    #[test]
+    fn restricts_insecure_tls_to_loopback() {
+        let loopback = r#"{"outbounds":[{
+            "tag":"t","protocol":"trojan","server":"127.0.0.1:443",
+            "password":"secret","tls":{"insecure":true}
+        }]}"#;
+        assert!(parse(loopback).is_ok());
+
+        let public = r#"{"outbounds":[{
+            "tag":"t","protocol":"trojan","server":"example.com:443",
+            "password":"secret","tls":{"insecure":true}
+        }]}"#;
+        assert_path(error(public), "outbounds[0].tls.insecure");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Security audit
 
-- Status: Rust target, pre-implementation. No Rust code exists yet.
+- Status: Rust implementation in `crates/`; R4 hardening in progress.
 - Scope: durable threat model, findings carried over from the Zig audit, and
   the audit plan for the Rust tree.
 - Zig-era record: [`../archive/security-audit-zig.md`](../archive/security-audit-zig.md)
@@ -65,7 +65,7 @@ replacement is correct.
 | F-14 relay idle/half-close deadline | Idle adapter + half-close grace inside `select!`; paused-time tests. |
 | F-17 Trojan prefix deadline | Covered by the handshake deadline; UDP association resets idle. |
 | F-16 no external audit | Still open; R4 requires an external review before any production claim. |
-| F-21/F-22 certificate-path and truncation bugs | `rustls` with the platform verifier; TLS 1.3 only; no "insecure" switch in config; test that verification cannot be disabled. |
+| F-21/F-22 certificate-path and truncation bugs | `rustls` with the platform verifier; TLS 1.3 only; `insecure` is loopback-only and validation rejects it for a non-loopback server; regression test that a public server cannot disable verification. |
 | F-04/F-05/F-07/F-15/F-18 TLS internals | Closed by deleting `packages/tls13`; covered by `rustls` upstream. |
 | F-19/F-20/F-23/F-24 WS/H2 internals | Closed by deleting `packages/ws` and `packages/http2`; upstream crates own the parsers. |
 | F-25 adapter close race | Closed by the drop model; replaced by the cancel-safety obligation below. |
@@ -79,7 +79,7 @@ replacement is correct.
 | Unsafe code | `forbid(unsafe_code)` in `marmo-proto` and `marmo`; per-block justification in `marmo-transport` |
 | Cancel-safety | Every `select!` branch audited; drop-mid-await tests; no `MutexGuard` across `.await`; `loom` for session state |
 | Panic on untrusted input | Fuzz every decoder; no `unwrap`/`expect`/indexing on network data; `panic = "abort"` is not a substitute for validation |
-| TLS misconfiguration | TLS 1.3 only, ALPN/mTLS tested; verification always on; no config field that disables it |
+| TLS misconfiguration | TLS 1.3 only, ALPN/mTLS tested; the only verification bypass is `tls.insecure`, restricted to loopback test servers |
 | Secret leakage | `secrecy` + `zeroize`; no secrets in `Debug` or span fields; constant-time comparisons |
 | Resource bounds | Every queue/table/cache bound at init; `Semaphore` for TCP and UDP; no unbounded `spawn` |
 | Supply-chain license drift | CI copyleft check from ADR-0020; GPL/AGPL/MPL denied; dependency PRs record a license review |
@@ -93,7 +93,7 @@ replacement is correct.
 3. Run interop against self-hosted `shadowsocks-rust` and `sing-box` for SS2022,
    Trojan, and VLESS, in both directions.
 4. Review the rustls configuration: verification, TLS 1.3 floor, ALPN, mTLS,
-   platform verifier, no insecure escape hatch.
+   platform verifier, and the loopback-only `insecure` restriction.
 5. Run the copyleft check and `cargo-audit`; record the dependency tree and the
    provider version in the audit.
 6. Commission an external review before any production-readiness claim. The

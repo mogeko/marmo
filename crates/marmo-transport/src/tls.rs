@@ -38,7 +38,7 @@ pub enum ClientAuth {
 }
 
 /// Parameters for a TLS client.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Default)]
 pub struct TlsClientOptions<'a> {
     /// SNI name or IP address; must match the server certificate.
     pub server_name: &'a str,
@@ -57,7 +57,7 @@ pub struct TlsClientOptions<'a> {
 }
 
 /// Parameters for a TLS server.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct TlsServerOptions<'a> {
     /// PEM or DER certificate chain, leaf first.
     pub certificate: &'a str,
@@ -71,6 +71,39 @@ pub struct TlsServerOptions<'a> {
     pub client_auth: ClientAuth,
     /// Optional handshake deadline; `None` leaves it to the caller.
     pub handshake_timeout: Option<Duration>,
+}
+
+impl std::fmt::Debug for TlsClientOptions<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TlsClientOptions")
+            .field("server_name", &self.server_name)
+            .field("alpn", &self.alpn)
+            .field("required_alpn", &self.required_alpn)
+            .field("insecure", &self.insecure)
+            .field(
+                "client_certificate",
+                &self.client_certificate.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "client_private_key",
+                &self.client_private_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field("handshake_timeout", &self.handshake_timeout)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for TlsServerOptions<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TlsServerOptions")
+            .field("certificate", &"<redacted>")
+            .field("private_key", &"<redacted>")
+            .field("alpn", &self.alpn)
+            .field("client_ca", &self.client_ca.as_ref().map(|_| "<redacted>"))
+            .field("client_auth", &self.client_auth)
+            .field("handshake_timeout", &self.handshake_timeout)
+            .finish()
+    }
 }
 
 /// A TLS client with a fixed configuration; clone the `Arc` to share it.
@@ -552,6 +585,31 @@ mod tests {
         };
         assert_eq!(echo(address, &client).await, b"ping");
         task.await.expect("server task");
+    }
+
+    #[test]
+    fn debug_redacts_private_key_material() {
+        let client = TlsClientOptions {
+            client_private_key: Some("SECRET-KEY"),
+            client_certificate: Some("SECRET-CERT"),
+            ..TlsClientOptions::default()
+        };
+        let text = format!("{client:?}");
+        assert!(!text.contains("SECRET-KEY"));
+        assert!(!text.contains("SECRET-CERT"));
+
+        let server = TlsServerOptions {
+            certificate: "SECRET-CERT",
+            private_key: "SECRET-KEY",
+            alpn: &[],
+            client_ca: Some("SECRET-CA"),
+            client_auth: ClientAuth::None,
+            handshake_timeout: None,
+        };
+        let text = format!("{server:?}");
+        assert!(!text.contains("SECRET-KEY"));
+        assert!(!text.contains("SECRET-CERT"));
+        assert!(!text.contains("SECRET-CA"));
     }
 
     #[test]
