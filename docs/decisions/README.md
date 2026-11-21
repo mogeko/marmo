@@ -42,6 +42,7 @@ Statuses: `Proposed` → `Accepted` | `Rejected` | `Superseded by ADR-NNNN`.
 | [0019](0019-workspace-and-packaging.md) | Workspace layout and packaging | Accepted (2026-11-21) | five crates |
 | [0020](0020-license.md) | License change | Accepted (2026-11-21; amended) | MIT OR Apache-2.0; `cargo tree` license review |
 | [0021](0021-websocket-backend.md) | WebSocket backend and permessage-deflate | Accepted (2026-11-21) | `ws-net` + tokio pump; compression enabled |
+| [0022](0022-vless-http2-method.md) | VLESS HTTP/2 transport method | Proposed | `PUT` client; `POST`/`PUT` server; optional content type |
 
 ## Eras
 
