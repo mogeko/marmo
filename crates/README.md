@@ -8,7 +8,7 @@ Five crates, one dependency direction, no optional transport backends.
 | `marmo-proto` | HTTP/1, SOCKS5, SS2022, Trojan, VLESS, XUDP codecs; no I/O, no tokio | yes |
 | `marmo-net` | `Endpoint`, CIDR, `Network`; no protocols | yes |
 | `marmo-transport` | stream traits, `Layer` adapters (TLS/WS/H2), relay | yes |
-| `marmo-testkit` | fake streams, fixture loaders, loopback helpers | no |
+| `marmo-testkit` | test-only helpers (in-memory stream pairs) | no |
 
 Dependency direction: `marmo` → all; `marmo-transport` → `marmo-net`;
 `marmo-proto` → `marmo-net` (address parsing only); `marmo-net` → nothing.
