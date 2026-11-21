@@ -1,6 +1,6 @@
 name: Fuzz
 
-# PR-only smoke: the six targets share one job so the runner installs
+# PR-only smoke: the seven targets share one job so the runner installs
 # cargo-fuzz and builds the dependency graph once. Long runs stay manual
 # (`workflow_dispatch` or locally);
 on:
@@ -39,7 +39,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for target in ss2022_tcp ss2022_udp socks5 trojan vless xudp; do
+          for target in ss2022_tcp ss2022_udp socks5 trojan vless xudp http; do
             echo "::group::Fuzzing ${target}"
             cargo +nightly fuzz run "${target}" -- -runs=1000 -max_len=4096 -timeout=25
             echo "::endgroup::"

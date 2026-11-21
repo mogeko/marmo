@@ -4,6 +4,9 @@
 //! they can be fuzzed in isolation. See `docs/architecture.md` §8.8.
 #![forbid(unsafe_code)]
 
+/// HTTP/1.1 request and CONNECT response helpers.
+pub mod http;
+
 /// Shadowsocks 2022 primitives and UDP packets.
 pub mod shadowsocks;
 

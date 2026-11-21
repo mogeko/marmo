@@ -5,6 +5,7 @@ use std::pin::Pin;
 use std::task::{Context as TaskContext, Poll, ready};
 
 use marmo_net::Endpoint;
+use marmo_proto::http::{self, HEAD_MAX, find_head_end};
 use marmo_transport::BoxStream;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
@@ -56,8 +57,6 @@ impl crate::outbound::Outbound for HttpOutbound {
 }
 
 async fn read_response(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
-    const MAX_HEAD: usize = 8192;
-
     let mut buffer = Vec::with_capacity(1024);
     loop {
         let mut chunk = [0_u8; 1024];
@@ -70,31 +69,16 @@ async fn read_response(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
         }
         buffer.extend_from_slice(&chunk[..read]);
 
-        if let Some(position) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+        if let Some(position) = find_head_end(&buffer) {
             let head_len = position + 4;
-            if head_len > MAX_HEAD {
+            if head_len > HEAD_MAX {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "HTTP CONNECT response is too large",
                 ));
             }
-            let mut headers = [httparse::EMPTY_HEADER; 32];
-            let mut response = httparse::Response::new(&mut headers);
-            match response.parse(&buffer[..head_len]) {
-                Ok(httparse::Status::Complete(_)) => {}
-                _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "invalid HTTP CONNECT response",
-                    ));
-                }
-            }
-            let code = response.code.ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "HTTP CONNECT response has no status",
-                )
-            })?;
+            let (code, _) = http::parse_connect_response(&buffer[..head_len])
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             if !(200..300).contains(&code) {
                 return Err(io::Error::new(
                     io::ErrorKind::ConnectionRefused,
@@ -103,7 +87,7 @@ async fn read_response(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
             }
             return Ok(buffer[head_len..].to_vec());
         }
-        if buffer.len() >= MAX_HEAD {
+        if buffer.len() >= HEAD_MAX {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "HTTP CONNECT response is too large",
