@@ -13,6 +13,11 @@ Dependency direction: `marmo` → all; `marmo-proto` → `marmo-net` (address
 parsing only); `marmo-net` → nothing. `marmo-transport` depends only on
 upstream crates.
 
+Every crate carries its own `README.md`, declared as `readme` in its manifest,
+so the crates.io page documents that crate instead of the whole workspace. Keep
+the crate README in step with its public API; cross-crate links must be absolute
+URLs because crates.io renders only the package tarball.
+
 ## Commands
 
 ```sh
