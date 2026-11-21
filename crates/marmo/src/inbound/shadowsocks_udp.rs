@@ -46,18 +46,66 @@ pub(crate) async fn serve(
                 let Ok((length, source)) = received else {
                     continue;
                 };
-                handle_datagram(
-                    &listener,
-                    &context,
-                    &inbound,
+                let Ok(decoded) = decode_udp_packet(
                     method,
-                    &key,
-                    &mut sessions,
-                    source,
+                    key.as_bytes(),
                     &packet[..length],
+                    Direction::ClientToServer,
+                    None,
                     &mut plain,
-                )
-                .await;
+                ) else {
+                    continue;
+                };
+
+                let client_session = decoded.session_id;
+                if sessions
+                    .get(&client_session)
+                    .is_some_and(|session| session.task.is_finished())
+                {
+                    if let Some(session) = sessions.remove(&client_session) {
+                        session.task.abort();
+                    }
+                }
+                if !sessions.contains_key(&client_session) {
+                    reap_sessions(&mut sessions, context.limits.idle_timeout);
+                    if sessions.len() >= MAX_SESSIONS {
+                        continue;
+                    }
+                    let Some(session) = Session::create(&listener, method, &key, client_session, source).await
+                    else {
+                        continue;
+                    };
+                    sessions.insert(client_session, session);
+                    context
+                        .metrics
+                        .record(crate::metrics::MetricEvent::UdpSessionOpened);
+                }
+                let Some(session) = sessions.get_mut(&client_session) else {
+                    continue;
+                };
+
+                if !session.window.accept(decoded.packet_id) {
+                    continue;
+                }
+                session.touch(source);
+
+                let destination = decoded.destination.clone();
+                let domain = destination.domain().map(str::to_owned);
+                let metadata = Metadata {
+                    network: Network::Udp,
+                    source: Endpoint::from(source),
+                    destination: destination.clone(),
+                    domain: domain.as_deref(),
+                    inbound: Some(inbound.as_ref()),
+                };
+                let action = context.router.route(&metadata);
+                if !context.udp_direct(action) {
+                    continue;
+                }
+                let Some(target) = session.resolve(&destination).await else {
+                    continue;
+                };
+                let _ = session.socket.send_to(decoded.payload, target).await;
             }
         }
     }
@@ -65,73 +113,6 @@ pub(crate) async fn serve(
     for (_, session) in sessions.drain() {
         session.task.abort();
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn handle_datagram(
-    listener: &Arc<UdpSocket>, context: &Context, inbound: &str, method: Method, key: &Arc<Key>,
-    sessions: &mut HashMap<[u8; 8], Session>, source: SocketAddr, bytes: &[u8], plain: &mut [u8],
-) {
-    let Ok(decoded) = decode_udp_packet(
-        method,
-        key.as_bytes(),
-        bytes,
-        Direction::ClientToServer,
-        None,
-        plain,
-    ) else {
-        return;
-    };
-
-    let client_session = decoded.session_id;
-    if sessions
-        .get(&client_session)
-        .is_some_and(|session| session.task.is_finished())
-    {
-        if let Some(session) = sessions.remove(&client_session) {
-            session.task.abort();
-        }
-    }
-    if !sessions.contains_key(&client_session) {
-        reap_sessions(sessions, context.limits.idle_timeout);
-        if sessions.len() >= MAX_SESSIONS {
-            return;
-        }
-        let Some(session) = Session::create(listener, method, key, client_session, source).await
-        else {
-            return;
-        };
-        sessions.insert(client_session, session);
-        context
-            .metrics
-            .record(crate::metrics::MetricEvent::UdpSessionOpened);
-    }
-    let Some(session) = sessions.get_mut(&client_session) else {
-        return;
-    };
-
-    if !session.window.accept(decoded.packet_id) {
-        return;
-    }
-    session.touch(source);
-
-    let destination = decoded.destination.clone();
-    let domain = destination.domain().map(str::to_owned);
-    let metadata = Metadata {
-        network: Network::Udp,
-        source: Endpoint::from(source),
-        destination: destination.clone(),
-        domain: domain.as_deref(),
-        inbound: Some(inbound),
-    };
-    let action = context.router.route(&metadata);
-    if !context.udp_direct(action) {
-        return;
-    }
-    let Some(target) = session.resolve(&destination).await else {
-        return;
-    };
-    let _ = session.socket.send_to(decoded.payload, target).await;
 }
 
 struct ClientState {
@@ -168,15 +149,53 @@ impl Session {
             address: source,
             last_active: Instant::now(),
         }));
-        let task = tokio::spawn(reply_loop(
-            Arc::clone(listener),
-            Arc::clone(&socket),
-            method,
-            Arc::clone(key),
-            server_session_id,
-            client_session_id,
-            Arc::clone(&state),
-        ));
+        let task_listener = Arc::clone(listener);
+        let task_socket = Arc::clone(&socket);
+        let task_key = Arc::clone(key);
+        let task_state = Arc::clone(&state);
+        let task = tokio::spawn(async move {
+            let mut counter = 0_u64;
+            let mut received = vec![0_u8; MAX_PAYLOAD];
+            let mut encoded = vec![0_u8; MAX_ENCODED];
+            loop {
+                let Ok((length, source)) = task_socket.recv_from(&mut received).await else {
+                    return;
+                };
+                let address = match task_state.lock() {
+                    Ok(mut state) => {
+                        state.last_active = Instant::now();
+                        state.address
+                    }
+                    Err(_) => return,
+                };
+                let Ok(packet_id) = next_counter(&mut counter) else {
+                    return;
+                };
+                let destination = Endpoint::from(source);
+                let packet = UdpPacket {
+                    direction: Direction::ServerToClient,
+                    session_id: server_session_id,
+                    packet_id,
+                    client_session_id: Some(client_session_id),
+                    destination: &destination,
+                    payload: &received[..length],
+                    padding_len: 0,
+                    timestamp: unix_now(),
+                };
+                let Ok(size) =
+                    encode_udp_packet(method, task_key.as_bytes(), &packet, &mut encoded)
+                else {
+                    return;
+                };
+                if task_listener
+                    .send_to(&encoded[..size], address)
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
         Some(Self {
             socket,
             state,
@@ -211,48 +230,6 @@ impl Session {
             .lock()
             .map(|state| state.last_active)
             .unwrap_or_else(|_| Instant::now())
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn reply_loop(
-    listener: Arc<UdpSocket>, socket: Arc<UdpSocket>, method: Method, key: Arc<Key>,
-    server_session_id: [u8; 8], client_session_id: [u8; 8], state: Arc<Mutex<ClientState>>,
-) {
-    let mut counter = 0_u64;
-    let mut received = vec![0_u8; MAX_PAYLOAD];
-    let mut encoded = vec![0_u8; MAX_ENCODED];
-    loop {
-        let Ok((length, source)) = socket.recv_from(&mut received).await else {
-            return;
-        };
-        let address = match state.lock() {
-            Ok(mut state) => {
-                state.last_active = Instant::now();
-                state.address
-            }
-            Err(_) => return,
-        };
-        let Ok(packet_id) = next_counter(&mut counter) else {
-            return;
-        };
-        let destination = Endpoint::from(source);
-        let packet = UdpPacket {
-            direction: Direction::ServerToClient,
-            session_id: server_session_id,
-            packet_id,
-            client_session_id: Some(client_session_id),
-            destination: &destination,
-            payload: &received[..length],
-            padding_len: 0,
-            timestamp: unix_now(),
-        };
-        let Ok(size) = encode_udp_packet(method, key.as_bytes(), &packet, &mut encoded) else {
-            return;
-        };
-        if listener.send_to(&encoded[..size], address).await.is_err() {
-            return;
-        }
     }
 }
 
