@@ -30,31 +30,28 @@ pub(crate) struct SelectorOutbound {
 
 struct NodeHealth {
     ewma_ms: AtomicU32,
-    failures: AtomicU32,
 }
 
 impl NodeHealth {
     fn new() -> Self {
         Self {
             ewma_ms: AtomicU32::new(0),
-            failures: AtomicU32::new(0),
         }
     }
 
     fn record_success(&self, elapsed: Duration) {
         let sample = (elapsed.as_millis() as u32).max(1);
         let previous = self.ewma_ms.load(Ordering::Relaxed);
-        let next = if previous == 0 {
+        let next = if previous == 0 || previous == u32::MAX {
             sample
         } else {
             (previous * 4 + sample) / 5
         };
         self.ewma_ms.store(next, Ordering::Relaxed);
-        self.failures.store(0, Ordering::Relaxed);
     }
 
     fn record_failure(&self) {
-        self.failures.fetch_add(1, Ordering::Relaxed);
+        self.ewma_ms.store(u32::MAX, Ordering::Relaxed);
     }
 }
 
@@ -97,8 +94,7 @@ impl SelectorOutbound {
                 .min_by_key(|index| {
                     let health = &self.health[*index];
                     let ewma = health.ewma_ms.load(Ordering::Relaxed);
-                    let failures = health.failures.load(Ordering::Relaxed);
-                    (if ewma == 0 { u32::MAX } else { ewma }, failures, *index)
+                    (if ewma == 0 { u32::MAX } else { ewma }, *index)
                 })
                 .unwrap_or(0),
         }
@@ -169,6 +165,10 @@ impl Outbound for SelectorOutbound {
                 None => Ok(None),
             }
         })
+    }
+
+    fn udp_direct(&self) -> bool {
+        self.nodes.iter().all(|node| node.udp_direct())
     }
 
     fn start_health(&self, runtime: &Handle, token: &CancellationToken) -> Option<JoinHandle<()>> {
@@ -312,15 +312,15 @@ mod tests {
     }
 
     #[test]
-    fn health_ewma_and_failures_update() {
+    fn health_ewma_and_failure_update() {
         let health = NodeHealth::new();
         health.record_success(Duration::from_millis(10));
         assert_eq!(health.ewma_ms.load(Ordering::Relaxed), 10);
         health.record_success(Duration::from_millis(20));
         assert_eq!(health.ewma_ms.load(Ordering::Relaxed), 12);
         health.record_failure();
-        assert_eq!(health.failures.load(Ordering::Relaxed), 1);
+        assert_eq!(health.ewma_ms.load(Ordering::Relaxed), u32::MAX);
         health.record_success(Duration::from_millis(7));
-        assert_eq!(health.failures.load(Ordering::Relaxed), 0);
+        assert_eq!(health.ewma_ms.load(Ordering::Relaxed), 7);
     }
 }

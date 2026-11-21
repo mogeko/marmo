@@ -51,6 +51,11 @@ pub(crate) trait Outbound: Send + Sync {
         false
     }
 
+    /// Whether every node this outbound may choose can relay UDP directly.
+    fn udp_direct(&self) -> bool {
+        self.is_direct()
+    }
+
     /// Starts an optional health-probe task owned by the instance.
     fn start_health(
         &self,
