@@ -15,27 +15,40 @@ pub const FORWARD_HEAD_MAX: usize = HEAD_MAX + 1024;
 /// Largest header count in one request or response.
 pub const MAX_HEADERS: usize = 64;
 
-/// One parsed header.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Header {
+/// One parsed header borrowed from the request buffer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Header<'a> {
     /// Field name as sent by the peer.
-    pub name: String,
-    /// Raw field value, without surrounding whitespace.
-    pub value: Vec<u8>,
+    pub name: &'a str,
+    /// Raw field value as sent by the peer.
+    pub value: &'a [u8],
 }
 
-/// A parsed request head.
+/// A parsed request head borrowed from the input buffer.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RequestHead {
+pub struct RequestHead<'a> {
     /// Request method.
-    pub method: String,
+    pub method: &'a str,
     /// Request target, in origin or absolute form.
-    pub target: String,
+    pub target: &'a str,
     /// HTTP minor version (`0` for HTTP/1.0, `1` for HTTP/1.1).
     pub version: u8,
-    /// Parsed headers in wire order.
-    pub headers: Vec<Header>,
+    headers: [Header<'a>; MAX_HEADERS],
+    count: usize,
 }
+
+impl<'a> RequestHead<'a> {
+    /// Parsed headers in wire order.
+    #[must_use]
+    pub fn headers(&self) -> &[Header<'a>] {
+        &self.headers[..self.count]
+    }
+}
+
+const EMPTY_HEADER: Header<'static> = Header {
+    name: "",
+    value: &[],
+};
 
 /// An absolute-form forward target.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -87,7 +100,7 @@ pub fn find_head_end(buffer: &[u8]) -> Option<usize> {
 ///
 /// `input` may contain the whole head; bytes after the head are ignored. The
 /// caller should pass at most [`HEAD_MAX`] bytes.
-pub fn parse_request(input: &[u8]) -> Result<RequestHead, HttpError> {
+pub fn parse_request(input: &[u8]) -> Result<RequestHead<'_>, HttpError> {
     if input.len() > HEAD_MAX {
         return Err(HttpError::TooLarge);
     }
@@ -113,22 +126,23 @@ pub fn parse_request(input: &[u8]) -> Result<RequestHead, HttpError> {
         return Err(HttpError::BadRequest);
     }
 
-    let mut parsed = Vec::with_capacity(request.headers.len());
-    for header in request.headers {
+    let mut parsed = [EMPTY_HEADER; MAX_HEADERS];
+    for (index, header) in request.headers.iter().enumerate() {
         if !is_token(header.name) || !is_valid_header_value(header.value) {
             return Err(HttpError::BadRequest);
         }
-        parsed.push(Header {
-            name: header.name.to_owned(),
-            value: header.value.to_vec(),
-        });
+        parsed[index] = Header {
+            name: header.name,
+            value: header.value,
+        };
     }
 
     Ok(RequestHead {
-        method: method.to_owned(),
-        target: target.to_owned(),
+        method,
+        target,
         version,
         headers: parsed,
+        count: request.headers.len(),
     })
 }
 
@@ -194,7 +208,7 @@ pub fn build_forward_head(
     method: &str,
     version: u8,
     target: &AbsoluteTarget<'_>,
-    headers: &[Header],
+    headers: &[Header<'_>],
 ) -> Result<Vec<u8>, HttpError> {
     if !is_token(method) || version > 1 {
         return Err(HttpError::BadRequest);
@@ -213,10 +227,10 @@ pub fn build_forward_head(
     let mut has_content_length = false;
     let mut has_transfer_encoding = false;
     for header in headers {
-        if !is_token(&header.name) || !is_valid_header_value(&header.value) {
+        if !is_token(header.name) || !is_valid_header_value(header.value) {
             return Err(HttpError::BadRequest);
         }
-        if skip_hop_by_hop(&header.name) {
+        if skip_hop_by_hop(header.name) {
             continue;
         }
         if header.name.eq_ignore_ascii_case("content-length") {
@@ -234,7 +248,7 @@ pub fn build_forward_head(
 
         head.extend_from_slice(header.name.as_bytes());
         head.extend_from_slice(b": ");
-        head.extend_from_slice(&header.value);
+        head.extend_from_slice(header.value);
         head.extend_from_slice(b"\r\n");
         if head.len() > FORWARD_HEAD_MAX {
             return Err(HttpError::TooLarge);
@@ -357,12 +371,12 @@ mod tests {
         .expect("head");
         assert_eq!(head.method, "GET");
         assert_eq!(head.version, 1);
-        assert_eq!(head.headers.len(), 3);
+        assert_eq!(head.headers().len(), 3);
 
-        let target = parse_absolute(&head.target).expect("target");
+        let target = parse_absolute(head.target).expect("target");
         assert_eq!(target.endpoint.domain(), Some("example.com"));
         assert_eq!(target.endpoint.port(), 8080);
-        let rewritten = build_forward_head(&head.method, head.version, &target, &head.headers)
+        let rewritten = build_forward_head(head.method, head.version, &target, head.headers())
             .expect("rewrite");
         let text = String::from_utf8(rewritten).expect("utf8");
         assert!(text.starts_with("GET /a?b=1 HTTP/1.1\r\n"));
@@ -393,14 +407,14 @@ mod tests {
     #[test]
     fn rejects_ambiguous_framing() {
         let target = parse_absolute("http://example.com/").expect("target");
-        let headers = vec![
+        let headers = [
             Header {
-                name: "Content-Length".into(),
-                value: b"1".to_vec(),
+                name: "Content-Length",
+                value: b"1",
             },
             Header {
-                name: "Transfer-Encoding".into(),
-                value: b"chunked".to_vec(),
+                name: "Transfer-Encoding",
+                value: b"chunked",
             },
         ];
         assert!(matches!(

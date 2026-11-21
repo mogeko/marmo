@@ -47,6 +47,41 @@ pub struct RelayStats {
     pub remote_to_client: u64,
 }
 
+/// Shared byte counters that survive relay cancellation.
+#[derive(Debug, Default)]
+pub struct RelayCounters {
+    client_to_remote: AtomicU64,
+    remote_to_client: AtomicU64,
+}
+
+impl RelayCounters {
+    fn add(&self, direction: Direction, bytes: u64) {
+        match direction {
+            Direction::Upstream => {
+                self.client_to_remote.fetch_add(bytes, Ordering::Relaxed);
+            }
+            Direction::Downstream => {
+                self.remote_to_client.fetch_add(bytes, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Returns the bytes copied so far.
+    #[must_use]
+    pub fn snapshot(&self) -> RelayStats {
+        RelayStats {
+            client_to_remote: self.client_to_remote.load(Ordering::Relaxed),
+            remote_to_client: self.remote_to_client.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Direction {
+    Upstream,
+    Downstream,
+}
+
 /// Why a relay stopped.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -78,6 +113,21 @@ pub async fn relay(
     remote: BoxStream,
     options: RelayOptions,
 ) -> Result<RelayStats, RelayError> {
+    let counters = Arc::new(RelayCounters::default());
+    relay_with_counters(client, remote, options, Arc::clone(&counters)).await?;
+    Ok(counters.snapshot())
+}
+
+/// Like [`relay`], but updates caller-owned counters as bytes move.
+///
+/// The counters remain readable after the future is dropped, so an idle,
+/// half-close, or shutdown path still reports the bytes it copied.
+pub async fn relay_with_counters(
+    client: BoxStream,
+    remote: BoxStream,
+    options: RelayOptions,
+    counters: Arc<RelayCounters>,
+) -> Result<RelayStats, RelayError> {
     let (client_read, client_write) = split(client);
     let (remote_read, remote_write) = split(remote);
 
@@ -86,11 +136,15 @@ pub async fn relay(
         client_read,
         remote_write,
         Arc::clone(&activity),
+        Arc::clone(&counters),
+        Direction::Upstream,
     ));
     let mut downstream = Box::pin(copy_direction(
         remote_read,
         client_write,
         Arc::clone(&activity),
+        Arc::clone(&counters),
+        Direction::Downstream,
     ));
 
     let mut idle = spawn_idle(activity, options.idle_timeout);
@@ -165,6 +219,8 @@ async fn copy_direction<R, W>(
     mut reader: R,
     mut writer: W,
     activity: Arc<Activity>,
+    counters: Arc<RelayCounters>,
+    direction: Direction,
 ) -> Result<u64, RelayError>
 where
     R: AsyncRead + Unpin,
@@ -183,6 +239,7 @@ where
             .await
             .map_err(RelayError::Write)?;
         activity.touch();
+        counters.add(direction, read as u64);
         total += read as u64;
     }
     writer.shutdown().await.map_err(RelayError::Write)?;
@@ -273,6 +330,26 @@ mod tests {
         drop(client);
         drop(remote);
         let _ = task.await.expect("task");
+    }
+
+    #[tokio::test]
+    async fn counters_survive_cancellation() {
+        let (mut client, client_relay) = duplex_pair(64);
+        let (remote_relay, mut remote) = duplex_pair(64);
+        let counters = Arc::new(RelayCounters::default());
+        let task = tokio::spawn(relay_with_counters(
+            Box::new(client_relay),
+            Box::new(remote_relay),
+            RelayOptions::default(),
+            Arc::clone(&counters),
+        ));
+
+        client.write_all(b"abc").await.expect("write");
+        let mut buffer = [0_u8; 3];
+        remote.read_exact(&mut buffer).await.expect("read");
+        task.abort();
+        let _ = task.await;
+        assert_eq!(counters.snapshot().client_to_remote, 3);
     }
 
     #[tokio::test]

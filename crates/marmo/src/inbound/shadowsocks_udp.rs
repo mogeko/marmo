@@ -20,6 +20,8 @@ use crate::shadowsocks::{random_bytes, unix_now};
 
 /// Fixed session-table capacity, matching the Zig tree.
 const MAX_SESSIONS: usize = 128;
+/// Bound on cached direct-UDP resolutions per session.
+const DIRECT_CACHE: usize = 64;
 /// Largest plaintext payload carried by one packet.
 const MAX_PAYLOAD: usize = 65_535;
 /// Largest encoded packet: separate header, body header, address, payload, tag.
@@ -137,7 +139,7 @@ async fn handle_datagram(
     if !context.udp_direct(action) {
         return;
     }
-    let Ok(target) = direct::resolve_udp(&destination, session.ipv4).await else {
+    let Some(target) = session.resolve(&destination).await else {
         return;
     };
     let _ = session.socket.send_to(decoded.payload, target).await;
@@ -153,6 +155,7 @@ struct Session {
     state: Arc<Mutex<ClientState>>,
     window: Window,
     ipv4: bool,
+    resolved: HashMap<Endpoint, SocketAddr>,
     task: JoinHandle<()>,
 }
 
@@ -193,8 +196,21 @@ impl Session {
             state,
             window: Window::default(),
             ipv4,
+            resolved: HashMap::new(),
             task,
         })
+    }
+
+    async fn resolve(&mut self, destination: &Endpoint) -> Option<SocketAddr> {
+        if let Some(address) = self.resolved.get(destination) {
+            return Some(*address);
+        }
+        let address = direct::resolve_udp(destination, self.ipv4).await.ok()?;
+        if self.resolved.len() >= DIRECT_CACHE {
+            self.resolved.clear();
+        }
+        self.resolved.insert(destination.clone(), address);
+        Some(address)
     }
 
     fn touch(&self, source: SocketAddr) {

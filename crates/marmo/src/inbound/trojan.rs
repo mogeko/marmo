@@ -274,7 +274,9 @@ async fn reply_loop(
                     }
                 }
                 if let Some((_, connection)) = outbound.as_mut() {
-                    let _ = connection.send_to(&target, &payload).await;
+                    if connection.send_to(&target, &payload).await.is_err() {
+                        break;
+                    }
                 }
             }
             received = async {
@@ -284,7 +286,7 @@ async fn reply_loop(
                 }
             } => {
                 let Ok((length, source)) = received else {
-                    continue;
+                    break;
                 };
                 activity.notify_one();
                 if write_frame(&mut writer, &source, &buffer[..length]).await.is_err() {

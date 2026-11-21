@@ -1,9 +1,9 @@
 //! Semantic validation for [`Config`].
 //!
-//! Parsing (R2a) rejects unknown fields and malformed JSON. This module
-//! rejects documents that are structurally valid but inconsistent: duplicate
-//! tags, missing credentials, unsupported transport combinations, selector
-//! graphs, and route targets. Paths match the JSON field layout.
+//! Parsing rejects unknown fields and malformed JSON. This module rejects
+//! documents that are structurally valid but inconsistent: duplicate tags,
+//! missing credentials, unsupported transport combinations, selector graphs,
+//! and route targets. Paths match the JSON field layout.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;

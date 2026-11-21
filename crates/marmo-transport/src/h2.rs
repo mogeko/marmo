@@ -63,7 +63,7 @@ impl H2Client {
         Self { options }
     }
 
-    /// Performs the HTTP/2 handshake and opens the POST stream over `inner`.
+    /// Performs the HTTP/2 handshake and opens the PUT stream over `inner`.
     pub async fn connect(&self, inner: BoxStream) -> Result<BoxStream, H2Error> {
         let mut builder = h2::client::Builder::new();
         builder
@@ -118,7 +118,7 @@ impl H2Server {
         Self { options }
     }
 
-    /// Accepts the first POST stream over `inner`.
+    /// Accepts the first PUT or POST stream over `inner`.
     pub async fn accept(&self, inner: BoxStream) -> Result<BoxStream, H2Error> {
         let mut builder = h2::server::Builder::new();
         builder

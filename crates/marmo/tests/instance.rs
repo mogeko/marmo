@@ -307,6 +307,7 @@ async fn selector_falls_back_after_a_dead_node() {
     stop(handle, serve).await;
     let snapshot = metrics.metrics();
     assert!(snapshot.connections_accepted >= 1);
+    assert_eq!(snapshot.connections_active, 0);
     assert_eq!(snapshot.connections_rejected, 0);
     assert!(snapshot.bytes_client_to_remote >= 8);
     assert!(snapshot.bytes_remote_to_client >= 8);
