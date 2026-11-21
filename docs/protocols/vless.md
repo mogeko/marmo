@@ -165,6 +165,30 @@ The inbound always requires TLS; plaintext VLESS inbound is not supported.
   record layer, with disjoint read/write key state.
 - No anti-probing or replay behavior beyond what TLS provides.
 
+## XHTTP (future work)
+
+XHTTP (formerly SplitHTTP) is Xray's HTTP-carried transport and is not
+implemented. Current Xray releases removed their HTTP/2 transport in favour of
+XHTTP, so XHTTP is the transport to add when compatibility with current Xray
+peers is required. It is not in the current plan or the R5 schedule; it needs
+its own ADR and design.
+
+Planned scope when it is taken up:
+
+- `transport.network = "xhttp"` with `path` and `host`, over TLS; ALPN `h2`
+  first, `h3` later if QUIC is available.
+- Start with stream-one: one HTTP request/response whose bodies carry the
+  VLESS byte stream, matching Xray's `stream-one` mode.
+- Evaluate stream-up/stream-down and separate uplink/downlink requests only if
+  real peers require them.
+- Padding, header names, and metadata only as far as needed for interop; no
+  arbitrary header configuration.
+- Bounded request/response bodies, headers, and buffers; no h2c.
+- Tests: config validation, loopback TCP/UoT/XUDP, Xray interop in both
+  directions, and a fixture derived from the public Xray documentation.
+- Clean-room from the public Xray XHTTP description; record the sources in this
+  file before implementation.
+
 ## Tests
 
 - Unit: UUID parsing, request-header encoding for IPv4/domain/IPv6, tiny-buffer
