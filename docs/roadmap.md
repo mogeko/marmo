@@ -176,6 +176,19 @@ criteria. They are tracked here so they do not disappear from the docs.
 | P5-9 | WS early data/heartbeat; VLESS `flow`/XTLS Vision | Deferred | compatibility extensions |
 | P5-10 | Windows-specific process matching | Planned | with P2-10, best-effort |
 
+## Release packaging order
+
+The published crates use exact workspace versions, so publish in dependency
+order:
+
+1. `marmo-net`
+2. `marmo-proto` and `marmo-transport`
+3. `marmo`
+
+`marmo-testkit` is `publish = false`. `marmo-transport` must not dev-depend on
+an unpublished path crate; `cargo package -p marmo-transport` is the release
+check for that.
+
 ## Out of scope
 
 - Snell (deferred; no official specification).
