@@ -27,6 +27,7 @@ use tokio::time::{interval, timeout};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{Config, ConfigError, InboundProtocol, OutboundProtocol, StreamNetwork};
+use crate::deadline::Deadline;
 use crate::direct;
 use crate::inbound::{self, http, socks5};
 use crate::limits::Limits;
@@ -861,6 +862,7 @@ struct InboundTlsConfig {
     alpn: Vec<String>,
     client_ca: Option<String>,
     client_auth: crate::config::ClientAuth,
+    handshake_timeout: Duration,
 }
 
 impl InboundTlsConfig {
@@ -871,6 +873,7 @@ impl InboundTlsConfig {
             alpn: tls.alpn.clone().unwrap_or_default(),
             client_ca: tls.client_ca.clone(),
             client_auth: tls.client_auth,
+            handshake_timeout: Duration::from_secs(u64::from(tls.handshake_timeout_s)),
         }
     }
 }
@@ -937,6 +940,7 @@ struct OutboundTlsConfig {
     insecure: bool,
     client_certificate: Option<String>,
     client_private_key: Option<String>,
+    handshake_timeout: Duration,
 }
 
 impl OutboundSpec {
@@ -1018,6 +1022,7 @@ fn build_tls_server(tls: &InboundTlsConfig, tag: &str) -> Result<Arc<TlsServer>,
         alpn: &tls.alpn,
         client_ca: tls.client_ca.as_deref(),
         client_auth: transport_client_auth(tls.client_auth),
+        handshake_timeout: Some(tls.handshake_timeout),
     };
     let server = TlsServer::new(&options).map_err(|error| BindError::Tls {
         tag: tag.to_owned(),
@@ -1034,6 +1039,7 @@ fn build_tls_client(tls: &OutboundTlsConfig, tag: &str) -> Result<Arc<TlsClient>
         insecure: tls.insecure,
         client_certificate: tls.client_certificate.as_deref(),
         client_private_key: tls.client_private_key.as_deref(),
+        handshake_timeout: Some(tls.handshake_timeout),
     };
     let client = TlsClient::new(&options).map_err(|error| BindError::Tls {
         tag: tag.to_owned(),
@@ -1072,6 +1078,7 @@ fn outbound_tls_config(
         insecure: tls.insecure,
         client_certificate: tls.client_certificate.clone(),
         client_private_key: tls.client_private_key.clone(),
+        handshake_timeout: Duration::from_secs(u64::from(tls.handshake_timeout_s)),
     })
 }
 
@@ -1144,15 +1151,16 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                 let tag = Arc::clone(&inbound.tag);
                 let kind = inbound.kind.clone();
                 let task_context = Arc::clone(&context);
+                let deadline = Deadline::after(context.limits.handshake_timeout);
                 let runtime = context.runtime.clone();
                 let _ = connections.spawn_on(async move {
                     let _permit = permit;
                     match kind {
                         InboundKind::Socks5 => {
-                            socks5::handle(stream, task_context, tag).await;
+                            socks5::handle(stream, task_context, tag, deadline).await;
                         }
                         InboundKind::Http => {
-                            http::handle(stream, task_context, tag).await;
+                            http::handle(stream, task_context, tag, deadline).await;
                         }
                         InboundKind::Shadowsocks { method, key } => {
                             inbound::shadowsocks::handle(
@@ -1161,6 +1169,7 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                                 tag,
                                 method,
                                 key,
+                                deadline,
                             )
                             .await;
                         }
@@ -1176,6 +1185,7 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                                 tls,
                                 password,
                                 fallback,
+                                deadline,
                             )
                             .await;
                         }
@@ -1193,6 +1203,7 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                                 tls,
                                 ws,
                                 h2,
+                                deadline,
                             )
                             .await;
                         }

@@ -240,6 +240,7 @@ async fn trojan_fallback_relays_unknown_traffic() {
         insecure: true,
         client_certificate: None,
         client_private_key: None,
+        handshake_timeout: None,
     })
     .expect("tls client");
     let stream = TcpStream::connect(address).await.expect("connect");
@@ -277,6 +278,7 @@ async fn trojan_rejects_wrong_password_without_fallback() {
         insecure: true,
         client_certificate: None,
         client_private_key: None,
+        handshake_timeout: None,
     })
     .expect("tls client");
     let stream = TcpStream::connect(address).await.expect("connect");

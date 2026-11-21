@@ -15,10 +15,10 @@ use marmo_transport::ws::WsServer;
 use marmo_transport::{BoxStream, RelayOptions, relay};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
-use tokio::time::timeout;
+use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
+use crate::deadline::{Deadline, wait_for_activity};
 use crate::instance::Context;
 use crate::outbound::trojan::tls_error;
 use crate::outbound::udp::UdpOutbound;
@@ -40,15 +40,13 @@ pub(crate) async fn handle(
     tls: Arc<TlsServer>,
     ws: Option<Arc<WsServer>>,
     h2: Option<Arc<H2Server>>,
+    deadline: Deadline,
 ) {
     let token = context.supervisor.token();
     let source = client.peer_addr().ok().map(Endpoint::from);
     let prepared = tokio::select! {
         _ = token.cancelled() => return,
-        result = timeout(
-            context.limits.handshake_timeout,
-            prepare(client, &tls, ws.as_deref(), h2.as_deref(), &uuid),
-        ) => result,
+        result = deadline.run(prepare(client, &tls, ws.as_deref(), h2.as_deref(), &uuid)) => result,
     };
     let (
         Ok(Ok(Prepared::Request {
@@ -65,16 +63,22 @@ pub(crate) async fn handle(
 
     match command {
         COMMAND_TCP => {
-            connect_relay(stream, &context, &inbound, source, target, leftover, token).await;
+            connect_relay(
+                stream, &context, &inbound, source, target, leftover, token, deadline,
+            )
+            .await;
         }
         COMMAND_UDP => {
-            handle_udp(stream, context, inbound, source, target, leftover, token).await;
+            handle_udp(
+                stream, context, inbound, source, target, leftover, token, deadline,
+            )
+            .await;
         }
         COMMAND_MUX => {
             if !is_mux_target(&target) {
                 return;
             }
-            handle_xudp(stream, context, inbound, source, leftover, token).await;
+            handle_xudp(stream, context, inbound, source, leftover, token, deadline).await;
         }
         _ => {}
     }
@@ -148,13 +152,14 @@ async fn connect_relay(
     target: Endpoint,
     leftover: Vec<u8>,
     token: CancellationToken,
+    deadline: Deadline,
 ) {
     let Some(action) = route(context, inbound, source, &target, Network::Tcp) else {
         return;
     };
     let connected = tokio::select! {
         _ = token.cancelled() => return,
-        result = timeout(context.limits.handshake_timeout, context.connect(action, &target)) => result,
+        result = deadline.run(context.connect(action, &target)) => result,
     };
     let Ok(Ok((mut remote, _bound))) = connected else {
         return;
@@ -176,6 +181,7 @@ async fn handle_udp(
     target: Endpoint,
     leftover: Vec<u8>,
     token: CancellationToken,
+    deadline: Deadline,
 ) {
     let ipv4 = source.ip().is_none_or(|ip| ip.is_ipv4());
     let Some(action) = route(&context, &inbound, source, &target, Network::Udp) else {
@@ -183,10 +189,7 @@ async fn handle_udp(
     };
     let outbound = tokio::select! {
         _ = token.cancelled() => return,
-        result = timeout(
-            context.limits.handshake_timeout,
-            context.udp_outbound(action, ipv4, &target),
-        ) => result,
+        result = deadline.run(context.udp_outbound(action, ipv4, &target)) => result,
     };
     let Ok(Ok(Some(outbound))) = outbound else {
         return;
@@ -199,6 +202,7 @@ async fn handle_udp(
     let Ok(mut frames) = UotReader::new(&leftover) else {
         return;
     };
+    let activity = Arc::new(Notify::new());
     let (sender, receiver) = mpsc::channel(UDP_QUEUE);
     let reply = tokio::spawn(reply_loop(
         writer,
@@ -207,11 +211,18 @@ async fn handle_udp(
         target,
         token.clone(),
         false,
+        Arc::clone(&activity),
     ));
 
     loop {
         let next = tokio::select! {
             _ = token.cancelled() => break,
+            idle = wait_for_activity(context.limits.idle_timeout, &activity) => {
+                if idle {
+                    break;
+                }
+                continue;
+            }
             result = frames.next(&mut reader) => result,
         };
         let Ok(Some(payload)) = next else {
@@ -236,6 +247,7 @@ async fn handle_xudp(
     source: Endpoint,
     leftover: Vec<u8>,
     token: CancellationToken,
+    deadline: Deadline,
 ) {
     let ipv4 = source.ip().is_none_or(|ip| ip.is_ipv4());
     let Ok(mut frames) = XudpReader::new(&leftover) else {
@@ -259,10 +271,7 @@ async fn handle_xudp(
     };
     let outbound = tokio::select! {
         _ = token.cancelled() => return,
-        result = timeout(
-            context.limits.handshake_timeout,
-            context.udp_outbound(action, ipv4, &target),
-        ) => result,
+        result = deadline.run(context.udp_outbound(action, ipv4, &target)) => result,
     };
     let Ok(Ok(Some(mut outbound))) = outbound else {
         return;
@@ -275,6 +284,7 @@ async fn handle_xudp(
     }
 
     let (mut reader, writer) = tokio::io::split(stream);
+    let activity = Arc::new(Notify::new());
     let (sender, receiver) = mpsc::channel(UDP_QUEUE);
     let reply = tokio::spawn(reply_loop(
         writer,
@@ -283,11 +293,18 @@ async fn handle_xudp(
         target.clone(),
         token.clone(),
         true,
+        Arc::clone(&activity),
     ));
 
     loop {
         let next = tokio::select! {
             _ = token.cancelled() => break,
+            idle = wait_for_activity(context.limits.idle_timeout, &activity) => {
+                if idle {
+                    break;
+                }
+                continue;
+            }
             result = frames.next(&mut reader) => result,
         };
         let Ok(Some(frame)) = next else {
@@ -326,6 +343,7 @@ async fn reply_loop(
     target: Endpoint,
     token: CancellationToken,
     xudp: bool,
+    activity: Arc<Notify>,
 ) {
     let mut buffer = vec![0_u8; MAX_UDP_PAYLOAD];
     loop {
@@ -341,6 +359,7 @@ async fn reply_loop(
                 let Ok((length, _source)) = received else {
                     continue;
                 };
+                activity.notify_one();
                 let written = if xudp {
                     write_keep(&mut writer, &buffer[..length]).await
                 } else {

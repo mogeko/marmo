@@ -16,11 +16,12 @@ use marmo_transport::tls::TlsServer;
 use marmo_transport::{BoxStream, RelayOptions, relay};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
+use crate::deadline::{Deadline, wait_for_activity};
 use crate::instance::Context;
 use crate::outbound::trojan::tls_error;
 use crate::outbound::udp::UdpOutbound;
@@ -38,15 +39,13 @@ pub(crate) async fn handle(
     tls: Arc<TlsServer>,
     password: Arc<PasswordHash>,
     fallback: Option<Endpoint>,
+    deadline: Deadline,
 ) {
     let token = context.supervisor.token();
     let source = client.peer_addr().ok().map(Endpoint::from);
     let prepared = tokio::select! {
         _ = token.cancelled() => return,
-        result = timeout(
-            context.limits.handshake_timeout,
-            prepare(client, &tls, &password),
-        ) => result,
+        result = deadline.run(prepare(client, &tls, &password)) => result,
     };
     let (Ok(Ok(prepared)), Some(source)) = (prepared, source) else {
         return;
@@ -54,7 +53,10 @@ pub(crate) async fn handle(
 
     match prepared {
         Prepared::Fallback { stream, prefix } => {
-            fallback_relay(stream, prefix, fallback, &context, &inbound, source, token).await;
+            fallback_relay(
+                stream, prefix, fallback, &context, &inbound, source, token, deadline,
+            )
+            .await;
         }
         Prepared::Request {
             stream,
@@ -63,7 +65,10 @@ pub(crate) async fn handle(
             leftover,
         } => match command {
             COMMAND_CONNECT => {
-                connect_relay(stream, &context, &inbound, source, target, leftover, token).await;
+                connect_relay(
+                    stream, &context, &inbound, source, target, leftover, token, deadline,
+                )
+                .await;
             }
             COMMAND_UDP_ASSOCIATE => {
                 handle_udp(stream, context, inbound, source, leftover, token).await;
@@ -162,13 +167,14 @@ async fn connect_relay(
     target: Endpoint,
     leftover: Vec<u8>,
     token: CancellationToken,
+    deadline: Deadline,
 ) {
     let Some(action) = route(context, inbound, source, &target) else {
         return;
     };
     let connected = tokio::select! {
         _ = token.cancelled() => return,
-        result = timeout(context.limits.handshake_timeout, context.connect(action, &target)) => result,
+        result = deadline.run(context.connect(action, &target)) => result,
     };
     let Ok(Ok((mut remote, _bound))) = connected else {
         return;
@@ -192,6 +198,7 @@ async fn handle_udp(
     let Ok(mut frames) = FrameReader::new(&leftover) else {
         return;
     };
+    let activity = Arc::new(Notify::new());
     let (sender, receiver) = mpsc::channel(UDP_QUEUE);
     let reply = tokio::spawn(reply_loop(
         writer,
@@ -199,11 +206,18 @@ async fn handle_udp(
         Arc::clone(&context),
         ipv4,
         token.clone(),
+        Arc::clone(&activity),
     ));
 
     loop {
         let next = tokio::select! {
             _ = token.cancelled() => break,
+            idle = wait_for_activity(context.limits.idle_timeout, &activity) => {
+                if idle {
+                    break;
+                }
+                continue;
+            }
             result = frames.next(&mut reader) => result,
         };
         let Ok(Some((destination, payload))) = next else {
@@ -229,6 +243,7 @@ async fn reply_loop(
     context: Arc<Context>,
     ipv4: bool,
     token: CancellationToken,
+    activity: Arc<Notify>,
 ) {
     let mut outbound: Option<(Action, UdpOutbound)> = None;
     let mut buffer = vec![0_u8; MAX_UDP_PAYLOAD];
@@ -246,8 +261,13 @@ async fn reply_loop(
                     continue;
                 }
                 if outbound.is_none() {
-                    match context.udp_outbound(action, ipv4, &target).await {
-                        Ok(Some(connection)) => outbound = Some((action, connection)),
+                    match timeout(
+                        context.limits.handshake_timeout,
+                        context.udp_outbound(action, ipv4, &target),
+                    )
+                    .await
+                    {
+                        Ok(Ok(Some(connection))) => outbound = Some((action, connection)),
                         _ => continue,
                     }
                 }
@@ -264,6 +284,7 @@ async fn reply_loop(
                 let Ok((length, source)) = received else {
                     continue;
                 };
+                activity.notify_one();
                 if write_frame(&mut writer, &source, &buffer[..length]).await.is_err() {
                     break;
                 }
@@ -280,6 +301,7 @@ async fn fallback_relay(
     inbound: &str,
     source: Endpoint,
     token: CancellationToken,
+    deadline: Deadline,
 ) {
     let (Some(target), false) = (fallback, prefix.is_empty()) else {
         return;
@@ -289,7 +311,7 @@ async fn fallback_relay(
     };
     let connected = tokio::select! {
         _ = token.cancelled() => return,
-        result = timeout(context.limits.handshake_timeout, context.connect(action, &target)) => result,
+        result = deadline.run(context.connect(action, &target)) => result,
     };
     let Ok(Ok((mut remote, _bound))) = connected else {
         return;

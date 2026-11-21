@@ -10,29 +10,30 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 use std::sync::Arc;
 
+use crate::deadline::Deadline;
+use crate::instance::Context;
+use crate::routing::{Action, Metadata};
 use httparse::Status;
 use marmo_net::{Endpoint, Network};
 use marmo_transport::{BoxStream, RelayOptions, relay};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::time::timeout;
-
-use crate::instance::Context;
-use crate::routing::{Action, Metadata};
 
 const HEAD_MAX: usize = 8192;
 const FORWARD_HEAD_MAX: usize = HEAD_MAX + 1024;
 const MAX_HEADERS: usize = 64;
 
 /// Handles one accepted HTTP proxy connection.
-pub(crate) async fn handle(mut client: TcpStream, context: Arc<Context>, inbound: Arc<str>) {
+pub(crate) async fn handle(
+    mut client: TcpStream,
+    context: Arc<Context>,
+    inbound: Arc<str>,
+    deadline: Deadline,
+) {
     let token = context.supervisor.token();
     let handshake = tokio::select! {
         _ = token.cancelled() => return,
-        result = timeout(
-            context.limits.handshake_timeout,
-            prepare(&mut client, &context, &inbound),
-        ) => result,
+        result = deadline.run(prepare(&mut client, &context, &inbound)) => result,
     };
     let Ok(Ok(Some(remote))) = handshake else {
         return;

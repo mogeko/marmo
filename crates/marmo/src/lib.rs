@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod config;
+mod deadline;
 mod direct;
 mod inbound;
 mod instance;
