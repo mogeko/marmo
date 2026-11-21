@@ -12,3 +12,6 @@ pub mod socks5;
 
 /// Trojan codec: password hashes, request headers, and UDP frames.
 pub mod trojan;
+
+/// VLESS codec: UUIDs, request and response headers, and UoT frames.
+pub mod vless;

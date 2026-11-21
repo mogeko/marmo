@@ -8,6 +8,7 @@ use tokio::net::UdpSocket;
 
 use crate::direct;
 use crate::outbound::trojan::TrojanUdpClient;
+use crate::outbound::vless::VlessUdpClient;
 use crate::shadowsocks::SsUdpClient;
 
 /// An established datagram path to one outbound.
@@ -18,6 +19,8 @@ pub(crate) enum UdpOutbound {
     Shadowsocks(SsUdpClient),
     /// A Trojan UDP association over one TLS stream.
     Trojan(TrojanUdpClient),
+    /// A simple VLESS UDP-over-TCP association.
+    Vless(VlessUdpClient),
 }
 
 impl UdpOutbound {
@@ -44,6 +47,7 @@ impl UdpOutbound {
             }
             Self::Shadowsocks(client) => client.send_to(target, payload).await,
             Self::Trojan(client) => client.send_to(target, payload).await,
+            Self::Vless(client) => client.send_to(target, payload).await,
         }
     }
 
@@ -56,6 +60,7 @@ impl UdpOutbound {
             }
             Self::Shadowsocks(client) => client.recv_from(buffer).await,
             Self::Trojan(client) => client.recv_from(buffer).await,
+            Self::Vless(client) => client.recv_from(buffer).await,
         }
     }
 }

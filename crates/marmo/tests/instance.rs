@@ -254,27 +254,7 @@ fn build_without_a_runtime_fails() {
 }
 
 #[tokio::test]
-async fn rejects_unsupported_protocols() {
-    let config = Config::from_json(
-        r#"{
-          "inbounds": [
-            {
-              "tag": "vl",
-              "protocol": "vless",
-              "listen": "127.0.0.1:0",
-              "uuid": "00000000-0000-0000-0000-000000000001",
-              "tls": { "certificate": "cert.pem", "private_key": "key.pem" }
-            }
-          ],
-          "route": { "final": "direct" }
-        }"#,
-    )
-    .expect("config");
-    assert!(matches!(
-        Instance::builder(config).build(),
-        Err(BuildError::UnsupportedInbound { .. })
-    ));
-
+async fn rejects_unsupported_outbounds() {
     let config = Config::from_json(
         r#"{
           "outbounds": [
