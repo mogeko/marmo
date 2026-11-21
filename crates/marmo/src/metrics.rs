@@ -46,7 +46,7 @@ pub enum MetricEvent<'a> {
     ConnectionClosed,
     /// Admission control rejected a TCP stream.
     ConnectionRejected,
-    /// A relay direction bytes total.
+    /// Bytes copied in both relay directions.
     BytesRelayed {
         /// Client to outbound.
         client_to_remote: u64,

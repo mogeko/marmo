@@ -2,7 +2,7 @@
 //!
 //! The `AsyncStream` bound and the relay contract are specified in
 //! `docs/architecture.md` §8.2 and §9.1. This crate owns the relay and the
-//! adapters; it does not implement TLS, HTTP/2, or WebSocket.
+//! adapters; TLS, HTTP/2, and WebSocket come from upstream crates.
 #![deny(unsafe_code)]
 
 pub mod h2;
@@ -17,7 +17,10 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub use h2::{H2Client, H2ClientOptions, H2Error, H2Server, H2ServerOptions};
-pub use relay::{RELAY_BUFFER_SIZE, RelayError, RelayOptions, RelayStats, relay};
+pub use relay::{
+    RELAY_BUFFER_SIZE, RelayCounters, RelayError, RelayOptions, RelayStats, relay,
+    relay_with_counters,
+};
 pub use tls::{
     AcceptedTls, ClientAuth, TlsClient, TlsClientOptions, TlsError, TlsServer, TlsServerOptions,
 };

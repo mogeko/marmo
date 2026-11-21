@@ -46,7 +46,9 @@ pub struct TlsClientOptions<'a> {
     pub alpn: &'a [String],
     /// Fail the handshake unless the server selects this ALPN protocol.
     pub required_alpn: Option<&'a str>,
-    /// Skip certificate verification. Tests only; never set from config.
+    /// Skip certificate verification for a loopback test server.
+    ///
+    /// `Instance` rejects this in config for a non-loopback server.
     pub insecure: bool,
     /// PEM or DER client certificate chain.
     pub client_certificate: Option<&'a str>,
@@ -106,6 +108,9 @@ impl std::fmt::Debug for TlsServerOptions<'_> {
     }
 }
 
+/// Callback invoked when a TLS handshake exceeds its local timeout.
+pub type TimeoutObserver = Arc<dyn Fn() + Send + Sync>;
+
 /// A TLS client with a fixed configuration; clone the `Arc` to share it.
 #[derive(Clone)]
 pub struct TlsClient {
@@ -113,6 +118,7 @@ pub struct TlsClient {
     server_name: ServerName<'static>,
     required_alpn: Option<Vec<u8>>,
     handshake_timeout: Option<Duration>,
+    timeout_observer: Option<TimeoutObserver>,
 }
 
 impl std::fmt::Debug for TlsClient {
@@ -163,7 +169,15 @@ impl TlsClient {
             server_name,
             required_alpn,
             handshake_timeout: options.handshake_timeout,
+            timeout_observer: None,
         })
+    }
+
+    /// Installs a callback for local handshake timeouts.
+    #[must_use]
+    pub fn with_timeout_observer(mut self, observer: TimeoutObserver) -> Self {
+        self.timeout_observer = Some(observer);
+        self
     }
 
     /// Wraps `inner` in TLS and enforces `required_alpn` when configured.
@@ -174,7 +188,12 @@ impl TlsClient {
                 self.connector.connect(self.server_name.clone(), inner),
             )
             .await
-            .map_err(|_| TlsError::Timeout)??,
+            .map_err(|_| {
+                if let Some(observer) = self.timeout_observer.as_ref() {
+                    observer();
+                }
+                TlsError::Timeout
+            })??,
             None => {
                 self.connector
                     .connect(self.server_name.clone(), inner)
@@ -196,6 +215,7 @@ impl TlsClient {
 pub struct TlsServer {
     acceptor: TlsAcceptor,
     handshake_timeout: Option<Duration>,
+    timeout_observer: Option<TimeoutObserver>,
 }
 
 impl std::fmt::Debug for TlsServer {
@@ -219,18 +239,31 @@ impl TlsServer {
         Ok(Self {
             acceptor: TlsAcceptor::from(Arc::new(config)),
             handshake_timeout: options.handshake_timeout,
+            timeout_observer: None,
         })
+    }
+
+    /// Installs a callback for local handshake timeouts.
+    #[must_use]
+    pub fn with_timeout_observer(mut self, observer: TimeoutObserver) -> Self {
+        self.timeout_observer = Some(observer);
+        self
     }
 
     /// Completes the handshake and reports the selected ALPN protocol.
     ///
-    /// The caller owns the handshake deadline; `Instance` applies the ADR-0015
-    /// reaper instead of a timer inside the adapter.
+    /// The caller owns the outer handshake deadline; the adapter timeout is an
+    /// optional earlier cap.
     pub async fn accept(&self, inner: BoxStream) -> Result<AcceptedTls, TlsError> {
         let stream = match self.handshake_timeout {
             Some(limit) => tokio::time::timeout(limit, self.acceptor.clone().accept(inner))
                 .await
-                .map_err(|_| TlsError::Timeout)??,
+                .map_err(|_| {
+                    if let Some(observer) = self.timeout_observer.as_ref() {
+                        observer();
+                    }
+                    TlsError::Timeout
+                })??,
             None => self.acceptor.clone().accept(inner).await?,
         };
         let alpn = stream.get_ref().1.alpn_protocol().map(<[u8]>::to_vec);
@@ -582,6 +615,7 @@ mod tests {
             server_name: ServerName::try_from("localhost".to_owned()).expect("name"),
             required_alpn: None,
             handshake_timeout: None,
+            timeout_observer: None,
         };
         assert_eq!(echo(address, &client).await, b"ping");
         task.await.expect("server task");
@@ -610,6 +644,31 @@ mod tests {
         assert!(!text.contains("SECRET-KEY"));
         assert!(!text.contains("SECRET-CERT"));
         assert!(!text.contains("SECRET-CA"));
+    }
+
+    #[tokio::test]
+    async fn reports_a_local_handshake_timeout() {
+        use std::sync::atomic::AtomicU32;
+
+        let observed = Arc::new(AtomicU32::new(0));
+        let observer = Arc::clone(&observed);
+        let server = TlsServer::new(&TlsServerOptions {
+            certificate: SERVER_CERT,
+            private_key: SERVER_KEY,
+            alpn: &[],
+            client_ca: None,
+            client_auth: ClientAuth::None,
+            handshake_timeout: Some(Duration::from_millis(5)),
+        })
+        .expect("server")
+        .with_timeout_observer(Arc::new(move || {
+            observer.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }));
+        let (client, server_io) = tokio::io::duplex(64);
+        let result = server.accept(Box::new(server_io)).await;
+        assert!(matches!(result, Err(TlsError::Timeout)));
+        assert_eq!(observed.load(std::sync::atomic::Ordering::Relaxed), 1);
+        drop(client);
     }
 
     #[test]

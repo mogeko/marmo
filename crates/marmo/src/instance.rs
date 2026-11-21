@@ -18,7 +18,9 @@ use marmo_proto::vless::Uuid;
 use marmo_transport::h2::{H2Client, H2ClientOptions, H2Server, H2ServerOptions};
 use marmo_transport::tls::{TlsClient, TlsClientOptions, TlsServer, TlsServerOptions};
 use marmo_transport::ws::{WsClient, WsClientOptions, WsServer, WsServerOptions};
-use marmo_transport::{BoxStream, Layer, RelayError, RelayOptions, relay};
+use marmo_transport::{
+    BoxStream, Layer, RelayCounters, RelayError, RelayOptions, relay_with_counters,
+};
 use thiserror::Error;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::runtime::Handle;
@@ -101,7 +103,7 @@ impl Instance {
             }
             let tag = spec.tag.to_string();
             let spec = slot.take().expect("checked above");
-            let outbound = spec.build_node()?;
+            let outbound = spec.build_node(&metrics)?;
             built.insert(tag, Arc::clone(&outbound));
             kinds[index] = Some(outbound);
         }
@@ -118,7 +120,7 @@ impl Instance {
 
         let mut bound = Vec::with_capacity(inbounds.len());
         for spec in inbounds {
-            let kind = spec.config.build(&spec.tag)?;
+            let kind = spec.config.build(&spec.tag, &metrics)?;
             let listener =
                 TcpListener::bind(spec.listen)
                     .await
@@ -524,6 +526,15 @@ impl InstanceBuilder {
     }
 }
 
+/// Records a closed connection even if the handler future is aborted.
+struct ConnectionGuard(Arc<Metrics>);
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.0.record(MetricEvent::ConnectionClosed);
+    }
+}
+
 /// Aborts selector health tasks when serving ends or the future is dropped.
 #[derive(Default)]
 struct HealthTasks(Vec<tokio::task::JoinHandle<()>>);
@@ -722,11 +733,11 @@ pub(crate) struct Context {
 impl Context {
     pub(crate) fn udp_direct(&self, action: Action) -> bool {
         match action {
-            Action::Direct => self.direct.is_direct(),
+            Action::Direct => self.direct.udp_direct(),
             Action::Route(id) => self
                 .outbounds
                 .get(id.index() as usize)
-                .is_some_and(|outbound| outbound.is_direct()),
+                .is_some_and(|outbound| outbound.udp_direct()),
             Action::Reject(_) => false,
         }
     }
@@ -752,10 +763,6 @@ impl Context {
         }
     }
 
-    /// Opens a datagram path for `action`, or `None` when it has no UDP.
-    ///
-    /// `target` seeds protocols whose association header carries a
-    /// destination, such as Trojan UDP ASSOCIATE.
     /// Relays a TCP pair with the instance limits and cancellation.
     pub(crate) async fn relay_streams(
         &self,
@@ -768,22 +775,32 @@ impl Context {
             uplink_grace: self.limits.uplink_grace,
             downlink_grace: self.limits.downlink_grace,
         };
+        let counters = Arc::new(RelayCounters::default());
         let result = tokio::select! {
-            _ = token.cancelled() => return,
-            result = relay(client, remote, options) => result,
+            _ = token.cancelled() => None,
+            result = relay_with_counters(
+                client,
+                remote,
+                options,
+                Arc::clone(&counters),
+            ) => Some(result),
         };
-        match result {
-            Ok(stats) => self.metrics.record(MetricEvent::BytesRelayed {
+        let stats = counters.snapshot();
+        if stats.client_to_remote != 0 || stats.remote_to_client != 0 {
+            self.metrics.record(MetricEvent::BytesRelayed {
                 client_to_remote: stats.client_to_remote,
                 remote_to_client: stats.remote_to_client,
-            }),
-            Err(RelayError::Idle | RelayError::HalfClose) => {
-                self.metrics.record(MetricEvent::RelayTimeout);
-            }
-            Err(_) => {}
+            });
+        }
+        if let Some(Err(RelayError::Idle | RelayError::HalfClose)) = result {
+            self.metrics.record(MetricEvent::RelayTimeout);
         }
     }
 
+    /// Opens a datagram path for `action`, or `None` when it has no UDP.
+    ///
+    /// `target` seeds protocols whose association header carries a
+    /// destination, such as Trojan UDP ASSOCIATE.
     pub(crate) async fn udp_outbound(
         &self,
         action: Action,
@@ -872,7 +889,7 @@ impl InboundTlsConfig {
 }
 
 impl InboundConfig {
-    fn build(self, tag: &str) -> Result<InboundKind, BindError> {
+    fn build(self, tag: &str, metrics: &Arc<Metrics>) -> Result<InboundKind, BindError> {
         Ok(match self {
             Self::Socks5 => InboundKind::Socks5,
             Self::Http => InboundKind::Http,
@@ -883,12 +900,12 @@ impl InboundConfig {
                 fallback,
             } => InboundKind::Trojan {
                 password,
-                tls: build_tls_server(&tls, tag)?,
+                tls: build_tls_server(&tls, tag, metrics)?,
                 fallback,
             },
             Self::Vless { uuid, tls, ws, h2 } => {
                 let mut layers: Vec<Arc<dyn Layer>> = Vec::new();
-                layers.push(build_tls_server(&tls, tag)?);
+                layers.push(build_tls_server(&tls, tag, metrics)?);
                 if let Some(options) = ws {
                     layers.push(Arc::new(WsServer::new(options)));
                 }
@@ -954,7 +971,7 @@ impl OutboundSpec {
         matches!(self.config, OutboundConfig::Selector { .. })
     }
 
-    fn build_node(self) -> Result<Arc<dyn Outbound>, BindError> {
+    fn build_node(self, metrics: &Arc<Metrics>) -> Result<Arc<dyn Outbound>, BindError> {
         let Self { tag, config } = self;
         Ok(match config {
             OutboundConfig::Direct => Arc::new(crate::direct::DirectOutbound),
@@ -975,7 +992,7 @@ impl OutboundSpec {
             } => Arc::new(outbound::trojan::TrojanOutbound {
                 server,
                 password,
-                tls: build_tls_client(&tls, &tag)?,
+                tls: build_tls_client(&tls, &tag, metrics)?,
             }),
             OutboundConfig::Vless {
                 server,
@@ -987,7 +1004,7 @@ impl OutboundSpec {
             } => {
                 let mut layers: Vec<Arc<dyn Layer>> = Vec::new();
                 if let Some(tls) = tls.as_ref() {
-                    layers.push(build_tls_client(tls, &tag)?);
+                    layers.push(build_tls_client(tls, &tag, metrics)?);
                 }
                 if let Some(options) = ws {
                     layers.push(Arc::new(WsClient::new(options)));
@@ -1068,7 +1085,11 @@ fn host_from_ip(ip: std::net::IpAddr) -> String {
     }
 }
 
-fn build_tls_server(tls: &InboundTlsConfig, tag: &str) -> Result<Arc<TlsServer>, BindError> {
+fn build_tls_server(
+    tls: &InboundTlsConfig,
+    tag: &str,
+    metrics: &Arc<Metrics>,
+) -> Result<Arc<TlsServer>, BindError> {
     let options = TlsServerOptions {
         certificate: &tls.certificate,
         private_key: &tls.private_key,
@@ -1081,10 +1102,19 @@ fn build_tls_server(tls: &InboundTlsConfig, tag: &str) -> Result<Arc<TlsServer>,
         tag: tag.to_owned(),
         reason: error.to_string(),
     })?;
-    Ok(Arc::new(server))
+    let metrics = Arc::clone(metrics);
+    Ok(Arc::new(server.with_timeout_observer(Arc::new(
+        move || {
+            metrics.record(MetricEvent::HandshakeTimeout);
+        },
+    ))))
 }
 
-fn build_tls_client(tls: &OutboundTlsConfig, tag: &str) -> Result<Arc<TlsClient>, BindError> {
+fn build_tls_client(
+    tls: &OutboundTlsConfig,
+    tag: &str,
+    metrics: &Arc<Metrics>,
+) -> Result<Arc<TlsClient>, BindError> {
     let options = TlsClientOptions {
         server_name: &tls.server_name,
         alpn: &tls.alpn,
@@ -1098,7 +1128,12 @@ fn build_tls_client(tls: &OutboundTlsConfig, tag: &str) -> Result<Arc<TlsClient>
         tag: tag.to_owned(),
         reason: error.to_string(),
     })?;
-    Ok(Arc::new(client))
+    let metrics = Arc::clone(metrics);
+    Ok(Arc::new(client.with_timeout_observer(Arc::new(
+        move || {
+            metrics.record(MetricEvent::HandshakeTimeout);
+        },
+    ))))
 }
 
 fn outbound_tls_config(
@@ -1210,10 +1245,11 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                     context.limits.handshake_timeout,
                     Arc::clone(&context.metrics),
                 );
-                let metrics = Arc::clone(&context.metrics);
+                let guard = ConnectionGuard(Arc::clone(&context.metrics));
                 let runtime = context.runtime.clone();
                 let _ = connections.spawn_on(async move {
                     let _permit = permit;
+                    let _guard = guard;
                     match kind {
                         InboundKind::Socks5 => {
                             socks5::handle(stream, task_context, tag, deadline).await;
@@ -1260,7 +1296,6 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                             .await;
                         }
                     }
-                    metrics.record(MetricEvent::ConnectionClosed);
                 }, &runtime);
             }
         }
