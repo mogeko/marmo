@@ -40,6 +40,17 @@ pub const ATYP_IPV6: u8 = 3;
 /// Maximum domain name length.
 pub const MAX_DOMAIN_LEN: usize = 255;
 
+/// Synthetic target carried by a Mux/XUDP request.
+pub const MUX_DOMAIN: &str = "v1.mux.cool";
+/// Synthetic Mux/XUDP port.
+pub const MUX_PORT: u16 = 666;
+
+/// Returns true for the synthetic Mux/XUDP target.
+#[must_use]
+pub fn is_mux_target(endpoint: &Endpoint) -> bool {
+    endpoint.port() == MUX_PORT && endpoint.domain() == Some(MUX_DOMAIN)
+}
+
 /// A parsed VLESS UUID, compared in constant time.
 #[derive(Clone)]
 pub struct Uuid([u8; UUID_LEN]);
@@ -170,6 +181,17 @@ pub fn request_progress(bytes: &[u8]) -> RequestProgress {
         return RequestProgress::NeedMore;
     }
     let command = bytes[command_index];
+    if command == COMMAND_MUX {
+        let mut uuid = [0_u8; UUID_LEN];
+        uuid.copy_from_slice(&bytes[1..1 + UUID_LEN]);
+        return RequestProgress::Complete(Request {
+            uuid: Uuid(uuid),
+            command,
+            target: Endpoint::from_domain(MUX_DOMAIN, MUX_PORT)
+                .expect("static mux target is valid"),
+            consumed: command_index + 1,
+        });
+    }
     if command != COMMAND_TCP && command != COMMAND_UDP {
         return RequestProgress::Invalid;
     }
@@ -218,6 +240,19 @@ pub fn encode_request(
     out[1 + UUID_LEN + 2..fixed].copy_from_slice(&target.port().to_be_bytes());
     let address = encode_address(target, &mut out[fixed..])?;
     Ok(fixed + address)
+}
+
+/// Encodes a Mux/XUDP request header; the target is carried by the first frame.
+pub fn encode_mux_request(uuid: &Uuid, out: &mut [u8]) -> Result<usize, VlessError> {
+    let length = 1 + UUID_LEN + 1 + 1;
+    if out.len() < length {
+        return Err(VlessError::NoSpace);
+    }
+    out[0] = VERSION;
+    out[1..1 + UUID_LEN].copy_from_slice(&uuid.0);
+    out[1 + UUID_LEN] = 0;
+    out[1 + UUID_LEN + 1] = COMMAND_MUX;
+    Ok(length)
 }
 
 /// Encodes the empty response header.
@@ -306,7 +341,7 @@ pub fn encode_address(endpoint: &Endpoint, out: &mut [u8]) -> Result<usize, Vles
 }
 
 /// Decodes an address starting at `start`; `Ok(None)` means more bytes.
-fn decode_address(
+pub fn decode_address(
     bytes: &[u8],
     start: usize,
     port: u16,
@@ -470,11 +505,19 @@ mod tests {
         );
 
         let mut bad_command = buffer;
-        bad_command[1 + UUID_LEN + 1] = COMMAND_MUX;
+        bad_command[1 + UUID_LEN + 1] = COMMAND_RVS;
         assert_eq!(
             request_progress(&bad_command[..length]),
             RequestProgress::Invalid
         );
+
+        let mut mux = [0_u8; REQUEST_HEADER_MAX];
+        let mux_len = encode_mux_request(&uuid(), &mut mux).expect("mux");
+        let RequestProgress::Complete(request) = request_progress(&mux[..mux_len]) else {
+            panic!("expected a mux request");
+        };
+        assert_eq!(request.command, COMMAND_MUX);
+        assert!(is_mux_target(&request.target));
 
         let mut bad_address = buffer;
         bad_address[1 + UUID_LEN + 4] = 9;

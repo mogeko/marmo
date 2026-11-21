@@ -347,12 +347,6 @@ impl InstanceBuilder {
                     }
                 }
                 OutboundProtocol::Vless => {
-                    if outbound.xudp {
-                        return Err(BuildError::OutboundOption {
-                            tag: outbound.tag.clone(),
-                            reason: "xudp is not implemented yet".into(),
-                        });
-                    }
                     if outbound
                         .transport
                         .as_ref()
@@ -393,6 +387,7 @@ impl InstanceBuilder {
                         server,
                         uuid: Arc::new(uuid),
                         tls,
+                        xudp: outbound.xudp,
                     }
                 }
                 OutboundProtocol::Selector => {
@@ -604,7 +599,9 @@ impl Context {
                         outbound::trojan::connect(server, tls, password, target).await?;
                     Ok((stream, bound))
                 }
-                Some(OutboundKind::Vless { server, uuid, tls }) => {
+                Some(OutboundKind::Vless {
+                    server, uuid, tls, ..
+                }) => {
                     let (stream, bound) =
                         outbound::vless::connect(server, tls.as_deref(), uuid, target).await?;
                     Ok((stream, bound))
@@ -659,9 +656,24 @@ impl Context {
                 }) => Ok(Some(UdpOutbound::Trojan(
                     outbound::trojan::connect_udp(server, tls, password, target).await?,
                 ))),
-                Some(OutboundKind::Vless { server, uuid, tls }) => Ok(Some(UdpOutbound::Vless(
-                    outbound::vless::connect_udp(server, tls.as_deref(), uuid, target).await?,
-                ))),
+                Some(OutboundKind::Vless {
+                    server,
+                    uuid,
+                    tls,
+                    xudp,
+                }) => {
+                    if *xudp {
+                        Ok(Some(UdpOutbound::VlessXudp(
+                            outbound::vless::connect_xudp(server, tls.as_deref(), uuid, target)
+                                .await?,
+                        )))
+                    } else {
+                        Ok(Some(UdpOutbound::Vless(
+                            outbound::vless::connect_udp(server, tls.as_deref(), uuid, target)
+                                .await?,
+                        )))
+                    }
+                }
                 Some(OutboundKind::Http { .. }) => Ok(None),
                 None => Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -698,6 +710,7 @@ pub(crate) enum OutboundKind {
         server: Endpoint,
         uuid: Arc<Uuid>,
         tls: Option<Arc<TlsClient>>,
+        xudp: bool,
     },
 }
 
@@ -811,6 +824,7 @@ enum OutboundConfig {
         server: Endpoint,
         uuid: Arc<Uuid>,
         tls: Option<OutboundTlsConfig>,
+        xudp: bool,
     },
 }
 
@@ -847,13 +861,19 @@ impl OutboundSpec {
                 password,
                 tls: build_tls_client(&tls, &tag)?,
             },
-            OutboundConfig::Vless { server, uuid, tls } => OutboundKind::Vless {
+            OutboundConfig::Vless {
+                server,
+                uuid,
+                tls,
+                xudp,
+            } => OutboundKind::Vless {
                 server,
                 uuid,
                 tls: tls
                     .as_ref()
                     .map(|tls| build_tls_client(tls, &tag))
                     .transpose()?,
+                xudp,
             },
         })
     }
