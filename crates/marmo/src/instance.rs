@@ -15,10 +15,10 @@ use marmo_net::{Endpoint, Network};
 use marmo_proto::shadowsocks::{Key, Method};
 use marmo_proto::trojan::PasswordHash;
 use marmo_proto::vless::Uuid;
-use marmo_transport::Layer;
 use marmo_transport::h2::{H2Client, H2ClientOptions, H2Server, H2ServerOptions};
 use marmo_transport::tls::{TlsClient, TlsClientOptions, TlsServer, TlsServerOptions};
 use marmo_transport::ws::{WsClient, WsClientOptions, WsServer, WsServerOptions};
+use marmo_transport::{BoxStream, Layer, RelayOptions, relay};
 use thiserror::Error;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::runtime::Handle;
@@ -669,6 +669,24 @@ impl Context {
     ///
     /// `target` seeds protocols whose association header carries a
     /// destination, such as Trojan UDP ASSOCIATE.
+    /// Relays a TCP pair with the instance limits and cancellation.
+    pub(crate) async fn relay_streams(
+        &self,
+        client: BoxStream,
+        remote: BoxStream,
+        token: &CancellationToken,
+    ) {
+        let options = RelayOptions {
+            idle_timeout: self.limits.idle_timeout,
+            uplink_grace: self.limits.uplink_grace,
+            downlink_grace: self.limits.downlink_grace,
+        };
+        tokio::select! {
+            _ = token.cancelled() => {}
+            _ = relay(client, remote, options) => {}
+        }
+    }
+
     pub(crate) async fn udp_outbound(
         &self,
         action: Action,

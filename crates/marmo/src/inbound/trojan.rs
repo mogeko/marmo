@@ -12,8 +12,8 @@ use marmo_proto::trojan::{
     AUTH_PREFIX_LEN, AuthState, COMMAND_CONNECT, COMMAND_UDP_ASSOCIATE, MAX_UDP_PAYLOAD,
     PasswordHash, REQUEST_HEADER_MAX, RequestProgress, auth_state, request_progress,
 };
+use marmo_transport::BoxStream;
 use marmo_transport::tls::TlsServer;
-use marmo_transport::{BoxStream, RelayOptions, relay};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::{Notify, mpsc};
@@ -347,13 +347,5 @@ async fn relay_streams(
     context: &Context,
     token: CancellationToken,
 ) {
-    let options = RelayOptions {
-        idle_timeout: context.limits.idle_timeout,
-        uplink_grace: context.limits.uplink_grace,
-        downlink_grace: context.limits.downlink_grace,
-    };
-    tokio::select! {
-        _ = token.cancelled() => {}
-        _ = relay(client, remote, options) => {}
-    }
+    context.relay_streams(client, remote, &token).await;
 }

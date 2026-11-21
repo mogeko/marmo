@@ -15,7 +15,7 @@ use crate::instance::Context;
 use crate::routing::{Action, Metadata};
 use httparse::Status;
 use marmo_net::{Endpoint, Network};
-use marmo_transport::{BoxStream, RelayOptions, relay};
+use marmo_transport::BoxStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -39,19 +39,13 @@ pub(crate) async fn handle(
         return;
     };
 
-    let options = RelayOptions {
-        idle_timeout: context.limits.idle_timeout,
-        uplink_grace: context.limits.uplink_grace,
-        downlink_grace: context.limits.downlink_grace,
-    };
-    tokio::select! {
-        _ = token.cancelled() => {}
-        _ = relay(
+    context
+        .relay_streams(
             Box::new(client) as BoxStream,
             Box::new(remote) as BoxStream,
-            options,
-        ) => {}
-    }
+            &token,
+        )
+        .await;
 }
 
 async fn prepare(

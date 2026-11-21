@@ -9,7 +9,7 @@ use marmo_proto::socks5::{
     Command, Greeting, METHOD_NO_ACCEPTABLE, METHOD_NO_AUTH, ReplyStatus, Request, VERSION,
     encode_method_selection, encode_reply, encode_udp, parse_udp,
 };
-use marmo_transport::{BoxStream, RelayOptions, relay};
+use marmo_transport::BoxStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::time::timeout;
@@ -53,19 +53,13 @@ pub(crate) async fn handle(
             let Ok(Ok(Some(remote))) = connect else {
                 return;
             };
-            let options = RelayOptions {
-                idle_timeout: context.limits.idle_timeout,
-                uplink_grace: context.limits.uplink_grace,
-                downlink_grace: context.limits.downlink_grace,
-            };
-            tokio::select! {
-                _ = token.cancelled() => {}
-                _ = relay(
+            context
+                .relay_streams(
                     Box::new(client) as BoxStream,
                     Box::new(remote) as BoxStream,
-                    options,
-                ) => {}
-            }
+                    &token,
+                )
+                .await;
         }
         Command::UdpAssociate => {
             udp_associate(client, context, inbound, token).await;

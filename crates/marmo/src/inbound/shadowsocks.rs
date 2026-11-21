@@ -8,7 +8,7 @@ use crate::routing::Metadata;
 use crate::shadowsocks::SsStream;
 use marmo_net::{Endpoint, Network};
 use marmo_proto::shadowsocks::{Key, Method};
-use marmo_transport::{BoxStream, RelayOptions, relay};
+use marmo_transport::BoxStream;
 use tokio::net::TcpStream;
 
 /// Handles one accepted Shadowsocks 2022 connection.
@@ -50,17 +50,7 @@ pub(crate) async fn handle(
         return;
     };
 
-    let options = RelayOptions {
-        idle_timeout: context.limits.idle_timeout,
-        uplink_grace: context.limits.uplink_grace,
-        downlink_grace: context.limits.downlink_grace,
-    };
-    tokio::select! {
-        _ = token.cancelled() => {}
-        _ = relay(
-            Box::new(stream) as BoxStream,
-            connected.stream,
-            options,
-        ) => {}
-    }
+    context
+        .relay_streams(Box::new(stream) as BoxStream, connected.stream, &token)
+        .await;
 }

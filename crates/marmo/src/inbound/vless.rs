@@ -9,7 +9,7 @@ use marmo_proto::vless::{
     Uuid, is_mux_target, request_progress,
 };
 use marmo_proto::xudp::{STATUS_END, STATUS_KEEP, STATUS_KEEPALIVE, STATUS_NEW};
-use marmo_transport::{BoxStream, Layer, RelayOptions, relay};
+use marmo_transport::{BoxStream, Layer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::{Notify, mpsc};
@@ -387,15 +387,7 @@ async fn relay_streams(
     context: &Context,
     token: CancellationToken,
 ) {
-    let options = RelayOptions {
-        idle_timeout: context.limits.idle_timeout,
-        uplink_grace: context.limits.uplink_grace,
-        downlink_grace: context.limits.downlink_grace,
-    };
-    tokio::select! {
-        _ = token.cancelled() => {}
-        _ = relay(client, remote, options) => {}
-    }
+    context.relay_streams(client, remote, &token).await;
 }
 
 fn invalid(message: &str) -> io::Error {
