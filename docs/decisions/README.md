@@ -41,6 +41,7 @@ Statuses: `Proposed` → `Accepted` | `Rejected` | `Superseded by ADR-NNNN`.
 | [0018](0018-dependencies-and-crypto.md) | Dependencies and crypto backend | Accepted (2026-11-21; amended) | in-tree transports deleted; `rustls` + `aws-lc-rs`; `cargo tree` copyleft check |
 | [0019](0019-workspace-and-packaging.md) | Workspace layout and packaging | Accepted (2026-11-21) | five crates |
 | [0020](0020-license.md) | License change | Accepted (2026-11-21; amended) | MIT OR Apache-2.0; `cargo tree` license review |
+| [0021](0021-websocket-backend.md) | WebSocket backend and permessage-deflate | Proposed | `ws-net` + tokio pump; compression enabled |
 
 ## Eras
 
