@@ -13,6 +13,11 @@ Dependency direction: `marmo` → all; `marmo-proto` → `marmo-net` (address
 parsing only); `marmo-net` → nothing. `marmo-transport` depends only on
 upstream crates.
 
+Every crate carries its own `README.md`, declared as `readme` in its manifest,
+so the crates.io page documents that crate instead of the whole workspace. Keep
+the crate README in step with its public API; cross-crate links must be absolute
+URLs because crates.io renders only the package tarball.
+
 ## Commands
 
 ```sh
@@ -26,7 +31,11 @@ cargo tree --workspace --format '{l}'   # license review
 CI runs the first three on Linux, macOS, and Windows. The copyleft check and
 `cargo audit` run in a separate `Dependencies` workflow, only when a manifest or
 `Cargo.lock` changes; Dependabot alerts cover advisories for unchanged
-dependencies. `cargo-fuzz` runs on nightly only.
+dependencies. `cargo-fuzz` runs on nightly only. Pushing a `vX.Y.Z` tag runs the
+`Release` workflow, which publishes the four published crates through
+`crates-io-auth-action`; configure crates.io trusted publishing for
+`.github/workflows/release.yml`, the `publish` job, and the `release`
+environment first.
 
 ## Rules
 

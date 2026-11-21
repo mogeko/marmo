@@ -178,15 +178,31 @@ criteria. They are tracked here so they do not disappear from the docs.
 
 ## Release packaging order
 
-The published crates use exact workspace versions, so publish in dependency
-order:
+All four crates take their version from `[workspace.package]`, and path
+dependencies pin that version exactly (`=0.0.3`). Bump the workspace version
+once, then publish in dependency order, because a crate must be visible in the
+crates.io index before anything that depends on it.
 
-1. `marmo-net`
-2. `marmo-proto` and `marmo-transport`
-3. `marmo`
+| Step | Crate | Depends on |
+| --- | --- | --- |
+| 1 | `marmo-net` | nothing |
+| 2 | `marmo-proto` | `marmo-net` |
+| 3 | `marmo-transport` | upstream crates only |
+| 4 | `marmo` | the three crates above |
 
-`marmo-transport` must not dev-depend on an unpublished path crate;
-`cargo package -p marmo-transport` is the release check for that.
+`marmo-transport` must not dev-depend on an unpublished path crate, so
+`cargo package -p marmo-transport` is the release check that the crate stands
+alone.
+
+Pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`:
+
+1. It skips tags that are not `vX.Y.Z`, rejects a mismatch with the workspace
+   version, and runs `cargo test --workspace --locked`.
+2. It obtains a short-lived crates.io token through `crates-io-auth-action`.
+3. It publishes the crates in the order above, skipping versions already on
+   crates.io and waiting for each crate to appear in the index before the next.
+4. It runs in the `release` environment, which must match the crates.io
+   trusted-publishing configuration and should only allow `v*` tags.
 
 ## Out of scope
 
