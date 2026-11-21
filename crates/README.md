@@ -29,7 +29,8 @@ CI runs the first three on Linux, macOS, and Windows. The copyleft check and
 dependencies. `cargo-fuzz` runs on nightly only. Pushing a `vX.Y.Z` tag runs the
 `Release` workflow, which publishes the four published crates through
 `crates-io-auth-action`; configure crates.io trusted publishing for
-`.github/workflows/release.yml` and the `publish` job first.
+`.github/workflows/release.yml`, the `publish` job, and the `release`
+environment first.
 
 ## Rules
 

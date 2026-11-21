@@ -2,7 +2,8 @@ name: Release
 
 # Publish every published crate from a version tag. crates.io trusted
 # publishing must be configured for this repository, workflow file
-# (`.github/workflows/release.yml`), and job name (`publish`).
+# (`.github/workflows/release.yml`), job name (`publish`), and environment
+# (`release`).
 on:
   push:
     tags:
@@ -40,6 +41,7 @@ jobs:
   publish:
     needs: check
     if: needs.check.outputs.publish == 'true'
+    environment: release
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

@@ -191,7 +191,9 @@ order:
 Pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`. The workflow
 checks that the tag matches the workspace version, runs the workspace tests,
 obtains a short-lived token through `crates-io-auth-action`, publishes the four
-crates in the order above, and skips versions that are already published.
+crates in the order above, and skips versions that are already published. The
+publish job uses the `release` environment; configure crates.io trusted
+publishing with that environment and restrict the environment to `v*` tags.
 
 ## Out of scope
 
