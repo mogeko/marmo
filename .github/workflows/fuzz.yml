@@ -5,7 +5,7 @@ name: Fuzz
 # (`workflow_dispatch` or locally);
 on:
   pull_request:
-    branches: [rusty]
+    branches: [master]
     paths:
       - "crates/marmo-proto/src/**"
       - "crates/marmo-net/src/**"

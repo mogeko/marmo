@@ -2,7 +2,7 @@ name: Rust
 
 on:
   push:
-    branches: [rusty]
+    branches: [master]
   pull_request:
 
 permissions:

@@ -8,7 +8,7 @@ on:
       - "crates/*/Cargo.toml"
       - .github/workflows/audit.yml
   push:
-    branches: [rusty]
+    branches: [master]
     paths:
       - Cargo.lock
       - Cargo.toml

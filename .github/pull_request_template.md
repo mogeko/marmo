@@ -1,16 +1,11 @@
-## Slice
+## Change
 
-<!-- One behavioral boundary. Name the phase prefix in the title, e.g. "r2c: SOCKS5 inbound". -->
-
-## Parity rows closed
-
-<!-- Link the rows in docs/rust-migration.md Appendix A. A row is not closed
-     without its test, fixture, interop, or fuzz evidence. -->
+<!-- One logical boundary. What changes and why? -->
 
 ## Evidence
 
 <!-- Commands and results: cargo test, fuzz target/duration, interop peers,
-     criterion delta. Paste the relevant lines, not "passes". -->
+     benchmark delta. Paste the relevant lines, not "passes". -->
 
 ## Review guide
 
@@ -30,8 +25,8 @@
 ## Checklist
 
 - [ ] `cargo fmt --all --check`
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
+- [ ] `cargo clippy --workspace --all-targets --locked -- -D warnings`
 - [ ] `cargo test --workspace --locked`
 - [ ] `cargo audit` and a `cargo tree --format '{l}'` license review (dependency changes)
 - [ ] No `todo!()` or `unimplemented!()` on a reachable path
-- [ ] Public items documented; docs/architecture.md updated if a boundary moved
+- [ ] Public items documented; `docs/architecture.md` updated if a boundary moved

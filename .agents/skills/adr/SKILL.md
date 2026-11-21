@@ -62,5 +62,5 @@ Do not use an ADR for ordinary refactors, bug fixes, or formatting.
 - Consequences include negative ones and how the decision will be tested.
 - No vague words ("fast", "robust", "modern") without a measurement or a
   concrete behavior.
-- If a claim depends on `std` behavior, verify it against the pinned Zig version
+- If a claim depends on `std` behavior, verify it against the pinned Rust MSRV
   first.
