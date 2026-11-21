@@ -29,6 +29,7 @@ Rules:
 | [shadowsocks.md](shadowsocks.md) | Live: SS2022 spec, key schedule, limits, interop |
 | [trojan.md](trojan.md) | Live: TLS framing, UDP, fallback, interop |
 | [vless.md](vless.md) | Live: TCP/UoT/XUDP framing, transport object, limits |
+| [vmess.md](vmess.md) | Live: AEAD schedule, chunks, UDP, Mux.Cool, interop |
 
 TLS, HTTP/2, and WebSocket are provided by `rustls`, `h2`, and `ws-net`; their
 own documentation is the source for parser behavior. See

@@ -8,12 +8,14 @@ proxy protocols, rule-based routing, and latency-aware outbound selection.
 ## Features
 
 - Inbounds: SOCKS5 (CONNECT and UDP ASSOCIATE), HTTP CONNECT and forward
-  proxying, Shadowsocks 2022, Trojan, and VLESS.
-- Outbounds: direct, HTTP CONNECT, Shadowsocks 2022, Trojan, VLESS, and
-  selectors with manual, round-robin, random, fallback, and least-latency
+  proxying, Shadowsocks 2022, Trojan, VLESS, and VMess (AEAD, TCP/UDP,
+  Mux.Cool termination).
+- Outbounds: direct, HTTP CONNECT, Shadowsocks 2022, Trojan, VLESS, VMess,
+  and selectors with manual, round-robin, random, fallback, and least-latency
   strategies.
 - Transports: TCP, TLS 1.3 (`rustls`), WebSocket (`ws-net`), and HTTP/2 (`h2`).
-  VLESS supports TCP, simple UoT, and XUDP over TLS, WebSocket, and HTTP/2.
+  VLESS supports TCP, simple UoT, and XUDP; VMess supports TCP, direct UDP,
+  and Mux.Cool termination, both over TCP, TLS, WebSocket, and HTTP/2.
 - Routing: exact and suffix domains, IP CIDR, destination port, and network.
 - Limits: global connection cap plus handshake, idle, and half-close timeouts.
 - Metrics: connection, byte, timeout, UDP-session, and health-probe counters
@@ -25,7 +27,7 @@ proxy protocols, rule-based routing, and latency-aware outbound selection.
 | Crate             | Purpose                                                                  |
 | ----------------- | ------------------------------------------------------------------------ |
 | `marmo`           | Public facade: `Instance`, config, routing, inbounds, outbounds, metrics |
-| `marmo-proto`     | HTTP/1, SOCKS5, SS2022, Trojan, VLESS, and XUDP codecs; no I/O           |
+| `marmo-proto`     | HTTP/1, SOCKS5, SS2022, Trojan, VLESS, VMess, Mux, XUDP; no I/O          |
 | `marmo-net`       | `Endpoint`, CIDR, and `Network`                                          |
 | `marmo-transport` | Stream traits, TLS/WS/H2 layers, and the relay                           |
 

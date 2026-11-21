@@ -102,6 +102,7 @@ fn validate_inbounds(inbounds: &[Inbound]) -> Result<(), ConfigError> {
             InboundProtocol::Shadowsocks => validate_shadowsocks_inbound(inbound, index)?,
             InboundProtocol::Trojan => validate_trojan_inbound(inbound, index)?,
             InboundProtocol::Vless => validate_vless_inbound(inbound, index)?,
+            InboundProtocol::Vmess => validate_vmess_inbound(inbound, index)?,
         }
     }
     Ok(())
@@ -213,7 +214,29 @@ fn validate_vless_inbound(inbound: &Inbound, index: usize) -> Result<(), ConfigE
     validate_inbound_tls(tls, index)?;
     validate_inbound_tls_auth(tls, index)?;
     validate_alpn(tls.alpn.as_deref(), None, &format!("inbounds[{index}].tls"))?;
-    validate_inbound_transport(inbound, index)
+    validate_inbound_transport(inbound, index, true)
+}
+
+fn validate_vmess_inbound(inbound: &Inbound, index: usize) -> Result<(), ConfigError> {
+    if inbound.method.is_some() || inbound.password.is_some() || inbound.fallback.is_some() {
+        return Err(fail(
+            format!("inbounds[{index}]"),
+            "vmess does not take method, password, or fallback",
+        ));
+    }
+    let uuid = inbound
+        .uuid
+        .as_deref()
+        .ok_or_else(|| fail(format!("inbounds[{index}].uuid"), "required for vmess"))?;
+    if !valid_uuid(uuid) {
+        return Err(fail(format!("inbounds[{index}].uuid"), "invalid UUID"));
+    }
+    if let Some(tls) = inbound.tls.as_ref() {
+        validate_inbound_tls(tls, index)?;
+        validate_inbound_tls_auth(tls, index)?;
+        validate_alpn(tls.alpn.as_deref(), None, &format!("inbounds[{index}].tls"))?;
+    }
+    validate_inbound_transport(inbound, index, false)
 }
 
 fn validate_inbound_tls(tls: &crate::config::InboundTls, index: usize) -> Result<(), ConfigError> {
@@ -263,17 +286,24 @@ fn validate_inbound_tls_auth(
     }
 }
 
-fn validate_inbound_transport(inbound: &Inbound, index: usize) -> Result<(), ConfigError> {
+fn validate_inbound_transport(
+    inbound: &Inbound, index: usize, tls_required: bool,
+) -> Result<(), ConfigError> {
     let Some(transport) = inbound.transport.as_ref() else {
         return Ok(());
     };
     let base = format!("inbounds[{index}].transport");
     validate_transport_shape(transport, &base)?;
+    if !tls_required && transport.network == StreamNetwork::Tcp {
+        return Ok(());
+    }
 
-    let tls = inbound
-        .tls
-        .as_ref()
-        .ok_or_else(|| fail(format!("inbounds[{index}].tls"), "required for vless ws/h2"))?;
+    let tls = inbound.tls.as_ref().ok_or_else(|| {
+        fail(
+            format!("inbounds[{index}].tls"),
+            "required for the ws/h2 transport",
+        )
+    })?;
     match transport.network {
         StreamNetwork::H2 => {
             if let Some(alpn) = tls.alpn.as_deref() {
@@ -337,6 +367,7 @@ fn validate_outbounds(outbounds: &[Outbound]) -> Result<(), ConfigError> {
             }
             OutboundProtocol::Trojan => validate_trojan(outbound, index)?,
             OutboundProtocol::Vless => validate_vless(outbound, index)?,
+            OutboundProtocol::Vmess => validate_vmess(outbound, index)?,
         }
     }
     Ok(())
@@ -496,16 +527,20 @@ fn validate_selector(
 
 fn validate_trojan(outbound: &Outbound, index: usize) -> Result<(), ConfigError> {
     reject_selector_fields(outbound, index)?;
-    if outbound.method.is_some() || outbound.uuid.is_some() || outbound.xudp {
+    if outbound.method.is_some()
+        || outbound.uuid.is_some()
+        || outbound.xudp
+        || outbound.security.is_some()
+    {
         return Err(fail(
             format!("outbounds[{index}]"),
-            "trojan does not take method, uuid, or xudp",
+            "trojan does not take method, uuid, xudp, or security",
         ));
     }
     if outbound.transport.is_some() {
         return Err(fail(
             format!("outbounds[{index}].transport"),
-            "only applies to vless",
+            "only applies to vless or vmess",
         ));
     }
     let server_text = outbound
@@ -545,6 +580,12 @@ fn validate_vless(outbound: &Outbound, index: usize) -> Result<(), ConfigError> 
             "vless does not take method or password",
         ));
     }
+    if outbound.security.is_some() {
+        return Err(fail(
+            format!("outbounds[{index}].security"),
+            "only applies to vmess",
+        ));
+    }
     let server_text = outbound
         .server
         .as_deref()
@@ -559,6 +600,37 @@ fn validate_vless(outbound: &Outbound, index: usize) -> Result<(), ConfigError> 
         .uuid
         .as_deref()
         .ok_or_else(|| fail(format!("outbounds[{index}].uuid"), "required for vless"))?;
+    if !valid_uuid(uuid) {
+        return Err(fail(format!("outbounds[{index}].uuid"), "invalid UUID"));
+    }
+    if let Some(tls) = outbound.tls.as_ref() {
+        validate_outbound_tls(tls, &server, index)?;
+    }
+    validate_outbound_transport(outbound, index)
+}
+
+fn validate_vmess(outbound: &Outbound, index: usize) -> Result<(), ConfigError> {
+    reject_selector_fields(outbound, index)?;
+    if outbound.method.is_some() || outbound.password.is_some() || outbound.xudp {
+        return Err(fail(
+            format!("outbounds[{index}]"),
+            "vmess does not take method, password, or xudp",
+        ));
+    }
+    let server_text = outbound
+        .server
+        .as_deref()
+        .ok_or_else(|| fail(format!("outbounds[{index}].server"), "required for vmess"))?;
+    let server = Endpoint::parse(server_text).map_err(|_| {
+        fail(
+            format!("outbounds[{index}].server"),
+            format!("invalid endpoint '{server_text}'"),
+        )
+    })?;
+    let uuid = outbound
+        .uuid
+        .as_deref()
+        .ok_or_else(|| fail(format!("outbounds[{index}].uuid"), "required for vmess"))?;
     if !valid_uuid(uuid) {
         return Err(fail(format!("outbounds[{index}].uuid"), "invalid UUID"));
     }
@@ -841,16 +913,20 @@ fn reject_selector_fields(outbound: &Outbound, index: usize) -> Result<(), Confi
 }
 
 fn reject_vless_fields(outbound: &Outbound, index: usize) -> Result<(), ConfigError> {
-    if outbound.uuid.is_some() || outbound.tls.is_some() || outbound.xudp {
+    if outbound.uuid.is_some()
+        || outbound.tls.is_some()
+        || outbound.xudp
+        || outbound.security.is_some()
+    {
         return Err(fail(
             format!("outbounds[{index}]"),
-            "uuid/xudp only apply to vless; tls applies to vless/trojan",
+            "uuid/xudp/security only apply to vless or vmess; tls applies to vless/trojan/vmess",
         ));
     }
     if outbound.transport.is_some() {
         return Err(fail(
             format!("outbounds[{index}].transport"),
-            "only applies to vless",
+            "only applies to vless or vmess",
         ));
     }
     Ok(())
@@ -962,6 +1038,13 @@ mod tests {
     fn assert_path(error: ConfigError, expected: &str) {
         match error {
             ConfigError::Validate { path, .. } => assert_eq!(path, expected),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    fn assert_json_path(error: ConfigError, expected: &str) {
+        match error {
+            ConfigError::Json { path, .. } => assert_eq!(path, expected),
             other => panic!("unexpected error: {other:?}"),
         }
     }
@@ -1104,6 +1187,59 @@ mod tests {
             "tls":{"certificate":"-----BEGIN CERTIFICATE----- x -----END CERTIFICATE-----","private_key":"-----BEGIN PRIVATE KEY----- x -----END PRIVATE KEY-----","client_auth":"required"}
         }]}"#;
         assert_path(error(missing_ca), "inbounds[0].tls.client_ca");
+    }
+
+    #[test]
+    fn validates_vmess() {
+        let good = r#"{"inbounds":[{
+            "tag":"vm","protocol":"vmess","listen":"127.0.0.1:1080",
+            "uuid":"00000000-0000-0000-0000-000000000001"
+        }],"outbounds":[{
+            "tag":"vm","protocol":"vmess","server":"example.com:443",
+            "uuid":"00000000-0000-0000-0000-000000000001",
+            "security":"chacha20-poly1305"
+        }]}"#;
+        assert!(parse(good).is_ok());
+
+        let ws_without_tls = r#"{"inbounds":[{
+            "tag":"vm","protocol":"vmess","listen":"127.0.0.1:1080",
+            "uuid":"00000000-0000-0000-0000-000000000001",
+            "transport":{"network":"ws","path":"/ws"}
+        }]}"#;
+        assert_path(error(ws_without_tls), "inbounds[0].tls");
+
+        let missing_uuid = r#"{"inbounds":[{
+            "tag":"vm","protocol":"vmess","listen":"127.0.0.1:1080"
+        }]}"#;
+        assert_path(error(missing_uuid), "inbounds[0].uuid");
+
+        let bad_security = r#"{"outbounds":[{
+            "tag":"vm","protocol":"vmess","server":"example.com:443",
+            "uuid":"00000000-0000-0000-0000-000000000001",
+            "security":"none"
+        }]}"#;
+        assert_json_path(error(bad_security), "outbounds[0].security");
+
+        let vless_security = r#"{"outbounds":[{
+            "tag":"vl","protocol":"vless","server":"example.com:443",
+            "uuid":"00000000-0000-0000-0000-000000000001",
+            "security":"aes-128-gcm"
+        }]}"#;
+        assert_path(error(vless_security), "outbounds[0].security");
+
+        let vmess_xudp = r#"{"outbounds":[{
+            "tag":"vm","protocol":"vmess","server":"example.com:443",
+            "uuid":"00000000-0000-0000-0000-000000000001",
+            "xudp":true
+        }]}"#;
+        assert_path(error(vmess_xudp), "outbounds[0]");
+
+        let h2_without_tls = r#"{"outbounds":[{
+            "tag":"vm","protocol":"vmess","server":"example.com:443",
+            "uuid":"00000000-0000-0000-0000-000000000001",
+            "transport":{"network":"h2"}
+        }]}"#;
+        assert_path(error(h2_without_tls), "outbounds[0].tls");
     }
 
     #[test]

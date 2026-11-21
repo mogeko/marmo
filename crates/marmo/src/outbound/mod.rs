@@ -17,6 +17,7 @@ pub(crate) mod shadowsocks;
 pub(crate) mod trojan;
 pub(crate) mod udp;
 pub(crate) mod vless;
+pub(crate) mod vmess;
 
 /// A TCP connection plus the local address chosen for it, when known.
 pub(crate) struct Connected {

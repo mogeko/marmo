@@ -16,10 +16,13 @@ panicking. That is what makes each codec fuzzable in isolation.
 | `shadowsocks` | Shadowsocks 2022 AEAD seal/open, key derivation, address codec, UDP packets, replay window |
 | `trojan` | Password hash, request header, and UDP frames |
 | `vless` | UUID, request and response headers, UoT frames, and address codec |
+| `vmess` | AEAD request/response headers, chunk framing, and key schedule |
+| `mux` | Mux.Cool metadata and frame headers for VMess and VLESS |
 | `xudp` | XUDP metadata and frame headers under the VLESS Mux command |
 
-Crypto is delegated to `aes-gcm`, `blake3`, `sha2`, and `subtle` for
-constant-time comparisons; secrets are zeroized on drop.
+Crypto is delegated to `aes-gcm`, `chacha20poly1305`, `blake3`, `sha2`,
+`sha3` (SHAKE128), `hmac`, and `md-5`; `subtle` handles constant-time
+comparisons and secrets are zeroized on drop.
 
 ## Example
 

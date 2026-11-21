@@ -224,3 +224,15 @@ the copyleft/license check run on the dependency-changing PR.
 - [x] Accept the recommendation (AEAD, TCP, direct UDP, server-side Mux.Cool,
       AES-128-GCM and ChaCha20-Poly1305, bounded replay filter).
 - [ ] Accept with client-side Mux.Cool pooling as well: ...
+
+## Amendment (2026-11-22)
+
+Reference interop against Xray 26.11.9 corrected two wire details:
+
+- The VMess Mux instruction omits the port and address after the command byte;
+  the synthetic `v1.mux.cool` target is implied.
+- Xray uses Mux.Cool session id `0` for its XUDP UDP sessions, so `0` is
+  accepted for New, Keep, and End frames. It remains the keep-alive session id.
+
+The implementation and `docs/protocols/vmess.md` record the observed layout.
+Direct UDP (`0x02`) remains supported and is what the outbound sends.

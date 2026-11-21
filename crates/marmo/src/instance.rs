@@ -8,13 +8,14 @@
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use marmo_net::{Endpoint, Network};
 use marmo_proto::shadowsocks::{Key, Method};
 use marmo_proto::trojan::PasswordHash;
 use marmo_proto::vless::Uuid;
+use marmo_proto::vmess::{CmdKey, Security as VmessCipher};
 use marmo_transport::h2::{H2Client, H2ClientOptions, H2Server, H2ServerOptions};
 use marmo_transport::tls::{TlsClient, TlsClientOptions, TlsServer, TlsServerOptions};
 use marmo_transport::ws::{WsClient, WsClientOptions, WsServer, WsServerOptions};
@@ -30,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::{
     Config, ConfigError, HealthCheck, InboundProtocol, OutboundProtocol, Strategy, StreamNetwork,
+    VmessSecurity,
 };
 use crate::deadline::Deadline;
 use crate::inbound::{self, http, socks5};
@@ -39,6 +41,7 @@ use crate::outbound::{self, Outbound, http_connect, udp::UdpOutbound};
 use crate::routing::{Action, Router, RoutingError};
 use crate::shadowsocks::credentials;
 use crate::supervisor::Supervisor;
+use crate::vmess::ReplayFilter;
 
 /// A built instance; no sockets are open yet.
 pub struct Instance {
@@ -321,6 +324,60 @@ impl InstanceBuilder {
                         h2,
                     }
                 }
+                InboundProtocol::Vmess => {
+                    let mut ws = None;
+                    let mut h2 = None;
+                    match inbound.transport.as_ref() {
+                        None => {}
+                        Some(transport) => match transport.network {
+                            StreamNetwork::Tcp => {}
+                            StreamNetwork::Ws => {
+                                ws = Some(WsServerOptions {
+                                    path: transport.path.clone(),
+                                    subprotocols: transport
+                                        .subprotocols
+                                        .clone()
+                                        .unwrap_or_default(),
+                                    compression: transport.compression,
+                                });
+                            }
+                            StreamNetwork::H2 => {
+                                h2 = Some(H2ServerOptions {
+                                    path: transport.path.clone(),
+                                });
+                            }
+                        },
+                    }
+                    let Some(uuid) = inbound.uuid.as_deref() else {
+                        return Err(BuildError::InboundOption {
+                            tag: inbound.tag.clone(),
+                            reason: "uuid is required for vmess".into(),
+                        });
+                    };
+                    let uuid = Uuid::parse(uuid).map_err(|_| BuildError::InboundOption {
+                        tag: inbound.tag.clone(),
+                        reason: "invalid vmess uuid".into(),
+                    })?;
+                    let tls = inbound.tls.as_ref().map(|tls| {
+                        let mut tls = InboundTlsConfig::new(tls);
+                        if h2.is_some() && tls.alpn.is_empty() {
+                            tls.alpn.push("h2".into());
+                        }
+                        tls
+                    });
+                    if (ws.is_some() || h2.is_some()) && tls.is_none() {
+                        return Err(BuildError::InboundOption {
+                            tag: inbound.tag.clone(),
+                            reason: "tls is required for vmess ws/h2".into(),
+                        });
+                    }
+                    InboundConfig::Vmess {
+                        cmd_key: Arc::new(CmdKey::derive(&uuid)),
+                        tls,
+                        ws,
+                        h2,
+                    }
+                }
             };
             let endpoint =
                 Endpoint::parse(&inbound.listen).map_err(|_| BuildError::InboundListen {
@@ -496,6 +553,97 @@ impl InstanceBuilder {
                         uuid: Arc::new(uuid),
                         tls,
                         xudp: outbound.xudp,
+                        ws,
+                        h2,
+                    }
+                }
+                OutboundProtocol::Vmess => {
+                    let Some(server) = outbound.server.as_deref() else {
+                        return Err(BuildError::OutboundEndpoint {
+                            tag: outbound.tag.clone(),
+                            value: String::new(),
+                        });
+                    };
+                    let server =
+                        Endpoint::parse(server).map_err(|_| BuildError::OutboundEndpoint {
+                            tag: outbound.tag.clone(),
+                            value: server.to_string(),
+                        })?;
+                    let Some(uuid) = outbound.uuid.as_deref() else {
+                        return Err(BuildError::OutboundOption {
+                            tag: outbound.tag.clone(),
+                            reason: "uuid is required for vmess".into(),
+                        });
+                    };
+                    let uuid = Uuid::parse(uuid).map_err(|_| BuildError::OutboundOption {
+                        tag: outbound.tag.clone(),
+                        reason: "invalid vmess uuid".into(),
+                    })?;
+                    let mut ws = None;
+                    let mut h2 = None;
+                    match outbound.transport.as_ref() {
+                        None => {}
+                        Some(transport) => match transport.network {
+                            StreamNetwork::Tcp => {}
+                            StreamNetwork::Ws => {
+                                ws = Some(WsClientOptions {
+                                    host: transport_host(
+                                        transport,
+                                        outbound.tls.as_ref(),
+                                        &server,
+                                        &outbound.tag,
+                                        "ws",
+                                    )?,
+                                    path: transport.path.clone(),
+                                    subprotocols: transport
+                                        .subprotocols
+                                        .clone()
+                                        .unwrap_or_default(),
+                                    compression: transport.compression,
+                                });
+                            }
+                            StreamNetwork::H2 => {
+                                h2 = Some(H2ClientOptions {
+                                    host: transport_host(
+                                        transport,
+                                        outbound.tls.as_ref(),
+                                        &server,
+                                        &outbound.tag,
+                                        "h2",
+                                    )?,
+                                    path: transport.path.clone(),
+                                });
+                            }
+                        },
+                    }
+                    let default_alpn = match (ws.as_ref(), h2.as_ref()) {
+                        (_, Some(_)) => Some("h2"),
+                        (Some(_), None) => Some("http/1.1"),
+                        (None, None) => None,
+                    };
+                    let required_alpn = h2.as_ref().map(|_| "h2");
+                    let tls = outbound
+                        .tls
+                        .as_ref()
+                        .map(|tls| {
+                            outbound_tls_config(
+                                tls,
+                                &server,
+                                &outbound.tag,
+                                default_alpn,
+                                required_alpn,
+                            )
+                        })
+                        .transpose()?;
+                    let security = match outbound.security.unwrap_or_default() {
+                        VmessSecurity::Aes128Gcm => VmessCipher::Aes128Gcm,
+                        VmessSecurity::ChaCha20Poly1305 => VmessCipher::ChaCha20Poly1305,
+                    };
+                    OutboundConfig::Vmess {
+                        server,
+                        cmd_key: Arc::new(CmdKey::derive(&uuid)),
+                        security,
+                        tls,
                         ws,
                         h2,
                     }
@@ -830,6 +978,11 @@ enum InboundKind {
         uuid: Arc<Uuid>,
         layers: Arc<[Arc<dyn Layer>]>,
     },
+    Vmess {
+        cmd_key: Arc<CmdKey>,
+        replay: Arc<Mutex<ReplayFilter>>,
+        layers: Arc<[Arc<dyn Layer>]>,
+    },
 }
 
 struct InboundSpec {
@@ -853,6 +1006,12 @@ enum InboundConfig {
     Vless {
         uuid: Arc<Uuid>,
         tls: InboundTlsConfig,
+        ws: Option<WsServerOptions>,
+        h2: Option<H2ServerOptions>,
+    },
+    Vmess {
+        cmd_key: Arc<CmdKey>,
+        tls: Option<InboundTlsConfig>,
         ws: Option<WsServerOptions>,
         h2: Option<H2ServerOptions>,
     },
@@ -909,6 +1068,28 @@ impl InboundConfig {
                     layers: Arc::from(layers),
                 }
             }
+            Self::Vmess {
+                cmd_key,
+                tls,
+                ws,
+                h2,
+            } => {
+                let mut layers: Vec<Arc<dyn Layer>> = Vec::new();
+                if let Some(tls) = tls.as_ref() {
+                    layers.push(build_tls_server(tls, tag, metrics)?);
+                }
+                if let Some(options) = ws {
+                    layers.push(Arc::new(WsServer::new(options)));
+                }
+                if let Some(options) = h2 {
+                    layers.push(Arc::new(H2Server::new(options)));
+                }
+                InboundKind::Vmess {
+                    cmd_key,
+                    replay: Arc::new(Mutex::new(ReplayFilter::new())),
+                    layers: Arc::from(layers),
+                }
+            }
         })
     }
 }
@@ -938,6 +1119,14 @@ enum OutboundConfig {
         uuid: Arc<Uuid>,
         tls: Option<OutboundTlsConfig>,
         xudp: bool,
+        ws: Option<WsClientOptions>,
+        h2: Option<H2ClientOptions>,
+    },
+    Vmess {
+        server: Endpoint,
+        cmd_key: Arc<CmdKey>,
+        security: VmessCipher,
+        tls: Option<OutboundTlsConfig>,
         ws: Option<WsClientOptions>,
         h2: Option<H2ClientOptions>,
     },
@@ -1008,6 +1197,31 @@ impl OutboundSpec {
                     server,
                     uuid,
                     xudp,
+                    layers,
+                })
+            }
+            OutboundConfig::Vmess {
+                server,
+                cmd_key,
+                security,
+                tls,
+                ws,
+                h2,
+            } => {
+                let mut layers: Vec<Arc<dyn Layer>> = Vec::new();
+                if let Some(tls) = tls.as_ref() {
+                    layers.push(build_tls_client(tls, &tag, metrics)?);
+                }
+                if let Some(options) = ws {
+                    layers.push(Arc::new(WsClient::new(options)));
+                }
+                if let Some(options) = h2 {
+                    layers.push(Arc::new(H2Client::new(options)));
+                }
+                Arc::new(outbound::vmess::VmessOutbound {
+                    server,
+                    cmd_key,
+                    security,
                     layers,
                 })
             }
@@ -1270,6 +1484,22 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                                 task_context,
                                 tag,
                                 uuid,
+                                layers,
+                                deadline,
+                            )
+                            .await;
+                        }
+                        InboundKind::Vmess {
+                            cmd_key,
+                            replay,
+                            layers,
+                        } => {
+                            inbound::vmess::handle(
+                                stream,
+                                task_context,
+                                tag,
+                                cmd_key,
+                                replay,
                                 layers,
                                 deadline,
                             )

@@ -13,6 +13,7 @@ mod inbound;
 mod instance;
 mod limits;
 mod metrics;
+mod mux;
 mod outbound;
 mod routing;
 mod shadowsocks;
@@ -20,6 +21,7 @@ mod supervisor;
 mod trojan;
 mod validate;
 mod vless;
+mod vmess;
 mod xudp;
 
 pub use config::{Config, ConfigError};

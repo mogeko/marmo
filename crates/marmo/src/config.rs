@@ -169,6 +169,8 @@ pub enum InboundProtocol {
     Trojan,
     /// VLESS.
     Vless,
+    /// VMess AEAD.
+    Vmess,
 }
 
 /// L7 stream transport carried between the protocol and TLS/TCP.
@@ -285,6 +287,9 @@ pub struct Outbound {
     /// VLESS XUDP framing.
     #[serde(default)]
     pub xudp: bool,
+    /// VMess body cipher.
+    #[serde(default)]
+    pub security: Option<VmessSecurity>,
     /// Selector nodes.
     #[serde(default)]
     pub nodes: Option<Vec<String>>,
@@ -323,6 +328,20 @@ pub enum OutboundProtocol {
     Trojan,
     /// VLESS.
     Vless,
+    /// VMess AEAD.
+    Vmess,
+}
+
+/// VMess body cipher.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+pub enum VmessSecurity {
+    /// AES-128-GCM.
+    #[default]
+    #[serde(rename = "aes-128-gcm")]
+    Aes128Gcm,
+    /// ChaCha20-Poly1305.
+    #[serde(rename = "chacha20-poly1305")]
+    ChaCha20Poly1305,
 }
 
 /// Outbound TLS settings.

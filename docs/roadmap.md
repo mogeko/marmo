@@ -62,12 +62,12 @@ any order after their dependencies.
 | P2-4 | WebSocket and HTTP/2 transports | Done | P1 | WS/H2 loopback, interop, VLESS over both |
 | P2-5 | Selectors and health probes | Done | P1-6 | Five strategies, EWMA, TCP probes, unit tests |
 | P2-6 | Connection limits and deadlines | Done | P1-2 | Absolute handshake, shared idle, half-close tests |
+| P2-7 | VMess AEAD inbound/outbound: TCP, direct UDP, Mux.Cool | Done | P2-3, P2-4 | Vectors, loopback, Xray interop, fuzz |
 
 ### Remaining
 
 | ID | Item | Status | Depends on | Exit criteria | Estimate |
 | --- | --- | --- | --- | --- | --- |
-| P2-7 | VMess codec and inbound/outbound | Deferred | P2-3, P2-4 | Vectors, loopback, reference interop, fuzz | TBD; not scheduled |
 | P2-8 | Sniffing: TLS SNI, HTTP Host, HTTP/2 `:authority` | Planned | P1-4, P2-1, P2-3 | Buffered replay, routing on sniffed domain, tests | 2–3 d |
 | P2-9 | Compiled rule sets: GEOIP/GEOSITE, keyword, port ranges, inbound | Planned | P1-6, P2-8 | Versioned compiled format, bounded load, routing tests | 3–5 d |
 | P2-10 | Process rules (`sysinfo`, opt-in) | Planned | P1-6 | Fail-open "unknown", per-platform tests | included in P2-9 |
@@ -76,8 +76,8 @@ any order after their dependencies.
 | P2-13 | Fixture parity for all codecs | Planned | P1-5, P2-1..P2-4 | Corpus/unit vectors, differential interop records | 1 d |
 
 **Phase 2 gate:** every remaining item either complete or explicitly moved out
-of Phase 2 by an ADR. VMess is currently deferred by the architecture; if it
-stays deferred, record that decision rather than leaving Phase 2 ambiguous.
+of Phase 2 by an ADR. VMess landed under ADR-0025; the remaining items are
+scheduled above.
 
 ## Phase 3 — QUIC, TUIC, Hysteria2, gRPC, XHTTP
 
@@ -130,6 +130,7 @@ P1 core (net, config, relay, limits)
   |
   +--> P2-1 VLESS --+
   +--> P2-2 Trojan --+
+  +--> P2-7 VMess --+
   +--> P2-3 TLS -----+--> P2-4 WS/H2 --+--> P2-12 H2 pooling
   |                                    +--> P3-5 gRPC
   |                                    +--> P3-6 XHTTP (h3 after P3-2)
@@ -150,7 +151,7 @@ P1 core (net, config, relay, limits)
 ## Critical path
 
 1. Close Phase 2: P2-8 sniffing, P2-9/P2-10 rule sets and process rules,
-   P2-11 DNS, P2-12 H2 pooling; record VMess as deferred or schedule it.
+   P2-11 DNS, P2-12 H2 pooling.
 2. Settle P3-1 datagram/endpoint boundary.
 3. Build P3-2 QUIC, then P3-3 TUIC and P3-4 Hysteria2.
 4. P3-5 gRPC and P3-6 XHTTP can run in parallel once H2 is stable; XHTTP `h3`
@@ -175,6 +176,8 @@ criteria. They are tracked here so they do not disappear from the docs.
 | P5-8 | Trojan-Go WebSocket/Mux/XTLS | Deferred | not part of standard Trojan |
 | P5-9 | WS early data/heartbeat; VLESS `flow`/XTLS Vision | Deferred | compatibility extensions |
 | P5-10 | Windows-specific process matching | Planned | with P2-10, best-effort |
+| P5-11 | VMess client-side Mux.Cool pooling | Deferred | inbound mux works; outbound uses direct UDP |
+| P5-12 | VMess authenticated-length option | Deferred | only if a reference client enables Opt A |
 
 ## Release packaging order
 

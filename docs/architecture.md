@@ -75,12 +75,13 @@ Everything else is post-1.0 work (§19):
 
 | Current | Future |
 | --- | --- |
-| SOCKS5 CONNECT + UDP ASSOCIATE inbound | VMess |
+| SOCKS5 CONNECT + UDP ASSOCIATE inbound | — |
 | HTTP CONNECT + forward inbound | QUIC, TUIC, Hysteria2 |
 | HTTP CONNECT outbound | gRPC and XHTTP transports |
 | Shadowsocks 2022 TCP/UDP | DNS cache, DoH/DoT |
 | Trojan inbound/outbound (TLS, TCP/UDP, fallback) | GEOIP/GEOSITE rule sets |
 | VLESS inbound/outbound (TCP/TLS/WS/H2, TCP/UoT/XUDP) | sniffer, process rules |
+| VMess inbound/outbound (AEAD, TCP/UDP, Mux.Cool, TLS/WS/H2) | — |
 | TLS 1.3 client/server, ALPN, mTLS | `http_head` probes, jitter, backoff |
 | manual/RR/random/fallback/least-latency, TCP probes | root-level H2 pooling |
 | domain/suffix/CIDR/port/network rules | TUN, transparent proxying |
@@ -185,7 +186,7 @@ depends only on upstream crates and the erased stream boundary.
 | Crate | Published | Contents |
 | --- | --- | --- |
 | `marmo` | yes | public facade, `Instance`, config, routing, inbounds, outbounds, metrics |
-| `marmo-proto` | yes | HTTP/1, SOCKS5, SS2022, Trojan, VLESS, XUDP codecs; no I/O, no tokio |
+| `marmo-proto` | yes | HTTP/1, SOCKS5, SS2022, Trojan, VLESS, VMess, Mux.Cool, XUDP codecs; no I/O, no tokio |
 | `marmo-net` | yes | `Endpoint`, CIDR, `Network` |
 | `marmo-transport` | yes | stream traits, TLS/WS/H2 layers, relay |
 
@@ -464,7 +465,7 @@ and interop suite. `Future` means it is not part of the current release.
 | Shadowsocks 2022 | TCP/UDP | yes | yes | yes | yes | supported |
 | Trojan | TLS | yes | yes | yes | yes | supported |
 | VLESS | TCP/TLS/WS/H2 | yes | yes | yes | yes | supported |
-| VMess | TCP/TLS/WS/H2/gRPC | — | — | — | — | future |
+| VMess | TCP/TLS/WS/H2 | yes | yes | yes | yes | supported |
 | TUIC | QUIC | — | — | — | — | future |
 | Hysteria2 | QUIC + TLS | — | — | — | — | future |
 
@@ -473,7 +474,9 @@ with the strict `transport` object of ADR-0016. `Instance` serves one VLESS
 stream per HTTP/2 connection; root-level multiplexing/pooling is future work.
 gRPC is future work built on `h2`/`tonic`. XHTTP is future work for current
 Xray compatibility (roadmap P3-6); it needs an ADR and `h3` depends on the QUIC
-adapter. VMess is deferred: legacy CFB is not planned.
+adapter. VMess implements the AEAD header only; legacy CFB is not planned. Its
+inbound terminates Mux.Cool for TCP and UDP sessions, while the outbound uses
+direct UDP; client-side Mux.Cool pooling is future work (roadmap P5-11).
 
 ## 13. Dependencies and transports
 
@@ -485,6 +488,7 @@ adapter. VMess is deferred: legacy CFB is not planned.
 | HTTP/2 | `h2` | framing, HPACK, flow control, 1xx, trailers |
 | WebSocket | `ws-net` | RFC 6455, permessage-deflate, subprotocols |
 | HTTP/1.1 | `httparse` (+ `hyper` only if needed) | the inbound is minimal; no general server |
+| VMess crypto | `md-5`, `sha3`, `hmac`, `chacha20poly1305` | CmdKey, SHAKE128 masks, HMAC KDF, ChaCha body |
 | QUIC (post-1.0) | `quinn` | streams, datagrams, custom congestion control |
 | DNS (post-1.0) | `hickory-resolver` | system, DoH, DoT, cache |
 | Config | `serde`, `serde_json`, `serde_path_to_error` | strict parsing, path-aware errors |
@@ -505,8 +509,9 @@ Rules:
   requires a C toolchain and assembly. `ring` is not a second supported
   backend. ADR-0018 records the accepted build prerequisite.
 - **Crypto primitives** come from the TLS provider or RustCrypto crates
-  (`aes-gcm`, `chacha20poly1305`, `blake3`); never implement AES, ChaCha20,
-  Poly1305, BLAKE, SHA, HKDF, or X25519 by hand.
+  (`aes-gcm`, `chacha20poly1305`, `blake3`, `sha2`, `sha3`, `hmac`, `md-5`);
+  never implement AES, ChaCha20, Poly1305, BLAKE, SHA, HKDF, or X25519 by
+  hand.
 - **License gate.** CI rejects GPL/AGPL/MPL with a `cargo tree --format '{l}'`
   check; dependency-changing PRs record the same output as a license review.
   `cargo-audit` covers advisories; `Cargo.lock` is committed and CI uses
@@ -798,7 +803,7 @@ Open questions:
 
 ## 21. Decision index
 
-Current decisions are ADR-0017 through ADR-0023. Historical decisions from the
+Current decisions are ADR-0017 through ADR-0025. Historical decisions from the
 initial implementation are ADR-0001 through ADR-0016 and remain in
 [`docs/decisions/`](decisions/README.md); their bodies are unchanged.
 
@@ -811,3 +816,5 @@ initial implementation are ADR-0001 through ADR-0016 and remain in
 | [0021](decisions/0021-websocket-backend.md) | WebSocket backend and permessage-deflate | Accepted |
 | [0022](decisions/0022-vless-http2-method.md) | VLESS HTTP/2 transport method | Accepted |
 | [0023](decisions/0023-tls-credentials-inline.md) | TLS credentials as inline configuration | Accepted |
+| [0024](decisions/0024-drop-testkit.md) | Drop the unused testkit crate | Accepted |
+| [0025](decisions/0025-vmess-aead.md) | VMess AEAD, UDP, and Mux.Cool | Accepted |

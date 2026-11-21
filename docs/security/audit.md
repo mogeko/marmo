@@ -25,7 +25,7 @@ Adversaries:
 
 Out of scope: a compromised embedder process, OS/kernel bugs, physical access,
 side-channel and micro-architectural attacks, traffic analysis, and protocols
-not implemented in this revision (VMess, QUIC, TUIC, Hysteria2).
+not implemented in this revision (QUIC, TUIC, Hysteria2).
 
 ## 2. Implemented controls
 
@@ -50,6 +50,11 @@ not implemented in this revision (VMess, QUIC, TUIC, Hysteria2).
   CI rejects GPL/AGPL/MPL and runs `cargo-audit` when dependencies change.
 - **Fuzzing.** Every decoder in `marmo-proto` and the HTTP parser has a fuzz
   target. The deterministic corpus runs in CI; long runs are manual.
+- **VMess AEAD.** Only the AEAD header is accepted; legacy MD5/CFB and body
+  None/Zero are rejected. Auth IDs are verified by AES decryption, CRC32, and a
+  120-second window, then inserted into a bounded 4,096-entry replay filter.
+  The 16-bit chunk counter is capped at 65,536 per direction to prevent GCM
+  nonce reuse. MD5 appears only in the protocol-mandated CmdKey derivation.
 
 ## 3. Open obligations
 
