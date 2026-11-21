@@ -1,0 +1,30 @@
+[package]
+name = "marmo"
+description = "Embeddable TCP/UDP proxy library"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+base64.workspace = true
+getrandom.workspace = true
+marmo-net = { workspace = true, features = ["serde"] }
+marmo-proto.workspace = true
+marmo-transport.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_path_to_error.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+marmo-transport.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true

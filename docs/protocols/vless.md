@@ -3,9 +3,9 @@
 Source: the VLESS protocol as documented by XTLS/Xray-core and V2Fly
 (<https://xtls.github.io/en/config/protocols/vless.html>,
 <https://github.com/v2fly/v2ray-core/blob/master/common/protocol/headers.go>),
-retrieved 2026-11-19. TLS record details come from RFC 8446. Both TLS roles
-use the in-tree TLS 1.3 implementation in `packages/tls13`; WebSocket and
-HTTP/2 use the first-party packages from ADR-0013 and ADR-0014.
+retrieved 2026-11-19. TLS record details come from RFC 8446. The Rust tree
+uses `rustls` for both TLS roles, `ws-net` for WebSocket, and `h2` for HTTP/2
+(ADR-0018, ADR-0021).
 
 ## Implemented
 
@@ -17,21 +17,24 @@ HTTP/2 use the first-party packages from ADR-0013 and ADR-0014.
   before the VLESS header is parsed.
 - WebSocket transport uses `path` and `host`, and optionally
   `permessage-deflate` (`compression`) and subprotocols (`subprotocols`).
-  HTTP/2 uses a POST stream with `:authority` from `host`, `:path` from `path`,
-  and requires ALPN `h2` (defaulted when `tls.alpn` is absent).
+  HTTP/2 uses a `PUT` stream with `:authority` from `host` and `:path` from
+  `path`, and requires ALPN `h2` (defaulted when `tls.alpn` is absent). The
+  client sends no `content-type`; the server accepts `PUT` and `POST` and
+  ignores the header (ADR-0022).
 - Inbound UUID authentication uses a constant-time comparison, then routes and
   connects to the selected outbound. The empty response header is sent only
   after the outbound connection is established.
-- Inbound TLS credentials are loaded from PEM/DER certificate files and a PEM
-  PKCS#8 or SEC1 ECDSA P-256 private key. The leaf certificate must match the
-  key.
+- TLS credentials are inline PEM in the configuration (schema version 2):
+  inbound `tls.certificate`, `tls.private_key`, and `tls.client_ca`; outbound
+  `tls.client_certificate` and `tls.client_private_key`. The leaf certificate
+  must match the key. The library never reads credential files (ADR-0023).
 - Strict config validation:
   - outbound `server` is required and must be `host:port`;
   - `uuid` is required and accepts `8-4-4-4-12` or 32 hex digits;
   - outbound `tls` is optional; `tls.sni` is required for an IP `server` when
     verification is enabled;
-  - inbound `tls.certificate` and `tls.private_key` are required and must not
-    be empty;
+  - inbound `tls.certificate` and `tls.private_key` are required, must be
+    non-empty PEM, and are rejected when they look like a file path;
   - outbound `xudp` is optional and defaults to `false`;
   - inbound/outbound TLS `handshake_timeout_s` defaults to 10 and must be
     positive;
@@ -63,20 +66,15 @@ HTTP/2 use the first-party packages from ADR-0013 and ADR-0014.
 - Request header is written once, in a single vectored write where possible.
 - TLS:
   - SNI and hostname verification use `tls.sni`, or the server domain name when
-    `sni` is absent.
-  - Certificate chains are verified against the host CA bundle, loaded lazily
-    with `std.crypto.Certificate.Bundle.rescan` on the first verifying
-    connection.
-  - `tls.insecure = true` skips CA-chain verification. When a server name is
-    available (from `tls.sni` or the server domain), the hostname is still
-    verified by the in-tree client; use a trusted certificate for full SNI
-    behavior.
-  - Client secrets are zeroized when the TLS stream is closed.
-  - A missing `close_notify` is treated as EOF: proxied byte streams have no
-    application length framing that could detect truncation.
-- The TLS adapters implement the public `Stream` interface and preserve the
-  underlying endpoints. TLS lives in `packages/tls13`: the outbound uses the
-  std-backed client and the inbound uses the in-tree TLS 1.3 server.
+    `sni` is absent. The client verifies with the platform verifier.
+  - `tls.insecure = true` skips certificate and hostname verification. It is
+    accepted only for a loopback test server; validation rejects it for any
+    other server.
+  - Config secrets are redacted from `Debug` and zeroized on drop.
+  - `close_notify` handling belongs to `rustls`; the old
+    `allow_truncation_attacks` knob is not exposed in the Rust schema.
+- The TLS adapters implement the `AsyncRead + AsyncWrite` stream boundary and
+  preserve the underlying endpoints. Both roles live in `marmo-transport`.
 
 ### XUDP framing
 
@@ -155,15 +153,34 @@ The inbound always requires TLS; plaintext VLESS inbound is not supported.
   connection even though the package supports multiple streams; root-level
   HTTP/2 multiplexing/pooling is a follow-up. gRPC is not implemented.
 - One request per stream and no multiplexing (Mux.Cool).
-- No custom CA file or pinning yet for the outbound; verification uses the host
-  bundle or `insecure`.
-- Certificate verification and SNI still share the configured `tls.sni`; no
-  custom CA file or pinning is exposed by the root config.
-- Concurrent TLS writes and `shutdown(.send)` are serialized. A relay abort
-  (`shutdown(.both)`) closes the transport without sending `close_notify` so it
-  cannot race with a writer. TLS 1.3 `KeyUpdate` is handled by the in-tree
-  record layer, with disjoint read/write key state.
+- No custom CA file or pinning is exposed by the root config; verification uses
+  the platform bundle. `tls.insecure` is restricted to loopback test servers.
+- TLS state, including read/write keys and `KeyUpdate`, is owned by `rustls`.
 - No anti-probing or replay behavior beyond what TLS provides.
+
+## XHTTP (future work)
+
+XHTTP (formerly SplitHTTP) is Xray's HTTP-carried transport and is not
+implemented. Current Xray releases removed their HTTP/2 transport in favour of
+XHTTP, so XHTTP is the transport to add when compatibility with current Xray
+peers is required. It is tracked as roadmap item P3-6 and needs its own ADR
+before implementation; `h3` depends on the QUIC adapter.
+
+Planned scope when it is taken up:
+
+- `transport.network = "xhttp"` with `path` and `host`, over TLS; ALPN `h2`
+  first, `h3` later if QUIC is available.
+- Start with stream-one: one HTTP request/response whose bodies carry the
+  VLESS byte stream, matching Xray's `stream-one` mode.
+- Evaluate stream-up/stream-down and separate uplink/downlink requests only if
+  real peers require them.
+- Padding, header names, and metadata only as far as needed for interop; no
+  arbitrary header configuration.
+- Bounded request/response bodies, headers, and buffers; no h2c.
+- Tests: config validation, loopback TCP/UoT/XUDP, Xray interop in both
+  directions, and a fixture derived from the public Xray documentation.
+- Clean-room from the public Xray XHTTP description; record the sources in this
+  file before implementation.
 
 ## Tests
 
@@ -176,8 +193,8 @@ The inbound always requires TLS; plaintext VLESS inbound is not supported.
   the handshake failure is reported as a SOCKS5 failure reply.
 - Integration: client and server TLS handshakes against peers that never send
   TLS records, asserting `TimedOut` with a short test timeout.
-- Integration: TLS client -> VLESS inbound over the in-tree TLS 1.3 server ->
-  direct TCP echo, including PEM credential loading and response-header order.
+- Integration: TLS client -> VLESS inbound over `rustls` -> direct TCP echo,
+  including inline PEM credentials and response-header order.
 - Integration: SOCKS5 UDP ASSOCIATE -> VLESS UDP outbound (simple and XUDP) ->
   TLS -> VLESS UDP inbound (command `2` and XUDP command `3`) -> direct UDP
   echo.
@@ -187,9 +204,9 @@ The inbound always requires TLS; plaintext VLESS inbound is not supported.
 - Local-only interop: the TLS adapter and VLESS-over-TLS request/response were
   checked against a Python/OpenSSL TLS echo and VLESS mock. The harness is not
   committed.
-- Fixtures: `tests/fixtures/vless/request_ipv4.bin` and
-  `tests/fixtures/vless/xudp_new.bin` are synthetic, spec-derived inputs (no
-  captured traffic).
-- Fuzz targets: `vless_request` and `xudp_frame` under `zig build fuzz`; the
-  short corpus smoke runs in `zig build test`. See `docs/security/audit.md`.
-- No reference-implementation interop has been recorded in the repository.
+- Synthetic request and XUDP inputs live in `fuzz/corpus/vless/` and
+  `fuzz/corpus/xudp/`.
+- Fuzz targets: `vless` and `xudp` under `cargo +nightly fuzz run`; the bounded
+  corpus smoke runs in the `Fuzz` workflow. See `docs/security/audit.md`.
+- Reference interop: TCP/WS/H2 and UDP/XUDP were checked locally against
+  Xray-core and V2Ray; the harness is not committed.

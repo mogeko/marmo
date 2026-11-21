@@ -43,8 +43,9 @@ Do not use an ADR for ordinary refactors, bug fixes, or formatting.
    ```
 
    It picks the next `NNNN` and fills the date. Or copy the template manually.
-3. Fill `Context`: constraints that matter (Zig 0.17, `std` gaps, LGPL-2.1,
-   std-only, platforms) and the concrete problem.
+3. Fill `Context`: constraints that matter (language and toolchain, `std`
+   gaps, license policy, dependency policy, platforms) and the concrete
+   problem.
 4. List at least two alternatives with why they lose. State a recommendation
    under `Decision (recommended)`.
 5. Add the row to `docs/decisions/README.md` with status `Proposed`.
@@ -61,5 +62,5 @@ Do not use an ADR for ordinary refactors, bug fixes, or formatting.
 - Consequences include negative ones and how the decision will be tested.
 - No vague words ("fast", "robust", "modern") without a measurement or a
   concrete behavior.
-- If a claim depends on `std` behavior, verify it against the pinned Zig version
+- If a claim depends on `std` behavior, verify it against the pinned Rust MSRV
   first.

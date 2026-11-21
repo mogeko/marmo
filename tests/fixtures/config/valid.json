@@ -1,1 +1,0 @@
-{"inbounds":[{"tag":"s","protocol":"socks5","listen":"127.0.0.1:1080"}],"route":{"final":"direct"}}

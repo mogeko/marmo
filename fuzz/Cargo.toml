@@ -1,0 +1,64 @@
+[package]
+name = "marmo-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Outside the root workspace: fuzz targets run on nightly only.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+marmo-proto = { path = "../crates/marmo-proto" }
+
+[[bin]]
+name = "http"
+path = "fuzz_targets/http.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ss2022_tcp"
+path = "fuzz_targets/ss2022_tcp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ss2022_udp"
+path = "fuzz_targets/ss2022_udp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "socks5"
+path = "fuzz_targets/socks5.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trojan"
+path = "fuzz_targets/trojan.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vless"
+path = "fuzz_targets/vless.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xudp"
+path = "fuzz_targets/xudp.rs"
+test = false
+doc = false
+bench = false

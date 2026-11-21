@@ -16,50 +16,40 @@ date.
    `docs/architecture.md`. On rejection, set `Status: Rejected` and record why.
 
 Statuses: `Proposed` → `Accepted` | `Rejected` | `Superseded by ADR-NNNN`.
+ADR-0001 through ADR-0016 are retained as historical records from the initial
+implementation. Their bodies are unchanged; the current Rust decisions are
+ADR-0017 onward.
 
 ## Index
 
 | ADR | Topic | Status | Outcome |
 | --- | --- | --- | --- |
-| [0001](0001-io-runtime.md) | I/O and concurrency runtime | Accepted | `std.Io`; no owned runtime |
-| [0002](0002-scope-and-phasing.md) | Scope and delivery phases | Accepted | Snell deferred; WireGuard abandoned; phases as listed |
-| [0003](0003-core-abstractions.md) | Core interfaces and dispatch | Accepted | vtable interfaces; internal concrete types |
-| [0004](0004-transport-composition.md) | Transport composition | Accepted | nested dialers |
-| [0005](0005-routing-engine.md) | Routing engine | Accepted | first-match rules; no regex in v1 |
-| [0006](0006-outbound-selection.md) | Outbound groups and selection | Accepted | five strategies; probes opt-in |
-| [0007](0007-tls-quic-dependencies.md) | TLS, QUIC, crypto dependencies | Accepted | std-first; in-tree transports; no optional backends |
-| [0008](0008-api-and-config.md) | Public API, config, errors | Accepted | lifecycle facade; strict JSON; typed errors |
-| [0009](0009-licensing-and-interop.md) | Licensing and interop hygiene | Accepted | LGPL-2.1; clean-room protocol work |
-| [0010](0010-tls-module-package.md) | TLS module as a replaceable package | Accepted | `packages/tls13`; std-only API; path dependency |
-| [0011](0011-trojan-inbound-fallback.md) | Trojan inbound fallback | Accepted | optional explicit fallback; routed through `Dispatch`; no default |
-| [0012](0012-tls-alpn.md) | TLS ALPN negotiation | Accepted | ALPN, mTLS, AES-128/256-GCM and ChaCha20-Poly1305, X25519/P-256, KeyUpdate |
-| [0013](0013-http2-package.md) | HTTP/2 transport package | Accepted | `packages/http2`; 16-stream multiplexing; framing/HPACK/flow control; 1xx/trailers |
-| [0014](0014-websocket-package.md) | WebSocket transport package | Accepted | `packages/ws`; RFC 6455, permessage-deflate, subprotocols |
-| [0015](0015-connection-limits-and-timeouts.md) | Connection limits and idle timeouts | Accepted | global limits 1024/10/300/1/1; per-Instance reaper; UDP excluded |
-| [0016](0016-protocol-transport-wiring.md) | Protocol transport composition wiring | Accepted | VLESS `transport` tcp/ws/h2; TLS ALPN defaults; WS compression/subprotocols; H2 one stream per Instance connection |
+| [0001](0001-io-runtime.md) | I/O and concurrency runtime | Historical; superseded by ADR-0017 | initial runtime |
+| [0002](0002-scope-and-phasing.md) | Scope and delivery phases | Historical; carried over | Snell deferred; WireGuard abandoned |
+| [0003](0003-core-abstractions.md) | Core interfaces and dispatch | Historical; superseded by ADR-0017 | initial vtable interfaces |
+| [0004](0004-transport-composition.md) | Transport composition | Accepted; in-tree clause superseded | nested dialers |
+| [0005](0005-routing-engine.md) | Routing engine | Accepted | first-match rules |
+| [0006](0006-outbound-selection.md) | Outbound selection | Accepted | five strategies; probes opt-in |
+| [0007](0007-tls-quic-dependencies.md) | TLS, QUIC, crypto dependencies | Historical; superseded by ADR-0018 | initial in-tree policy |
+| [0008](0008-api-and-config.md) | Public API, config, errors | Accepted; re-expressed in Rust | lifecycle facade; strict JSON |
+| [0009](0009-licensing-and-interop.md) | Licensing and interop hygiene | License half superseded by ADR-0020 | clean-room rule remains |
+| [0010](0010-tls-module-package.md) | TLS module package | Historical; superseded by ADR-0019 | initial TLS package |
+| [0011](0011-trojan-inbound-fallback.md) | Trojan inbound fallback | Accepted | optional routed fallback |
+| [0012](0012-tls-alpn.md) | TLS ALPN negotiation | Accepted; implementation replaced | ALPN, mTLS, KeyUpdate |
+| [0013](0013-http2-package.md) | HTTP/2 transport package | Historical; superseded by ADR-0019 | initial H2 package |
+| [0014](0014-websocket-package.md) | WebSocket transport package | Historical; superseded by ADR-0019 | initial WS package |
+| [0015](0015-connection-limits-and-timeouts.md) | Connection limits and timeouts | Accepted | global limits and deadlines |
+| [0016](0016-protocol-transport-wiring.md) | Protocol transport wiring | Accepted; H2 method superseded by ADR-0022 | VLESS transport object |
+| [0017](0017-language-and-runtime.md) | Language, runtime, and interface model | Accepted | Rust + tokio |
+| [0018](0018-dependencies-and-crypto.md) | Dependencies and crypto backend | Accepted; amended | `rustls` + `aws-lc-rs` |
+| [0019](0019-workspace-and-packaging.md) | Workspace layout and packaging | Accepted; fifth crate superseded by ADR-0024 | four published crates |
+| [0020](0020-license.md) | License change | Accepted; amended | MIT OR Apache-2.0 |
+| [0021](0021-websocket-backend.md) | WebSocket backend and permessage-deflate | Accepted | `ws-net` + tokio pump |
+| [0022](0022-vless-http2-method.md) | VLESS HTTP/2 transport method | Accepted | `PUT` client, no content type |
+| [0023](0023-tls-credentials-inline.md) | TLS credentials as inline configuration | Accepted | inline PEM; schema v2 |
+| [0024](0024-drop-testkit.md) | Drop the unused testkit crate | Accepted (2026-11-21) | four published crates |
 
-## Accepted decisions
-
-ADR-0001–0010 were accepted on 2026-11-18 (ADR-0010 on 2026-11-19); ADR-0011
-was accepted on 2026-11-19. ADR-0012–0014 were accepted on 2026-11-19 on the
-direct implementation request. ADR-0015 was accepted on 2026-11-20 after
-reference-implementation research; ADR-0016 was accepted on 2026-11-20 on the
-direct implementation request.
-
-- **ADR-0002**: Snell deferred, WireGuard abandoned; all other protocols and
-  phases accepted.
-- **ADR-0007**: no optional backends or C dependencies; TLS 1.3 server, QUIC,
-  HTTP/2, WebSocket, and gRPC are implemented in-tree, with a std-first rule
-  that replaces them as soon as Zig's `std` provides the same primitive.
-- **ADR-0011**: Trojan inbound `fallback` is optional and explicit; it is
-  routed through `Dispatch` and has no default endpoint.
-- **ADR-0012–0014**: TLS ALPN is negotiated on both sides by an in-tree TLS
-  1.3 client/server; HTTP/2 and WebSocket are std-only first-party packages
-  with bounded 16-stream H2 multiplexing and RFC 6455 framing (WS).
-- **ADR-0016**: VLESS inbounds/outbounds accept a strict `transport` object
-  (`tcp`, `ws`, `h2`) with transport-aware ALPN defaults and WebSocket
-  compression/subprotocol options; other protocols reject it.
-- **ADR-0015**: a global `limits` policy caps TCP connections and applies
-  handshake, idle, and half-close grace timeouts, enforced by one reaper per
-  `Instance`.
-- **ADR-0001, 0003–0006, 0008, 0009**: accepted as recommended.
+ADR-0001, 0003, 0007, 0010, 0013, and 0014 are superseded. ADR-0009 is
+superseded only in its license half; its clean-room protocol rule remains in
+force. ADR-0002, 0005, 0006, 0008, 0011, 0012, 0015, and 0016 carry over; their
+current Rust expression is in `docs/architecture.md`.

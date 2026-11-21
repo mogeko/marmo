@@ -2,33 +2,39 @@ name: Build & Test
 
 on:
   push:
-    branches: [master, dev]
+    branches: [master]
   pull_request:
 
-jobs:
-  build-and-test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-      - uses: mlugg/setup-zig@v2
-      - run: zig build check --summary all
-      - run: zig build test -Doptimize=ReleaseSafe --summary all
+permissions:
+  contents: read
 
-  examples:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - uses: mlugg/setup-zig@v2
-      - name: Build examples
-        shell: bash
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          for build in examples/*/build.zig; do
-            dir="${build%/build.zig}"
-            echo "::group::Building ${dir}"
-            (cd "${dir}" && zig build)
-            echo "::endgroup::"
-          done
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.100.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.87.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo +1.87.0 test --workspace --locked

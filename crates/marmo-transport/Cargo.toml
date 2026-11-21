@@ -1,0 +1,24 @@
+[package]
+name = "marmo-transport"
+description = "Stream adapters, TLS/WS/H2 layers, and relay for marmo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+bytes.workspace = true
+h2.workspace = true
+http.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+rustls-platform-verifier.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+ws-net.workspace = true
+tokio-rustls.workspace = true
+
+[lints]
+workspace = true

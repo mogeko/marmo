@@ -29,7 +29,7 @@ Source: [SIP022 AEAD-2022 Ciphers](https://github.com/shadowsocks/shadowsocks-or
   for 60 seconds with a bounded in-memory cache.
 - Request padding is 1..64 bytes; the server rejects a request with neither
   padding nor initial payload.
-- AES-128/256-GCM uses `std.crypto.aead.aes_gcm`; no handwritten primitives.
+- AES-128/256-GCM uses the `aes-gcm` crate; BLAKE3 uses `blake3`. No handwritten primitives.
 
 ## Limits and known gaps
 
@@ -54,11 +54,11 @@ Source: [SIP022 AEAD-2022 Ciphers](https://github.com/shadowsocks/shadowsocks-or
   Shadowsocks 2022 UDP server -> direct UDP echo.
 - Reference interop: verified locally against shadowsocks-rust 1.25.0, TCP/UDP
   in both directions; the harness is intentionally not committed.
-- Fixtures: `tests/fixtures/shadowsocks2022/` contains synthetic malformed
-  request and datagram bytes; the layout fuzz targets construct authenticated
-  inputs so address/padding/length parsing is reached after AEAD.
-- Fuzz targets: `ss2022_request`, `ss2022_request_layout`, `ss2022_chunks`,
-  `ss2022_udp_raw`, and `ss2022_udp_layout` under `zig build fuzz`; the short
-  corpus smoke runs in `zig build test`. See `docs/security/audit.md`.
+- Synthetic malformed request and datagram bytes live in `fuzz/corpus/ss2022_*`;
+  the fuzz targets construct authenticated inputs so address, padding, and
+  length parsing is reached after AEAD.
+- Fuzz targets: `ss2022_tcp` and `ss2022_udp` under `cargo +nightly fuzz run`.
+  The bounded corpus smoke runs in the `Fuzz` workflow. See
+  `docs/security/audit.md`.
 - Add captured reference transcripts for offline CI when their provenance and
   license can be recorded.

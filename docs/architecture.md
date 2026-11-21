@@ -1,30 +1,22 @@
 # Architecture
 
-Status: Phase 1 MVP implemented; Phase 2 started with outbound selectors and
-active TCP health probes, followed by VLESS outbound/inbound over TLS (TCP,
-simple UoT, and XUDP), a TLS 1.3 server package, and standard Trojan
-inbound/outbound over TLS (TCP and UDP, with optional routed fallback). TLS now
-negotiates ALPN, and HTTP/2 and WebSocket are std-only first-party packages
-consumed through `Stream` adapters. VLESS can run over TCP, TLS, WebSocket, or
-HTTP/2; the transport is selected by a strict `transport` config object
-(ADR-0016). SS2022
-TCP/UDP interop was verified locally against shadowsocks-rust 1.25.0 in both
-directions; the interop harness is not part of the repository. Protocol and
-Phase 2 gaps are tracked in `docs/protocols/` and §11.
+Status: **Current Rust architecture.** Accepted decisions are ADR-0017 through
+ADR-0023. The library is the only implementation in this repository; there is
+no CLI, daemon, GUI, or application layer.
 
 ## 1. Purpose
 
-marmo is an embeddable Zig library that accepts L4/L7 proxy traffic, decides
+marmo is an embeddable Rust library that accepts L4/L7 proxy traffic, decides
 where it should go, and forwards it through a proxy protocol or directly.
 
-This repository contains the library only: no CLI, daemon, GUI, or system
+The repository contains the library only: no CLI, daemon, GUI, or system
 service. Applications that embed marmo own the process lifecycle, signal
 handling, and configuration storage.
 
 ## 2. Goals
 
 - L4 proxying: TCP streams and UDP datagrams, including UDP-over-stream
-  (SOCKS5 UDP ASSOCIATE, VLESS/VMess UDP, Shadowsocks UDP, Trojan UDP).
+  (SOCKS5 UDP ASSOCIATE, VLESS UDP, Shadowsocks UDP, Trojan UDP).
 - L7 proxying: HTTP/1.1 `CONNECT` and forward proxying, and L7 transports used
   by proxy protocols (TLS, WebSocket, HTTP/2, gRPC, QUIC).
 - Inbounds: SOCKS5, HTTP, mixed, Shadowsocks, Trojan, VLESS, VMess, TUIC,
@@ -36,100 +28,125 @@ handling, and configuration storage.
 - Outbound groups with manual, round-robin, random, fallback, and
   least-latency selection plus health checks.
 - Bounded memory, explicit cancellation, graceful shutdown, no global state.
-- Linux and macOS first; Windows after the core is stable.
+- Linux, macOS, and Windows from the first release of the Rust tree.
 
-## 3. Non-goals (v1)
+## 3. Non-goals
 
 - TLS interception or MITM with generated certificates.
 - A CLI, daemon, GUI, subscription-format parsing, or provider ecosystem
   compatibility.
-- Fake-IP DNS, transparent proxying (`iptables`/TPROXY), TUN inbounds before
-  phase 4.
+- Fake-IP DNS, transparent proxying (`iptables`/TPROXY), TUN inbounds before a
+  later phase.
 - HTTP caching, content rewriting, or a general-purpose HTTP server.
-- Snell (deferred for now: no official specification) and WireGuard (an L3 VPN,
-  not a stream proxy; explicitly abandoned, see ADR-0002).
+- Snell (deferred: no official specification) and WireGuard (an L3 VPN, not a
+  stream proxy; abandoned, see ADR-0002).
 - A userspace TCP/IP stack.
-- Windows-specific APIs before phase 4.
 
-## 4. Constraints (verified against Zig 0.17.1)
+## 4. Constraints
 
-- **Runtime**: `std.Io` is the concurrency and I/O interface. `Io.Threaded`
-  works everywhere. `Io.Evented` exists only where fiber switching is
-  implemented: `aarch64`, `x86_64`, `riscv64`; Linux uses io_uring, BSD uses
-  kqueue, Apple uses Dispatch. Other architectures and Windows must use
-  `Io.Threaded`.
-- **No own event loop**: the library takes `io: std.Io` and never creates
-  threads, an event loop, or a global allocator. The embedder owns the runtime.
-- **std gaps that must be filled in-tree** (ADR-0007):
-  - TLS: the client and TLS 1.3 server are in-tree in `packages/tls13`
-    (X25519/P-256 ECDHE, AES-128-GCM/AES-256-GCM/ChaCha20-Poly1305, ALPN,
-    mTLS, KeyUpdate, ECDSA/Ed25519/RSA server certificates).
-  - HTTP/2 and WebSocket: in-tree in `packages/http2` and `packages/ws`.
-  - QUIC: none; implemented in-tree.
-  - DNS: system resolver via `IpAddress.resolve`, no DoH/DoT client.
-- **No external transport backends**: no C toolchain and no optional backend
-  selected by a build flag. Missing transports are implemented in this
-  repository (ADR-0007), so a config that needs one is rejected until it lands.
-- **std-first**: `std` is the preferred implementation. An in-tree transport is
-  a stopgap; when a pinned Zig upgrade provides the same primitive, switch to
-  `std`, delete the in-tree code, and keep the interop and fuzz coverage. The
-  TLS client is in-tree because `std.crypto.tls.Client` cannot send ALPN.
-- **License**: LGPL-2.1. Protocol code must be written from specifications;
-  GPL/AGPL/MPL implementations must not be ported (see ADR-0009).
-- **Pinned toolchain**: Zig 0.17.x. `std.Io` is still evolving, so the
-  architecture isolates it behind a small set of interfaces.
+- **Language**: Rust, edition 2024. The MSRV is the lowest stable release that
+  satisfies the pinned dependency set; it starts at 1.87 and is recorded in
+  `Cargo.toml`. CI builds both the current stable and 1.87.0. The MSRV rose
+  from 1.85 to 1.87 for `ctutils` >= 0.4.4 (RUSTSEC-2026-0385). Raising it
+  again needs a commit message that names the dependency and the version that
+  forced it.
+- **Runtime**: tokio is the only supported runtime. The embedder owns the
+  runtime; the library takes a `tokio::runtime::Handle` and never builds one
+  implicitly. Codecs and policy code are runtime-free, but the I/O layer is
+  not runtime-agnostic. See ADR-0017 for the cost of the alternative.
+- **Dependencies**: crates.io dependencies are allowed, including a C
+  toolchain for the crypto provider. TLS, HTTP/2, and WebSocket are upstream
+  crates. See ADR-0018.
+- **License**: MIT OR Apache-2.0 (ADR-0020). Protocol work remains
+  clean-room: implement from specifications, never port GPL/AGPL/MPL code, and
+  keep fixture provenance.
+- **Platforms**: Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows
+  (x86_64) are CI targets from the first milestone. Other targets are
+  best-effort.
+- **Bounded state**: every queue, session table, cache, buffer, and rule set
+  has an upper bound fixed at initialization.
+- **No global state**: no global allocator, logger, runtime, or process signal
+  handler in the library.
+
+### 4.1 Scope
+
+The current release covers the implemented protocol and transport set.
+Everything else is post-1.0 work (§19):
+
+| Current | Future |
+| --- | --- |
+| SOCKS5 CONNECT + UDP ASSOCIATE inbound | VMess |
+| HTTP CONNECT + forward inbound | QUIC, TUIC, Hysteria2 |
+| HTTP CONNECT outbound | gRPC and XHTTP transports |
+| Shadowsocks 2022 TCP/UDP | DNS cache, DoH/DoT |
+| Trojan inbound/outbound (TLS, TCP/UDP, fallback) | GEOIP/GEOSITE rule sets |
+| VLESS inbound/outbound (TCP/TLS/WS/H2, TCP/UoT/XUDP) | sniffer, process rules |
+| TLS 1.3 client/server, ALPN, mTLS | `http_head` probes, jitter, backoff |
+| manual/RR/random/fallback/least-latency, TCP probes | root-level H2 pooling |
+| domain/suffix/CIDR/port/network rules | TUN, transparent proxying |
+| strict JSON config, limits, metrics | Windows-specific process matching |
 
 ## 5. Runtime model
 
-All public operations take `io: std.Io` and an explicit allocator. Nothing is
-implicitly spawned; long-running work is created with `io.async`,
-`io.concurrent`, or an `Io.Group` owned by a listener or instance.
+tokio is the runtime and the cancellation model. The embedder creates the
+runtime; the builder defaults to `Handle::try_current()` and can be given an
+explicit handle. The library spawns only through that handle and owns every
+task it creates.
 
-```zig
-var threaded: std.Io.Threaded = .init(gpa, .{});
-defer threaded.deinit();
-const io = threaded.io();
+```rust
+let config = marmo::Config::from_json(&text)?;
+let instance = marmo::Instance::builder(config).build()?;
+instance
+    .serve_with_shutdown(async { tokio::signal::ctrl_c().await.ok(); })
+    .await?;
 ```
 
 Rules:
 
-- One `Io.Group` per inbound listener. `stop` cancels the group members before
-  closing listeners, then waits.
-- Per-connection work must be cancelable. `close` on a stream or socket is
-  required to unblock pending reads and writes; the interface specifies this
-  instead of relying on a separate cancel token.
-- Timeouts use `Io.Timeout` / `io.operateTimeout`, never `std.Thread.sleep` or
-  blocking `poll`.
-- No CPU-heavy work (large rule-set parsing, certificate parsing, compression)
-  on the I/O path. Parse config and rule sets before `start`.
-- Library code must be usable from a single-threaded embedder; do not depend on
-  thread-local storage or global mutable state.
+- **One cancellation tree.** `Instance` owns a root
+  `CancellationToken`; listeners and connections hold child tokens. Shutdown
+  cancels the root and awaits the task sets with a grace timeout.
+- **Every task is owned.** Listeners use a `JoinSet`; UDP sessions use a
+  `TaskTracker`. No bare `tokio::spawn` outside those owners.
+- **Timeouts are local.** Handshake, idle, and half-close deadlines use
+  `tokio::time::timeout` or `Sleep` inside `select!`. There is no reaper and no
+  global deadline registry; admission control is a `Semaphore` permit.
+- **Dropping is cancellation.** A dropped connection future must leave the
+  session table, metrics, and peer stream in a consistent state. Every
+  `select!` branch is either cancel-safe or is not dropped (ADR-0017).
+- **No filesystem I/O in the library.** TLS credentials arrive as inline PEM
+  in the configuration and are parsed during `bind()`; the embedder reads
+  files or fetches secrets (ADR-0023).
+- **Config is immutable per instance.** Reload is post-1.0: it
+  builds a new `CompiledConfig` and publishes it through `ArcSwap`, so the data
+  plane never locks.
+
+The library still works under a current-thread runtime. Tests run both
+flavors; no design decision may assume a work-stealing scheduler.
 
 ## 6. Layers
 
-| Layer | Responsibility | Must not know about |
-| --- | --- | --- |
-| `core` | `Io`, allocator, buffer pools, limits, cancellation, errors, logging, metrics | protocols, sockets |
-| `net` | addresses, endpoints, socket options, dial/listen primitives, DNS resolver interface | proxy protocols |
-| `transport` | byte-stream and datagram adapters: TLS, WebSocket, HTTP/2, QUIC, multiplexing, framing | routing, config |
-| `protocol` | wire codecs for proxy protocols (header encode/decode, auth, per-connection state) | routing, config, listeners |
-| `inbound` | accept loops, protocol handshakes, connection metadata | outbound selection |
-| `outbound` | dialers, protocol handshakes, groups, health checks | inbound parsing |
-| `routing` | metadata, rules, rule sets, sniffing, DNS resolution policy | transport details |
+| Layer | Crate | Responsibility | Must not know about |
+| --- | --- | --- | --- |
+| core | `marmo` | limits, errors, metrics, config, logging | protocols, sockets |
+| net | `marmo-net` | addresses, endpoints, network | proxy protocols |
+| transport | `marmo-transport` | stream/datagram adapters: TLS, WebSocket, HTTP/2, QUIC, relay | routing, config |
+| protocol | `marmo-proto` | wire codecs (header encode/decode, auth, per-connection state) | routing, config, listeners |
+| inbound | `marmo` | accept loops, protocol handshakes, connection metadata | outbound selection |
+| outbound | `marmo` | dialers, protocol handshakes, groups, health checks | inbound parsing |
+| routing | `marmo` | metadata, compiled rules, action selection | transport details |
 
-There is no `app` layer. `Instance` (the public facade) is the composition root:
-it parses config, owns listeners and selector state, and wires layers together.
-It may depend on every layer; no layer may import it.
-
-Dependency direction is strictly downward: `Instance` → every layer,
-`inbound`/`outbound` → `protocol`/`transport`/`net`/`core`, `protocol` →
-`transport`/`net`/`core`. `routing` depends on `net` and `core` only.
+There is no `app` layer. `Instance` is the composition root: it parses config,
+owns listeners and selector state, and wires the layers together. Dependency
+direction is strictly downward: `marmo` → every crate, `marmo-proto` →
+`marmo-net` (address parsing only), `marmo-net` → nothing. `marmo-transport`
+depends only on upstream crates and the erased stream boundary.
 
 ## 7. Component overview
 
 ```
                     +-------------------------------------------+
-  config (JSON) --> | Instance: API, config, wiring, metrics    |
+  config (JSON) --> | Instance: API, config, wiring, limits      |
                     +---------------------+---------------------+
                                           |
         +-----------------+---------------+------------------+
@@ -137,11 +154,11 @@ Dependency direction is strictly downward: `Instance` → every layer,
   +-----v-----+     +-----v------+                    +------v-----+
   |  inbound  |     |  routing   |                    |  outbound  |
   |  accept   | --> |  rules     | -----------------> |  groups    |
-  |  + codecs |     |  + sniffer |                    |  + dialers |
+  |  + codecs |     |            |                    |  + dialers |
   +-----+-----+     +-----+------+                    +------+-----+
         |                 |                                  |
         |           +-----v------+                           |
-        |           |    dns     |                           |
+        |           |    dns     | (post-1.0)                      |
         |           |  resolver  |                           |
         |           +-----+------+                           |
         |                 |                                  |
@@ -149,189 +166,226 @@ Dependency direction is strictly downward: `Instance` → every layer,
                                           |
                      +--------------------v----------------------+
                      | transport: stream | datagram | relay     |
-                     | tls | ws | h2 | quic | framing          |
+                     | rustls | ws-net           | h2 | quinn  |
                      +--------------------+----------------------+
                                           |
                      +--------------------v----------------------+
-                     | net: tcp | udp | unix | dns              |
+                     | net: tokio tcp/udp | socket2 | resolver   |
                      +--------------------+----------------------+
                                           |
                      +--------------------v----------------------+
-                     | core: std.Io | allocator | limits         |
+                     | core: tokio runtime handle | limits      |
                      +-------------------------------------------+
 ```
 
-## 8. Core interfaces
+## 8. Workspace and interfaces
 
-Interfaces are vtable-based because the protocol and transport set is chosen at
-runtime from config. Concrete implementations stay internal; only the public
-root module re-exports the interfaces. See ADR-0003 for the alternative.
+### 8.1 Crates
 
-### 8.1 Stream
+| Crate | Published | Contents |
+| --- | --- | --- |
+| `marmo` | yes | public facade, `Instance`, config, routing, inbounds, outbounds, metrics |
+| `marmo-proto` | yes | HTTP/1, SOCKS5, SS2022, Trojan, VLESS, XUDP codecs; no I/O, no tokio |
+| `marmo-net` | yes | `Endpoint`, CIDR, `Network` |
+| `marmo-transport` | yes | stream traits, TLS/WS/H2 layers, relay |
 
-Duplex, ordered bytes with half-close support. This is the only thing relay
-code needs to know.
+Four crates. `inbound`, `outbound`, `routing`, and `config` stay inside
+`marmo` because `Instance` wires all of them and splitting would only add
+re-export churn. All crates version together at `0.x` until the API is stable.
 
-```zig
-pub const Stream = struct {
-    ctx: *anyopaque,
-    vtable: *const VTable,
+### 8.2 Streams and datagrams
 
-    pub const VTable = struct {
-        read: *const fn (ctx: *anyopaque, io: std.Io, bufs: [][]u8) ReadError!usize,
-        write: *const fn (ctx: *anyopaque, io: std.Io, bufs: []const []const u8) WriteError!usize,
-        shutdown: *const fn (ctx: *anyopaque, io: std.Io, how: ShutdownHow) ShutdownError!void,
-        close: *const fn (ctx: *anyopaque, io: std.Io) void,
-        local: *const fn (ctx: *anyopaque) Endpoint,
-        remote: *const fn (ctx: *anyopaque) Endpoint,
-    };
-};
+`Stream` is a bound, not a bespoke trait. This is the only thing relay code
+needs to know.
+
+```rust
+pub trait AsyncStream: AsyncRead + AsyncWrite + Send + Unpin + 'static {}
+impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static> AsyncStream for T {}
+
+pub type BoxStream = Box<dyn AsyncStream>;
+pub type BoxFuture<'a, T> =
+    Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 ```
 
 Contract:
 
-- `read` returns `0` only on clean EOF. `error.Canceled` means the operation was
-  interrupted.
-- `write` writes everything or returns an error; partial writes are retried
-  internally.
-- `close` is idempotent, unblocks in-flight operations, and does not free the
-  underlying memory (the owner does).
-- `shutdown(.send)` propagates TCP half-close; relay code must not turn a
+- `poll_read` returning `Ok(0)` means clean EOF.
+- `poll_shutdown` propagates TCP half-close; relay code must not turn a
   half-close into a full close.
+- Dropping a stream closes it; there is no `close` method and no
+  "must unblock pending I/O" contract. Cancellation is `select!` plus drop.
+- Ownership is explicit: the connection task owns both streams and every
+  buffer they borrow.
 
-### 8.2 PacketConn
+Datagrams use `tokio::net::UdpSocket` for the direct case and a small trait for
+protocol-owned channels:
 
-Datagrams with per-packet source/destination. Used by UDP inbounds/outbounds,
-QUIC datagrams, and TUN (later).
-
-```zig
-pub const PacketConn = struct {
-    ctx: *anyopaque,
-    vtable: *const VTable,
-
-    pub const VTable = struct {
-        sendTo: *const fn (ctx: *anyopaque, io: std.Io, dest: Endpoint, data: []const u8) SendError!void,
-        recvFrom: *const fn (ctx: *anyopaque, io: std.Io, buf: []u8) ReceiveError!Received,
-        close: *const fn (ctx: *anyopaque, io: std.Io) void,
-        maxDatagramSize: *const fn (ctx: *anyopaque) usize,
-    };
-};
+```rust
+pub trait Datagram: Send + Sync + 'static {
+    fn send_to<'a>(&'a self, data: &'a [u8], dest: &'a Endpoint)
+        -> BoxFuture<'a, Result<(), DatagramError>>;
+    fn recv_from<'a>(&'a self, buf: &'a mut [u8])
+        -> BoxFuture<'a, Result<(usize, Endpoint), DatagramError>>;
+    fn max_datagram_size(&self) -> usize;
+}
 ```
 
-`Received` carries the payload length and the source `Endpoint`. Implementations
-must bound queues; dropping is a policy decision made by the session layer, not
-by silently blocking the socket.
+Implementations bound their queues. Dropping a datagram is a session-layer
+policy decision, not a silent block inside the socket.
 
-### 8.3 Dialer and transports
+### 8.3 Transport composition
 
-`Dialer.connect(io, target)` returns a `Stream`; `Dialer.connectPacket` is
-optional and returns a `PacketConn` when the protocol supports UDP natively.
-Transports wrap a dialer and add framing/encryption:
+Composition keeps ADR-0004's model: a protocol dialer wraps transport layers,
+which wrap a base connect.
 
 ```
-Outbound -> [quic | tls | ws | h2 | tcp] -> Dialer
+Outbound -> protocol -> [quic | tls | ws | h2 | tcp] -> base connect
 ```
 
-Composition order follows the protocol spec (for example VLESS over TLS over
-WebSocket over TCP). A transport may require metadata (SNI, ALPN, host header)
-provided at dial time, not from global config.
+`Dialer` and `Transport` are builders, not per-operation vtables. A transport
+layer implements `Layer` once; the stack is composed at startup and the hot
+path only sees the resulting `BoxStream`.
 
-### 8.4 Inbound and connection metadata
-
-```zig
-pub const Connection = struct {
-    stream: ?Stream,          // null for datagram-only inbounds
-    packets: ?PacketConn,
-    metadata: Metadata,
-    arena: *std.heap.ArenaAllocator,
-};
-
-pub const Metadata = struct {
-    network: Network,          // tcp | udp
-    source: Endpoint,
-    destination: Endpoint,     // literal IP or unresolved domain + port
-    domain: ?[]const u8,       // from inbound protocol or sniffer (arena-owned)
-    inbound: []const u8,       // configured tag
-    process: ?ProcessInfo,     // filled lazily, opt-in
-    sniffed: ?SniffedProtocol, // tls | http | quic
-};
+```rust
+pub trait Layer: Send + Sync {
+    fn wrap<'a>(
+        &'a self,
+        inner: BoxStream,
+        opts: &'a LayerOptions,
+    ) -> BoxFuture<'a, Result<BoxStream, TransportError>>;
+}
 ```
 
-Metadata is immutable once routing starts. Anything allocated for it lives in
-the connection arena and dies with the connection.
+Layers are compiled from config into a `Vec<Box<dyn Layer>>` in spec order (for
+example VLESS → TLS → WebSocket → TCP). Transport parameters (SNI, ALPN,
+`Host`, path, subprotocols) come from the outbound config at dial time, never
+from globals. Inbound stacks mirror the same order.
+
+### 8.4 Inbound and metadata
+
+```rust
+pub struct Connection {
+    pub stream: Option<BoxStream>,      // None for datagram-only inbounds
+    pub datagrams: Option<Box<dyn Datagram>>,
+    pub metadata: Metadata,
+}
+
+pub struct Metadata {
+    pub network: Network,               // tcp | udp
+    pub source: Endpoint,
+    pub destination: Endpoint,          // literal IP or unresolved domain + port
+    pub domain: Option<Arc<str>>,       // inbound protocol or sniffer
+    pub inbound: InboundId,             // compiled tag index
+    pub process: Option<ProcessInfo>,   // opt-in, later phase
+}
+```
+
+`Metadata` is immutable once routing starts. It is a plain struct owned by the
+connection task; there is no arena and no allocator threading. Anything that
+must outlive the task is an `Arc`.
 
 ### 8.5 Outbound
 
-An outbound exposes a dialer, an optional packet dialer, a capability set
-(TCP/UDP), and a health state. Groups (§11) implement the same interface so
-they can be nested, but nesting is limited to one level in v1.
+```rust
+pub trait Outbound: Send + Sync {
+    fn connect<'a>(
+        &'a self,
+        target: &'a Endpoint,
+        opts: &'a ConnectOptions,
+    ) -> BoxFuture<'a, Result<BoxStream, ConnectError>>;
+
+    fn connect_datagram<'a>(
+        &'a self,
+        target: &'a Endpoint,
+        opts: &'a ConnectOptions,
+    ) -> BoxFuture<'a, Result<Box<dyn Datagram>, ConnectError>>;
+
+    fn capabilities(&self) -> Capabilities;   // tcp, udp
+    fn health(&self) -> HealthSnapshot;
+}
+```
+
+Groups implement the same trait and contain an ordered node list. Nesting is
+limited to one level, as before. `Box<dyn Outbound>` is created once at
+startup; the connection path makes one virtual call per dial, not per byte.
 
 ### 8.6 Router
 
-`Router.match(metadata) -> Action`, allocation-free on the hot path. Actions
-are `route(tag)`, `direct`, `reject(reason)`, `hijack_dns`. Rules are compiled
-once at startup; `match` is safe for concurrent use.
+```rust
+pub trait Router: Send + Sync {
+    fn route(&self, metadata: &Metadata) -> Action;
+}
+```
+
+`route` is synchronous, allocation-free, and safe for concurrent reads. Rule
+targets compile to `OutboundId(u16)` instead of `&str`, so a match returns a
+small copy type. Rules are immutable after construction and live behind an
+`Arc`.
 
 ### 8.7 Resolver and sniffer
 
-The resolver interface returns A/AAAA records with TTLs from a cache. The
-sniffer peeks at the first bytes of a stream and returns a domain (TLS SNI,
-HTTP `Host`, or HTTP/2 `:authority` later) plus the protocol. Sniffed bytes are
-buffered and replayed to the relay so no data is lost.
+The sniffer is post-1.0. The resolver interface (TTL cache, DoH/DoT
+policy) is post-1.0 too; current dials through the system resolver
+(`tokio::net::lookup_host`). The sniffer peeks at the first bytes of a stream
+and returns a domain (TLS SNI, HTTP `Host`, HTTP/2 `:authority`) plus a
+protocol. Sniffed bytes are buffered and replayed to the relay so no data is
+lost.
 
 ### 8.8 Codec
 
-Wire codecs are plain functions plus per-connection state structs; they do not
-perform I/O. `protocol` modules are shared by inbound and outbound halves so
-header/auth logic has one implementation. Every decoder takes a bounded input
-and returns `error.Malformed` rather than panicking.
+Wire codecs are plain functions plus per-connection state structs. They do not
+perform I/O and do not import tokio. `marmo-proto` is shared by inbound and
+outbound halves so header/auth logic has one implementation. Every decoder
+takes a bounded input (`&mut Bytes` or `&[u8]`), returns a typed error, never
+panics, and never allocates based on an unvalidated length.
 
 ## 9. Data flow
 
 ### 9.1 TCP
 
-1. Inbound accepts, builds `Metadata` (destination from the protocol header).
-2. Optional sniffing fills `metadata.domain` / `sniffed`; buffered bytes are
-   kept for replay.
-3. Router evaluates rules; the selected outbound dials the target through its
-   transport stack.
-4. Relay runs two tasks (client→remote, remote→client) with fixed buffers
-   (`32 KiB` default, configurable). Each loop reads, writes, and propagates
-   half-close. Idle timeout and byte counters are applied per direction.
-5. First terminal error cancels the peer via `io` group cancel/close, then both
-   streams are closed and metrics are recorded once.
+1. The listener accepts, acquires a `Semaphore` permit, and creates a child
+   cancellation token.
+2. The inbound handshake fills `Metadata` (destination from the protocol
+   header) under `handshake_timeout`.
+3. Routing selects an `OutboundId`; the outbound dials the target through its
+   layer stack under the same deadline.
+4. Relay runs `copy_bidirectional_with_sizes(32 KiB)` wrapped in counters and
+   an activity-based idle deadline. Half-close is propagated in both
+   directions.
+5. The first terminal error cancels the peer direction, then both streams are
+   dropped and metrics are recorded once. The permit is released when the
+   connection task ends.
 
-Handshake (protocol auth) and connect timeouts share a `connect_timeout`;
-`idle_timeout` applies only after the relay starts. ADR-0015 adds a global
-`limits` policy: `max_connections`, `handshake_timeout_s`, `idle_timeout_s`,
-`uplink_only_s`, and `downlink_only_s`. A single per-`Instance` reaper scans a
-bounded guard registry every 250 ms.
+`limits.max_connections` is enforced by `try_acquire_owned` before the
+handshake, so an overloaded instance rejects instead of queueing. Idle and
+half-close deadlines are per-connection timers, not a shared scan.
 
 ### 9.2 UDP
 
-1. Inbound receives a datagram and derives a session key:
-   `(client_endpoint, target_endpoint, inbound_tag)` plus protocol-specific
+1. The inbound receives a datagram and derives a session key:
+   `(client_endpoint, target_endpoint, inbound_id)` plus the protocol
    association ID for SOCKS5/Trojan/VLESS.
-2. The session table (sharded, bounded, LRU-ish) creates a session on first
-   use; routing runs once per session and the chosen outbound is sticky for the
-   session lifetime.
-3. A per-session recv loop sends replies back to the client using the original
-   path. Sessions expire on idle timeout or when the table is full (oldest
-   idle first).
-4. Datagrams that exceed `max_datagram_size` are rejected with a counter, never
-   fragmented by the library.
+2. The session table (bounded, sharded, LRU-ish) creates a session on first
+   use; routing runs once per session and the chosen outbound is sticky for
+   the session lifetime.
+3. A per-session task holds a session permit, a bounded `mpsc` queue, and an
+   idle deadline. Replies go back to the client on the original path.
+4. Sessions expire on idle timeout or when the table is full (oldest idle
+   first). In current the table capacity is fixed at initialization per inbound
+   (128 for the Shadowsocks UDP listener, matching the initial implementation); a
+   configurable `max_udp_sessions` is post-1.0. UDP caps stay separate from
+   `max_connections`, as in ADR-0015.
 
-UDP sessions are the unit of limits: `max_udp_sessions`, per-session queue
-depth, and idle timeout. No unbounded per-packet allocation is allowed.
-ADR-0015 keeps UDP session caps out of `max_connections` and applies the
-configured idle timeout per datagram.
+Datagrams above `max_datagram_size` are rejected with a counter, never
+fragmented by the library. There is no per-packet heap allocation on the
+forwarding path.
 
 Trojan and SOCKS5 UDP associations are per-stream rather than table entries.
 Each datagram is routed independently; the first accepted datagram selects the
 outbound tag, and later datagrams that select a different tag are dropped. A
 Trojan association may send to multiple destinations through the same
-`PacketConn` when the selected outbound supports it (direct and Trojan; VLESS
-simple UoT binds one destination).
+datagram channel when the selected outbound supports it (direct and Trojan;
+VLESS simple UoT binds one destination).
 
 ### 9.3 L7 HTTP
 
@@ -341,19 +395,19 @@ simple UoT binds one destination).
   `Host` taken from the URI authority and hop-by-hop headers stripped. Upstream
   is forced to `Connection: close`; v1 handles one request per connection.
 - HTTP/1.1 only; no request rewriting beyond the request line and headers.
-- No request rewriting, caching, or authentication beyond optional inbound
+- No caching, content rewriting, or authentication beyond optional inbound
   credentials.
-- L7 transports (WebSocket, HTTP/2, gRPC) are implemented as `transport`
-  adapters, not in the HTTP inbound.
+- L7 transports (WebSocket, HTTP/2, gRPC) are transport adapters, not part of
+  the HTTP inbound.
 
 ### 9.4 DNS
 
 - Inbound-provided domains (SOCKS5/HTTP) are authoritative and avoid DNS on the
   proxy side until the outbound needs an IP.
-- Sniffing is opt-in; it never replaces an inbound-provided domain.
 - The resolver is used for outbound dials that need an IP and for rules that
-  need one. Resolution policy (system, DoH later) is configurable per outbound
-  or globally; `direct` uses the system resolver by default.
+  need one. `direct` uses the system resolver by default; DoH/DoT and a cache
+  arrive in post-1.0.
+- Sniffing is opt-in and never replaces an inbound-provided domain.
 - Fake-IP is out of scope until a TUN inbound exists.
 
 ## 10. Routing model
@@ -361,32 +415,26 @@ simple UoT binds one destination).
 Rules are an ordered list; the first match wins; the last rule is an explicit
 default. Each rule has an action and one or more matchers (AND within a rule).
 
-Matchers in v1:
+Matchers in the current set:
 
 | Matcher | Notes |
 | --- | --- |
-| `domain` | exact, suffix, keyword; no regex in v1 (backtracking and cost) |
-| `domain_set` | compiled set (GEOSITE-style) |
+| `domain` | exact match |
+| `domain_suffix` | suffix match, no regex |
 | `ip_cidr` | sorted ranges + binary search |
-| `geoip` | compiled country → ranges |
-| `port` / `port_range` | destination port |
+| `port` | destination port |
 | `network` | `tcp` / `udp` |
-| `inbound` | inbound tag |
-| `process_name` / `process_path` | best-effort, opt-in, OS-specific |
-| `protocol` | sniffed protocol |
 
-Compiled rule sets use a versioned binary format: header, counts, sorted
-domain/IP tables, CRC. They are produced by a separate tool from plain text or
-public data and memory-mapped read-only at startup. No network access at
-runtime. Data licensing (for example GeoLite2) is tracked in the tool's docs.
+Post-current matchers: `domain_keyword`, `port_range`, `inbound`,
+`domain_set`/`geoip` (compiled rule sets), `process_name`/`process_path`, and
+`protocol` (sniffed). Compiled rule sets use a versioned binary format read
+memory-mapped at startup; no network access at runtime. Data licensing is
+tracked by the rule-set tool, not by this library.
 
 Process matching is best-effort: Linux `/proc`, macOS `proc_pidpath`, Windows
-later. It may require privileges; failure returns "unknown" and must not fail
-the connection.
+later. Failure returns "unknown" and never fails the connection.
 
 ## 11. Outbound groups and selection
-
-Groups implement the outbound interface and contain an ordered node list.
 
 | Type | Behavior |
 | --- | --- |
@@ -394,248 +442,372 @@ Groups implement the outbound interface and contain an ordered node list.
 | `round_robin` | rotate per new connection/session |
 | `random` | uniform choice |
 | `fallback` | first node, advance on connect failure, sticky until config reload |
-| `least_latency` | EWMA latency from health checks, lowest wins; ties by order |
+| `least_latency` | EWMA latency, lowest wins; ties by order |
 
-Health checks are explicit per group: `tcp_connect` to a host:port or
-`http_head` to a URL, with interval, timeout, and jitter. Results feed an EWMA
-(`alpha = 0.2`) and a failure counter with exponential backoff. Checks are off
-by default; no traffic is generated unless configured.
-
-Implementation status: `manual`, `round_robin`, `random`, `fallback`, and
-`least_latency` are implemented. Latency comes from passive connect samples and,
-when configured, active `tcp_connect` probes with a timeout. Probes use a fixed
-interval; `http_head`, jitter, and exponential backoff are pending.
-
-Per-connection selection is independent. UDP sessions keep the selected node
-for the session lifetime. Selection state is shared across tasks; use atomics
-for counters and a mutex only around node-set replacement (config reload).
+Selection state is `AtomicU64`/`AtomicU32` per node; node-set replacement, when
+reload lands post-1.0, uses `ArcSwap` and never appears on the connect path. Health checks
+are opt-in per group: `tcp_connect` to a host:port with interval and timeout,
+driven by a task owned by the instance's `JoinSet`. Results feed an EWMA
+(`alpha = 0.2`) and a failure counter. `http_head`, jitter, and exponential
+backoff are post-1.0. No traffic is generated unless configured.
 
 ## 12. Protocol support matrix
 
-| Protocol | Transport | TCP | UDP | Inbound | Outbound | Phase | Notes |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Direct | any | yes | yes | — | yes | 1 | system resolver |
-| SOCKS5 | TCP (+UDP ASSOCIATE) | yes | yes | yes | no | 1 | inbound only |
-| HTTP proxy | TCP | yes | no | yes | yes | 1 | CONNECT + forward implemented |
-| Shadowsocks | TCP/UDP | yes | yes | yes | yes | 1 | 2022 TCP + UDP implemented |
-| Trojan | TLS | yes | yes | yes | yes | 2 | standard TCP/UDP; optional routed fallback (ADR-0011) |
-| VLESS | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | TCP/UDP (simple + XUDP) over TCP/TLS/WS/H2; Instance H2 uses one stream per connection; gRPC pending |
-| VMess | TCP/TLS/WS/H2/gRPC | yes | yes | yes | yes | 2 | legacy CFB not planned; gRPC in phase 3 |
-| TUIC | QUIC | yes | yes | yes | yes | 3 | in-tree QUIC |
-| Hysteria2 | QUIC + TLS | yes | yes | yes | yes | 3 | Salamander, Brutal CC |
+`Supported` means the feature is implemented and covered by the current test
+and interop suite. `Future` means it is not part of the current release.
 
-Phasing:
+| Protocol | Transport | TCP | UDP | Inbound | Outbound | Scope |
+| --- | --- | --- | --- | --- | --- | --- |
+| Direct | any | yes | yes | — | yes | supported |
+| SOCKS5 | TCP (+UDP ASSOCIATE) | yes | yes | yes | no | supported |
+| HTTP proxy | TCP | yes | no | yes | yes | supported |
+| Shadowsocks 2022 | TCP/UDP | yes | yes | yes | yes | supported |
+| Trojan | TLS | yes | yes | yes | yes | supported |
+| VLESS | TCP/TLS/WS/H2 | yes | yes | yes | yes | supported |
+| VMess | TCP/TLS/WS/H2/gRPC | — | — | — | — | future |
+| TUIC | QUIC | — | — | — | — | future |
+| Hysteria2 | QUIC + TLS | — | — | — | — | future |
 
-- **Phase 0**: docs, ADRs, build scaffold, CI, core interfaces, public API
-  surface.
-- **Phase 1 (MVP)**: `std.Io` core, TCP/UDP relay, SOCKS5 (CONNECT + UDP
-  ASSOCIATE), HTTP/1.1 proxy (CONNECT + forward), HTTP CONNECT outbound, direct
-  outbound, Shadowsocks 2022, domain/IP-CIDR/port rules, manual group, JSON
-  config, counters.
-- **Phase 2**: VLESS/Trojan/VMess, in-tree TLS 1.3 server and WS/H2 transports,
-  sniffing, compiled rule sets, process rules, groups and health checks, DNS
-  cache/DoH. Implemented: selectors, TCP health probes, VLESS outbound and
-  inbound over TLS (TCP, simple UoT, and XUDP), Trojan inbound and outbound
-  over TLS (TCP and UDP, optional routed fallback), and the TLS 1.3 server
-  package, ALPN, and the HTTP/2 and WebSocket transport packages. VLESS now
-  accepts `transport: {network: tcp|ws|h2}` with TLS ALPN defaults and
-  WebSocket compression/subprotocols (ADR-0016); VMess is not implemented.
-  Root-level HTTP/2 multiplexing/pooling, `http_head`, jitter, backoff, and the
-  remaining items are next.
-- **Phase 3**: in-tree QUIC, TUIC, Hysteria2, gRPC transport.
-- **Phase 4**: optional TUN/transparent proxying, Windows, transport hardening
-  and external audit.
+VLESS supports TCP, simple UoT, and XUDP over TCP, TLS, WebSocket, and HTTP/2,
+with the strict `transport` object of ADR-0016. `Instance` serves one VLESS
+stream per HTTP/2 connection; root-level multiplexing/pooling is future work.
+gRPC is future work built on `h2`/`tonic`. XHTTP is future work for current
+Xray compatibility (roadmap P3-6); it needs an ADR and `h3` depends on the QUIC
+adapter. VMess is deferred: legacy CFB is not planned.
 
-Hysteria v1 is not planned; Hysteria2 is the target. Snell is deferred and
-WireGuard is explicitly out of scope (ADR-0002).
+## 13. Dependencies and transports
 
-Implementation status: Phase 1 MVP is implemented. See
-[`docs/protocols/shadowsocks.md`](protocols/shadowsocks.md) for the remaining
-SIP022 hardening and interoperability gaps, and
-[`docs/protocols/vless.md`](protocols/vless.md) for the VLESS outbound and TLS
-client scope.
+| Need | Crate | Notes |
+| --- | --- | --- |
+| Runtime, TCP/UDP, timers, sync | `tokio` | only supported runtime |
+| Cancellation, task tracking, codecs | `tokio-util` | `CancellationToken`, `TaskTracker`, `Framed` |
+| TLS 1.3 client/server, ALPN, mTLS | `rustls`, `tokio-rustls` | TLS 1.3 only; platform verifier |
+| HTTP/2 | `h2` | framing, HPACK, flow control, 1xx, trailers |
+| WebSocket | `ws-net` | RFC 6455, permessage-deflate, subprotocols |
+| HTTP/1.1 | `httparse` (+ `hyper` only if needed) | the inbound is minimal; no general server |
+| QUIC (post-1.0) | `quinn` | streams, datagrams, custom congestion control |
+| DNS (post-1.0) | `hickory-resolver` | system, DoH, DoT, cache |
+| Config | `serde`, `serde_json`, `serde_path_to_error` | strict parsing, path-aware errors |
+| Errors | `thiserror` | typed errors; `anyhow` only in examples/tests |
+| Secrets | `secrecy`, `zeroize` | no secret in `Debug` or logs |
+| Buffers | `bytes` | zero-copy header parsing |
+| Reload (post-1.0) | `arc-swap` | lock-free config swap |
+| Sockets | `socket2` | keepalive, buffer sizes, `SO_REUSEADDR` |
+| IP/CIDR | `ipnet` | compiled ranges |
+| Domain sets (post-1.0) | `aho-corasick` | keyword/suffix sets |
+| Process info (post-1.0) | `sysinfo` | best-effort, opt-in |
 
-## 13. Dependencies and in-tree transports
+Rules:
 
-First-party packages live under `packages/` and are consumed by path
-dependencies (ADR-0010). `packages/tls13` owns TLS handshake, record, and CA
-policy; the root package only adapts `Stream` to its `Reader`/`Writer` API.
-Root `zig build test` aggregates package tests, `zig build check` adds the
-formatting check, and `zig build examples` builds the standalone examples.
-Package rules are in `packages/README.md`.
-
-There is exactly one build configuration: std-only, no C toolchain, no optional
-backend selected by a flag (ADR-0007). A transport that `std` lacks is
-implemented in this repository, but in-tree code is always second choice:
-re-check every transport on each Zig upgrade and migrate to `std` as soon as it
-provides the same primitive, deleting the in-tree version.
-
-- **TLS 1.3 client and server**: in-tree in `packages/tls13` on `std.crypto`;
-  X25519/P-256 ECDHE, AES-128-GCM/AES-256-GCM/ChaCha20-Poly1305, ALPN, mTLS,
-  KeyUpdate, and caller-provided server certificates (ECDSA P-256/P-384,
-  Ed25519, or RSA). The client verifies chains through the system CA bundle.
-  No PSK, tickets, 0-RTT, TLS 1.2, or revocation.
-  `src/transport/tls_{client,server,dialer}.zig` are thin `Stream` adapters.
-  `Instance` wraps accepted TCP streams for the VLESS and Trojan inbounds;
-  credentials are PEM/DER files loaded by `src/transport/tls_credentials.zig`.
-- **WebSocket**: in-tree in `packages/ws`; bounded RFC 6455 opening handshake,
-  masking, continuation, ping/pong, close, permessage-deflate, and subprotocol
-  negotiation. `src/transport/ws_*.zig` expose `Stream` and a dialer. VLESS
-  wiring exposes path, Host, compression, and subprotocols through `transport`.
-- **HTTP/2**: in-tree in `packages/http2`, limited to transport needs: framing,
-  HPACK (including Huffman decode), SETTINGS, flow control, GOAWAY, 1xx and
-  trailers. Bounded 16-stream multiplexing; `src/transport/h2_*.zig` expose
-  `Stream` and a dialer. The HTTP/2 server adapter can accept multiple streams,
-  but `Instance` currently serves one VLESS stream per H2 connection; root
-  pooling/multiplexing is a follow-up.
-- **gRPC**: Phase 3, built on the HTTP/2 package.
-- **QUIC**: in-tree, Phase 3; QUIC v1, stream multiplexing, datagrams, and
-  pluggable congestion control (NewReno, Brutal). No 0-RTT in v1.
-- **Config validation** rejects a transport or protocol that is not implemented
-  yet; there is no runtime fallback or hidden backend.
-
-Crypto primitives come from `std.crypto` only; never implement AES, ChaCha20,
-Poly1305, BLAKE, SHA, HKDF, or X25519 by hand. `std.crypto.hash.Md5` exists but
-is only acceptable for legacy VMess compatibility, which is not planned.
-Hand-written handshakes require transcript fixtures, fuzzing, and external
-review before any production-readiness claim.
+- **No forked TLS, HTTP/2, or WebSocket.** When a needed capability is missing
+  upstream, pin a newer version; do not fork a transport into this repository.
+- **One crypto provider.** `aws-lc-rs` (the `rustls` default) is pinned; it
+  requires a C toolchain and assembly. `ring` is not a second supported
+  backend. ADR-0018 records the accepted build prerequisite.
+- **Crypto primitives** come from the TLS provider or RustCrypto crates
+  (`aes-gcm`, `chacha20poly1305`, `blake3`); never implement AES, ChaCha20,
+  Poly1305, BLAKE, SHA, HKDF, or X25519 by hand.
+- **License gate.** CI rejects GPL/AGPL/MPL with a `cargo tree --format '{l}'`
+  check; dependency-changing PRs record the same output as a license review.
+  `cargo-audit` covers advisories; `Cargo.lock` is committed and CI uses
+  `--locked`.
+- **Config validation** rejects a transport or protocol that is not
+  implemented yet; there is no runtime fallback or hidden backend.
 
 ## 14. Public API and configuration
 
-Library lifecycle:
+The API follows the shape Rust network libraries converged on: a builder for
+construction, a future for running, and a cloneable handle for control. Hyper
+separates protocol construction (`Builder`) from connection driving
+(`serve_connection`); marmo separates instance construction (`InstanceBuilder`)
+from listener driving (`bind`/`serve`). Hyper's `Service` is per request; the
+per-connection equivalent here is `Inbound`/`Outbound`.
 
-```zig
-var diagnostic: marmo.Diagnostic = .{};
-defer diagnostic.deinit();
+| Idiom (hyper / axum / tokio) | marmo |
+| --- | --- |
+| `hyper::server::conn::http1::Builder` | `Instance::builder(config)` |
+| `Builder::serve_connection(io, service)` | `Instance::bind().await` → `BoundInstance::serve()` |
+| `axum::serve(listener, app)` | `Instance::serve()` / `serve_with_shutdown(fut)` |
+| `.with_graceful_shutdown(signal)` | `serve_with_shutdown(signal)` |
+| `hyper_util::server::graceful::GracefulShutdown` | `InstanceHandle::shutdown()` + drain |
+| `TcpListener::bind(addr).await` | `Instance::bind().await` |
+| `tokio::spawn(task)` | `handle()` then spawn `serve()` |
+| `tower::Service` | `Inbound` / `Outbound` traits (internal) |
 
-var instance = marmo.Instance.init(gpa, io, config, &diagnostic) catch |err| {
-    std.log.err("config: {f}", .{diagnostic});
-    return err;
-};
-defer instance.deinit();
-try instance.start();
-try instance.wait();   // or block until the embedder calls stop()
-try instance.stop();
+Design rules:
+
+- **Build is pure; bind and serve do I/O.** `Config::from_json` parses and
+  validates the schema; `build()` compiles rules and selector graphs and
+  allocates long-lived state. Neither opens a socket nor reads a file.
+- **No `&mut self` lifecycle.** `bind`/`serve` consume the instance, and
+  `handle()` returns a `Clone` control handle, so ownership stays obvious.
+- **Shutdown is a future, not a timeout argument.** Cancellation is a
+  `Future<Output = ()>` (a signal, a `CancellationToken::cancelled()`, or
+  `std::future::pending()`), and the grace period is a builder option.
+- **The runtime is ambient by default.** The builder uses
+  `Handle::try_current()` and fails with `BuildError::NoRuntime` outside a
+  runtime; `.runtime(handle)` overrides it.
+- **Errors are values, not a side channel.** No `Diagnostic` out-parameter;
+  `thiserror` enums carry the config path and the inbound tag.
+
+### 14.1 Lifecycle
+
+```rust
+// Pure: parse, validate, compile rules.
+let config = marmo::Config::from_json(&text)?;
+
+// Pure: no sockets, no files, no tasks.
+let instance = marmo::Instance::builder(config)
+    .runtime(runtime.handle().clone())        // optional; Handle::try_current()
+    .metrics(sink)                            // optional
+    .shutdown_grace(Duration::from_secs(10))  // default 10 s
+    .build()?;
+
+// Batteries-included: bind, accept, and drain when the signal resolves.
+instance
+    .serve_with_shutdown(async {
+        tokio::signal::ctrl_c().await.ok();
+    })
+    .await?;
 ```
 
-- `init` parses and validates everything, allocates all long-lived state, and
-  fills `diagnostic` on failure. It performs no I/O.
-- `start` binds listeners, starts health checks, and returns. Partial startup
-  failures roll back already-bound listeners.
-- `stop` is idempotent, cancel-safe, and bounded by a configurable grace period.
-- Config is JSON parsed with `std.json` in strict mode (unknown fields are
-  errors) and validated with path-aware diagnostics (`inbounds[0].port`).
-- Global `limits` (`max_connections`, handshake/idle/half-close timeouts) are
-  validated before startup; the runtime enforces them with one reaper per
-  `Instance` and an atomic connection counter.
-- VLESS inbounds/outbounds accept an optional strict `transport` object
-  (`network: tcp|ws|h2`, path, host, WS compression/subprotocols); other
-  protocols reject it (ADR-0016).
-  Parsing is a library API, not an application layer; `Config` can also be built
-  directly and goes through the same validator.
-- Secrets are never logged; `Debug` output redacts passwords, UUIDs, and keys.
-- No C ABI in v1. Semver applies to the Zig API; pre-1.0 may break between
+### 14.2 Explicit binding and control
+
+For readiness, port 0 in tests, or a GUI that starts and stops the proxy:
+
+```rust
+let bound = instance.bind().await?;      // binds every inbound, rolls back on error
+for addr in bound.local_addrs() {
+    tracing::info!(tag = addr.tag, network = ?addr.network, %addr.addr, "listening");
+}
+
+let ctl = bound.handle();                // Clone + Send + Sync
+let serve = tokio::spawn(bound.serve()); // drains when ctl.shutdown() is called
+ctl.shutdown();                          // non-blocking, idempotent
+serve.await??;
+```
+
+`BoundInstance::serve()` runs until the handle shuts down or a listener fails.
+`serve_with_shutdown(fut)` additionally stops when `fut` resolves; the internal
+handle and the external future are combined with `select!`. Dropping a serve
+future cancels it but does not wait.
+
+### 14.3 Types
+
+```rust
+pub struct Config { /* owned; no borrows */ }
+
+impl Config {
+    /// Strict JSON, version 2. Unknown fields and duplicate keys are errors.
+    pub fn from_json(text: &str) -> Result<Self, ConfigError>;
+}
+
+impl std::str::FromStr for Config {
+    type Err = ConfigError;
+    fn from_str(text: &str) -> Result<Self, Self::Err> { Self::from_json(text) }
+}
+
+pub struct Instance { /* Arc<Inner> */ }        // Send + Sync + 'static
+
+impl Instance {
+    pub fn builder(config: Config) -> InstanceBuilder;
+    pub fn handle(&self) -> InstanceHandle;
+
+    pub async fn bind(self) -> Result<BoundInstance, BindError>;
+    pub async fn serve(self) -> Result<(), ServeError>;
+    pub async fn serve_with_shutdown<F>(self, shutdown: F) -> Result<(), ServeError>
+    where
+        F: Future<Output = ()> + Send + 'static;
+}
+
+pub struct InstanceBuilder { /* ... */ }
+
+impl InstanceBuilder {
+    pub fn runtime(self, handle: tokio::runtime::Handle) -> Self;
+    pub fn metrics(self, sink: Arc<dyn MetricsSink>) -> Self;
+    pub fn shutdown_grace(self, grace: Duration) -> Self;
+    pub fn build(self) -> Result<Instance, BuildError>;
+}
+
+pub struct BoundInstance { /* bound listeners + compiled state */ }
+
+impl BoundInstance {
+    pub fn local_addrs(&self) -> impl Iterator<Item = BoundAddr<'_>>;
+    pub fn handle(&self) -> InstanceHandle;
+    pub async fn serve(self) -> Result<(), ServeError>;
+    pub async fn serve_with_shutdown<F>(self, shutdown: F) -> Result<(), ServeError>
+    where
+        F: Future<Output = ()> + Send + 'static;
+}
+
+pub struct BoundAddr<'a> {
+    pub tag: &'a str,
+    pub network: Network,
+    pub addr: SocketAddr,
+}
+
+#[derive(Clone)]
+pub struct InstanceHandle { /* CancellationToken */ }
+
+impl InstanceHandle {
+    pub fn shutdown(&self);          // non-blocking, idempotent
+    pub fn is_shutdown(&self) -> bool;
+}
+```
+
+Errors:
+
+- `ConfigError` renders the JSON path (`inbounds[0].port`) via
+  `serde_path_to_error`; it is the only error a config typo produces.
+- `BuildError` covers `NoRuntime`, unresolved outbound/tag references, and
+  selector-graph invariants. No I/O happens here.
+- `BindError` carries the inbound tag, the resolved address, and the
+  `io::Error`. A partial bind rolls back every listener already bound.
+- `ServeError` is fatal listener failure or a drain failure; normal shutdown
+  returns `Ok(())`. `serve()` binds internally, so bind failures surface as
+  `ServeError::Bind`; `bind()` returns `BindError` directly.
+- All are `#[non_exhaustive]` and implement `std::error::Error`; `anyhow` never
+  appears in a public signature.
+
+`Config` implements `FromStr`, so `text.parse()?` is equivalent to
+`Config::from_json(text)`. There is no `tower::Service` at the facade: a
+proxy's unit of work is a connection, not a request. `Inbound` and `Outbound`
+are the runtime-chosen traits, and `tower` compatibility is not promised.
+
+### 14.4 Configuration and secrets
+
+- Config is strict JSON (`"version": 2`): unknown fields rejected, duplicate
+  keys rejected, defaults documented. TLS credentials are inline PEM in the
+  configuration (ADR-0023), so a version 1 document with file paths is
+  rejected explicitly rather than parsed as DER.
+- Global `limits` (`max_connections`, `handshake_timeout_s`,
+  `idle_timeout_s`, `uplink_only_s`, `downlink_only_s`) are validated in
+  `build()`. UDP session caps remain per-inbound fixed bounds.
+- The library performs no filesystem I/O for credentials: `build()` and
+  `bind()` never read files, and `spawn_blocking` is not needed on this path.
+- Secrets use `SecretString`/`zeroize`; `Debug` redacts passwords, UUIDs, and
+  keys. No payload, credential, or SNI is logged at `info`.
+- The library installs no global tracing subscriber and no signal handler; the
+  embedder owns both.
+- No C ABI in v1. Semver applies to the Rust API; pre-1.0 may break between
   minor versions.
 
-There is no CLI, daemon, or `app` layer in this repository. Embedders create
-`Io.Threaded` (or `Io.Evented`), decide how to wait and shut down, and install
-their own signal handlers. `Instance` is the only composition root.
+There is no CLI, daemon, or `app` layer. `Instance` is the only composition
+root.
 
-## 15. Repository layout (current and planned)
+## 15. Repository layout
 
-```
-.agents/skills/          OpenCode skills, including the ADR workflow
-build.zig
-build.zig.zon
-src/root.zig              public API re-exports
-src/core/                 Io usage, limits, buffers, errors, logging
-src/net/                  endpoints, sockets, resolver interface
-src/transport/            tcp, tls, ws, h2, quic, framing
-src/protocol/             shadowsocks, vmess, vless, trojan, tuic, hysteria2
-src/inbound/              socks5, http, mixed, shadowsocks, ...
-src/outbound/             direct, proxies, groups, health
-src/routing/              rules, rule sets, sniffer
-src/dns/                  resolver, cache
-src/instance.zig          public facade: config, wiring, metrics
-src/config/               schema, JSON, validation
-examples/shadowsocks2022/ standalone SS2022 example
-packages/tls13/           in-tree TLS 1.3 client/server and ALPN
-packages/http2/           in-tree HTTP/2 transport subset
-packages/ws/              in-tree WebSocket transport
+```text
+Cargo.toml                 workspace + MSRV
+crates/
+  marmo/                   facade: Instance, config, routing, inbound, outbound
+    tests/                 loopback integration tests
+    examples/              runnable examples
+  marmo-proto/             codecs, no I/O
+  marmo-net/               endpoints, CIDR, network
+  marmo-transport/         stream traits, Layer adapters, relay
+fuzz/                      cargo-fuzz crate and corpus
 docs/
-  architecture.md
-  decisions/
-  protocols/              per-protocol notes and sources
-  security/               threat model, audit findings, residual risks
-tests/                    fuzz harness, fixtures, loopback integration tests
+  architecture.md          this file
+  decisions/               ADR index and records
+  protocols/               protocol notes and sources
+  security/                threat model, audit findings
 ```
 
-Module boundaries are enforced by review, not by the compiler; do not import
-`inbound` from `transport`, or `outbound` from `routing`.
+Module boundaries inside `marmo` are enforced by review, not by the compiler.
 
 ## 16. Testing strategy
 
-- Unit tests live beside the code (`test "..."` blocks) and must not need
-  network access.
-- Integration tests bind loopback listeners on port 0 and exercise real
-  sockets through `Io.Threaded`; run the same suite with `Io.Evented` where the
-  architecture supports fibers.
-- Protocol tests use synthetic byte fixtures built from the public protocol
-  specifications in `tests/fixtures/<protocol>/`. No live third-party servers
-  in CI.
-- Each inbound decoder and the TLS handshake/record parsers has a bounded fuzz
-  target; stateful handlers rely on unit and integration tests:
-  `zig build fuzz` runs fixed seeds and iteration counts by default
-  (`-Dfuzz-seed`, `-Dfuzz-iterations`). Malformed input must return a typed
-  error, never panic. The deterministic corpus smoke runs in `zig build test`;
-  `zig build test --fuzz` is opt-in and unbounded.
-- CI matrix: Linux x86_64 and macOS arm64 at minimum; a single-threaded build
-  catches hidden thread assumptions.
-- Benchmarks are opt-in and never part of `zig build test`.
-- Security review, threat model, findings, and residual risks live in
-  [`docs/security/audit.md`](security/audit.md). Protocol sources and fixture
-  provenance are in [`docs/protocols/`](protocols/README.md).
+- Unit tests live beside the code and need no network. `#[tokio::test]` runs
+  both `current_thread` and `multi_thread` flavors for concurrency-sensitive
+  tests.
+- `tokio::io::duplex` replaces sockets for codec and relay tests;
+  `tokio::time::pause()` makes timeout and half-close tests deterministic.
+- Integration tests bind loopback port 0 and exercise real sockets through
+  tokio. No live third-party servers in CI.
+- Protocol tests use synthetic vectors and the fuzz corpus in `fuzz/corpus/`;
+  no fixture is a capture of real traffic.
+- `proptest` covers parsers and config validation; `cargo-fuzz` covers every
+  decoder and the framing glue we own (nightly only). Malformed input returns
+  a typed error, never panics.
+- Interop runs against self-hosted reference binaries outside CI. No GPL code
+  is linked, ported, or distributed.
+- CI matrix: Linux x86_64, macOS arm64, Windows x86_64; `cargo fmt --check`,
+  `clippy -D warnings`, `cargo test`, `cargo audit`, and the copyleft check.
+- Benchmarks (`criterion`) and `miri`/`loom` runs are opt-in and never part of
+  the default test job.
 
 ## 17. Observability
 
-- `std.log` with scoped fields (`inbound`, `outbound`, `session`, `rule`) and
-  levels; default level is `info`.
-- Counters: accepted/active/failed connections, bytes per direction, UDP
-  sessions, rule hits, health-check latency/failures, dropped datagrams.
-- Optional `MetricsSink` interface for embedders; no Prometheus dependency in
-  the core.
-- Never log payload bytes, credentials, UUIDs, or full SNI at `info`.
+- `tracing` spans per connection (`inbound`, `outbound`, `network`, hashed
+  SNI) and per UDP session; default level is `info`.
+- Counters: accepted/active/rejected/failed connections, bytes per direction,
+  UDP sessions, rule hits, health-check latency/failures, dropped datagrams.
+- Optional `MetricsSink` for embedders; no Prometheus dependency in the core.
+- Secrets and payloads are never recorded as span fields; redaction is a
+  review checklist item, not a best-effort filter.
 
-## 18. Risks and open questions
+## 18. Security
+
+- The threat model, audit findings, obligations, and residual risks are in
+  [`docs/security/audit.md`](security/audit.md).
+- Untrusted bytes never panic, recurse, or allocate unboundedly. Decoders are
+  fuzzed; length fields are bounded before allocation.
+- Secrets are zeroized and compared in constant time; `unsafe` is
+  `forbid`-denied in `marmo-proto` and `marmo` and requires a written
+  justification in `marmo-transport`.
+- Dependency surface is part of the security surface: pinned lockfile, the
+  copyleft check, `cargo-audit`, and a documented review before accepting a new
+  crate with `unsafe` or a build script.
+- Cancellation safety is a security property: a dropped protocol state machine
+  must not leave a half-authenticated session reachable.
+
+## 19. Roadmap
+
+The implementation is complete for the current release. The dependency-ordered
+work list is in [`roadmap.md`](roadmap.md); the summary is:
+
+| Item | Enabled by |
+| --- | --- |
+| QUIC, TUIC, Hysteria2 | `quinn` |
+| DNS cache and DoH/DoT | `hickory-resolver` |
+| gRPC transport | `h2`/`tonic` |
+| XHTTP transport | `h2`, later `quinn` (`h3`) |
+| Rule sets, GEOIP/GEOSITE, process rules | `aho-corasick`, `sysinfo` |
+| HTTP/2 root multiplexing and pooling | `h2` |
+| `http_head` health checks, jitter, backoff | `tokio::time` |
+
+## 20. Risks and open questions
 
 | Risk | Mitigation |
 | --- | --- |
-| `std.Io` API churn before 1.0 | pin Zig, isolate behind core interfaces |
-| std lacks TLS server, QUIC, H2, WS | implement in-tree per ADR-0007, phase gates |
-| Hand-written TLS/QUIC state machines | narrow scope, test vectors, fuzzing, external review; no production claim before audit |
-| GEOIP/GEOSITE data licensing | tool-level docs, user-supplied data |
-| Process matching portability/privileges | best-effort, opt-in, never fatal |
-| Decoder attack surface | fuzzing, bounded parsing, no panics |
-| LGPL-2.1 static linking obligations | document in README; legal review before release |
-| Dynamic config reload races | rebuild state, then atomic swap; no in-place mutation |
+| Cancellation-safety bugs in protocol state machines | drop-mid-await tests; `select!` review |
+| Dependency supply chain | pinned lockfile, `--locked`, copyleft check, `cargo-audit`, review new build scripts |
+| C toolchain friction on Windows/macOS | one pinned provider, CI images documented; a platform that cannot build `aws-lc-rs` needs a new ADR, not a silent backend switch |
+| License-change consent | both copyright holders must agree; ADR-0020 records the decision |
+| Tokio lock-in | accepted in ADR-0017; codecs and policy remain runtime-free |
+| Ecosystem churn in `rustls`/`quinn`/`h2` | adapters isolate versions; pin minor ranges |
+| External audit | not yet commissioned; required before a production-readiness claim |
 
-## 19. Decision index
+Open questions:
+
+- Whether a second runtime is required by an actual embedder (revisit ADR-0017
+  only with a named embedder and a budget).
+- Whether to publish crates individually or only `marmo` at 1.0.
+- Whether Hysteria2's Brutal controller fits `quinn`'s controller trait.
+
+## 21. Decision index
+
+Current decisions are ADR-0017 through ADR-0023. Historical decisions from the
+initial implementation are ADR-0001 through ADR-0016 and remain in
+[`docs/decisions/`](decisions/README.md); their bodies are unchanged.
 
 | ADR | Topic | Status |
 | --- | --- | --- |
-| [0001](decisions/0001-io-runtime.md) | I/O and concurrency runtime | Accepted |
-| [0002](decisions/0002-scope-and-phasing.md) | Scope and delivery phases | Accepted |
-| [0003](decisions/0003-core-abstractions.md) | Core interfaces and dispatch | Accepted |
-| [0004](decisions/0004-transport-composition.md) | Transport composition | Accepted |
-| [0005](decisions/0005-routing-engine.md) | Routing engine | Accepted |
-| [0006](decisions/0006-outbound-selection.md) | Outbound groups and selection | Accepted |
-| [0007](decisions/0007-tls-quic-dependencies.md) | TLS, QUIC, crypto dependencies (std-first) | Accepted |
-| [0008](decisions/0008-api-and-config.md) | Public API, config, errors | Accepted |
-| [0009](decisions/0009-licensing-and-interop.md) | Licensing and interop hygiene | Accepted |
-| [0010](decisions/0010-tls-module-package.md) | TLS module as a replaceable package | Accepted |
-| [0011](decisions/0011-trojan-inbound-fallback.md) | Trojan inbound fallback | Accepted |
-| [0012](decisions/0012-tls-alpn.md) | TLS ALPN negotiation | Accepted |
-| [0013](decisions/0013-http2-package.md) | HTTP/2 transport package | Accepted |
-| [0014](decisions/0014-websocket-package.md) | WebSocket transport package | Accepted |
-| [0015](decisions/0015-connection-limits-and-timeouts.md) | Connection limits and idle timeouts | Accepted |
-| [0016](decisions/0016-protocol-transport-wiring.md) | Protocol transport composition wiring | Accepted |
+| [0017](decisions/0017-language-and-runtime.md) | Language, runtime, and interface model | Accepted |
+| [0018](decisions/0018-dependencies-and-crypto.md) | Dependencies and crypto backend | Accepted |
+| [0019](decisions/0019-workspace-and-packaging.md) | Workspace layout and packaging | Accepted |
+| [0020](decisions/0020-license.md) | License change | Accepted |
+| [0021](decisions/0021-websocket-backend.md) | WebSocket backend and permessage-deflate | Accepted |
+| [0022](decisions/0022-vless-http2-method.md) | VLESS HTTP/2 transport method | Accepted |
+| [0023](decisions/0023-tls-credentials-inline.md) | TLS credentials as inline configuration | Accepted |
