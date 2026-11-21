@@ -121,7 +121,8 @@ that points at the same listener.
   forwards it to the client; it does not verify that the source matches the
   original destination.
 - No custom CA file or certificate pinning for the outbound; verification uses
-  the host CA bundle or `insecure`, as with VLESS.
+  the platform bundle. `tls.insecure` is restricted to loopback test servers,
+  as with VLESS.
 - No Trojan-specific metrics beyond the shared connection/byte/UDP counters.
 
 ## Tests
