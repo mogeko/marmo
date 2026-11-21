@@ -16,6 +16,7 @@ use marmo_proto::shadowsocks::{Key, Method};
 use marmo_proto::trojan::PasswordHash;
 use marmo_proto::vless::Uuid;
 use marmo_transport::BoxStream;
+use marmo_transport::h2::{H2Client, H2ClientOptions, H2Server, H2ServerOptions};
 use marmo_transport::tls::{TlsClient, TlsClientOptions, TlsServer, TlsServerOptions};
 use marmo_transport::ws::{WsClient, WsClientOptions, WsServer, WsServerOptions};
 use thiserror::Error;
@@ -224,23 +225,29 @@ impl InstanceBuilder {
                     }
                 }
                 InboundProtocol::Vless => {
-                    let ws = match inbound.transport.as_ref() {
-                        None => None,
+                    let mut ws = None;
+                    let mut h2 = None;
+                    match inbound.transport.as_ref() {
+                        None => {}
                         Some(transport) => match transport.network {
-                            StreamNetwork::Tcp => None,
-                            StreamNetwork::Ws => Some(WsServerOptions {
-                                path: transport.path.clone(),
-                                subprotocols: transport.subprotocols.clone().unwrap_or_default(),
-                                compression: transport.compression,
-                            }),
+                            StreamNetwork::Tcp => {}
+                            StreamNetwork::Ws => {
+                                ws = Some(WsServerOptions {
+                                    path: transport.path.clone(),
+                                    subprotocols: transport
+                                        .subprotocols
+                                        .clone()
+                                        .unwrap_or_default(),
+                                    compression: transport.compression,
+                                });
+                            }
                             StreamNetwork::H2 => {
-                                return Err(BuildError::InboundOption {
-                                    tag: inbound.tag.clone(),
-                                    reason: "h2 transport is not implemented yet".into(),
+                                h2 = Some(H2ServerOptions {
+                                    path: transport.path.clone(),
                                 });
                             }
                         },
-                    };
+                    }
                     let Some(tls) = inbound.tls.as_ref() else {
                         return Err(BuildError::InboundOption {
                             tag: inbound.tag.clone(),
@@ -257,10 +264,15 @@ impl InstanceBuilder {
                         tag: inbound.tag.clone(),
                         reason: "invalid vless uuid".into(),
                     })?;
+                    let mut tls = InboundTlsConfig::new(tls);
+                    if h2.is_some() && tls.alpn.is_empty() {
+                        tls.alpn.push("h2".into());
+                    }
                     InboundConfig::Vless {
                         uuid: Arc::new(uuid),
-                        tls: InboundTlsConfig::new(tls),
+                        tls,
                         ws,
+                        h2,
                     }
                 }
             };
@@ -348,7 +360,7 @@ impl InstanceBuilder {
                             reason: "tls is required for trojan".into(),
                         });
                     };
-                    let tls = outbound_tls_config(tls, &server, &outbound.tag, None)?;
+                    let tls = outbound_tls_config(tls, &server, &outbound.tag, None, None)?;
                     OutboundConfig::Trojan {
                         server,
                         password: Arc::new(PasswordHash::derive(password)),
@@ -377,46 +389,61 @@ impl InstanceBuilder {
                         tag: outbound.tag.clone(),
                         reason: "invalid vless uuid".into(),
                     })?;
-                    let ws = match outbound.transport.as_ref() {
-                        None => None,
+                    let mut ws = None;
+                    let mut h2 = None;
+                    match outbound.transport.as_ref() {
+                        None => {}
                         Some(transport) => match transport.network {
-                            StreamNetwork::Tcp => None,
+                            StreamNetwork::Tcp => {}
                             StreamNetwork::Ws => {
-                                let host = transport
-                                    .host
-                                    .clone()
-                                    .or_else(|| {
-                                        outbound.tls.as_ref().and_then(|tls| tls.sni.clone())
-                                    })
-                                    .or_else(|| server.domain().map(str::to_owned))
-                                    .or_else(|| server.ip().map(host_from_ip))
-                                    .ok_or_else(|| BuildError::OutboundOption {
-                                        tag: outbound.tag.clone(),
-                                        reason: "ws host is missing".into(),
-                                    })?;
-                                Some(WsClientOptions {
-                                    host,
+                                ws = Some(WsClientOptions {
+                                    host: transport_host(
+                                        transport,
+                                        outbound.tls.as_ref(),
+                                        &server,
+                                        &outbound.tag,
+                                        "ws",
+                                    )?,
                                     path: transport.path.clone(),
                                     subprotocols: transport
                                         .subprotocols
                                         .clone()
                                         .unwrap_or_default(),
                                     compression: transport.compression,
-                                })
+                                });
                             }
                             StreamNetwork::H2 => {
-                                return Err(BuildError::OutboundOption {
-                                    tag: outbound.tag.clone(),
-                                    reason: "h2 transport is not implemented yet".into(),
+                                h2 = Some(H2ClientOptions {
+                                    host: transport_host(
+                                        transport,
+                                        outbound.tls.as_ref(),
+                                        &server,
+                                        &outbound.tag,
+                                        "h2",
+                                    )?,
+                                    path: transport.path.clone(),
                                 });
                             }
                         },
+                    }
+                    let default_alpn = match (ws.as_ref(), h2.as_ref()) {
+                        (_, Some(_)) => Some("h2"),
+                        (Some(_), None) => Some("http/1.1"),
+                        (None, None) => None,
                     };
-                    let default_alpn = ws.as_ref().map(|_| "http/1.1");
+                    let required_alpn = h2.as_ref().map(|_| "h2");
                     let tls = outbound
                         .tls
                         .as_ref()
-                        .map(|tls| outbound_tls_config(tls, &server, &outbound.tag, default_alpn))
+                        .map(|tls| {
+                            outbound_tls_config(
+                                tls,
+                                &server,
+                                &outbound.tag,
+                                default_alpn,
+                                required_alpn,
+                            )
+                        })
                         .transpose()?;
                     OutboundConfig::Vless {
                         server,
@@ -424,6 +451,7 @@ impl InstanceBuilder {
                         tls,
                         xudp: outbound.xudp,
                         ws,
+                        h2,
                     }
                 }
                 OutboundProtocol::Selector => {
@@ -640,12 +668,14 @@ impl Context {
                     uuid,
                     tls,
                     ws,
+                    h2,
                     ..
                 }) => {
                     let (stream, bound) = outbound::vless::connect(
                         server,
                         tls.as_deref(),
                         ws.as_deref(),
+                        h2.as_deref(),
                         uuid,
                         target,
                     )
@@ -708,6 +738,7 @@ impl Context {
                     tls,
                     xudp,
                     ws,
+                    h2,
                 }) => {
                     if *xudp {
                         Ok(Some(UdpOutbound::VlessXudp(
@@ -715,6 +746,7 @@ impl Context {
                                 server,
                                 tls.as_deref(),
                                 ws.as_deref(),
+                                h2.as_deref(),
                                 uuid,
                                 target,
                             )
@@ -726,6 +758,7 @@ impl Context {
                                 server,
                                 tls.as_deref(),
                                 ws.as_deref(),
+                                h2.as_deref(),
                                 uuid,
                                 target,
                             )
@@ -771,6 +804,7 @@ pub(crate) enum OutboundKind {
         tls: Option<Arc<TlsClient>>,
         xudp: bool,
         ws: Option<Arc<WsClient>>,
+        h2: Option<Arc<H2Client>>,
     },
 }
 
@@ -791,6 +825,7 @@ enum InboundKind {
         uuid: Arc<Uuid>,
         tls: Arc<TlsServer>,
         ws: Option<Arc<WsServer>>,
+        h2: Option<Arc<H2Server>>,
     },
 }
 
@@ -816,6 +851,7 @@ enum InboundConfig {
         uuid: Arc<Uuid>,
         tls: InboundTlsConfig,
         ws: Option<WsServerOptions>,
+        h2: Option<H2ServerOptions>,
     },
 }
 
@@ -854,10 +890,11 @@ impl InboundConfig {
                 tls: build_tls_server(&tls, tag)?,
                 fallback,
             },
-            Self::Vless { uuid, tls, ws } => InboundKind::Vless {
+            Self::Vless { uuid, tls, ws, h2 } => InboundKind::Vless {
                 uuid,
                 tls: build_tls_server(&tls, tag)?,
                 ws: ws.map(|options| Arc::new(WsServer::new(options))),
+                h2: h2.map(|options| Arc::new(H2Server::new(options))),
             },
         })
     }
@@ -889,6 +926,7 @@ enum OutboundConfig {
         tls: Option<OutboundTlsConfig>,
         xudp: bool,
         ws: Option<WsClientOptions>,
+        h2: Option<H2ClientOptions>,
     },
 }
 
@@ -931,6 +969,7 @@ impl OutboundSpec {
                 tls,
                 xudp,
                 ws,
+                h2,
             } => OutboundKind::Vless {
                 server,
                 uuid,
@@ -940,9 +979,29 @@ impl OutboundSpec {
                     .transpose()?,
                 xudp,
                 ws: ws.map(|options| Arc::new(WsClient::new(options))),
+                h2: h2.map(|options| Arc::new(H2Client::new(options))),
             },
         })
     }
+}
+
+fn transport_host(
+    transport: &crate::config::StreamTransport,
+    tls: Option<&crate::config::Tls>,
+    server: &Endpoint,
+    tag: &str,
+    kind: &str,
+) -> Result<String, BuildError> {
+    transport
+        .host
+        .clone()
+        .or_else(|| tls.and_then(|tls| tls.sni.clone()))
+        .or_else(|| server.domain().map(str::to_owned))
+        .or_else(|| server.ip().map(host_from_ip))
+        .ok_or_else(|| BuildError::OutboundOption {
+            tag: tag.to_owned(),
+            reason: format!("{kind} host is missing"),
+        })
 }
 
 fn host_from_ip(ip: std::net::IpAddr) -> String {
@@ -988,6 +1047,7 @@ fn outbound_tls_config(
     server: &Endpoint,
     tag: &str,
     default_alpn: Option<&str>,
+    required_alpn: Option<&str>,
 ) -> Result<OutboundTlsConfig, BuildError> {
     let server_name = tls
         .sni
@@ -1005,7 +1065,10 @@ fn outbound_tls_config(
     Ok(OutboundTlsConfig {
         server_name,
         alpn,
-        required_alpn: tls.required_alpn.clone(),
+        required_alpn: tls
+            .required_alpn
+            .clone()
+            .or_else(|| required_alpn.map(str::to_owned)),
         insecure: tls.insecure,
         client_certificate: tls.client_certificate.clone(),
         client_private_key: tls.client_private_key.clone(),
@@ -1116,7 +1179,12 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                             )
                             .await;
                         }
-                        InboundKind::Vless { uuid, tls, ws } => {
+                        InboundKind::Vless {
+                            uuid,
+                            tls,
+                            ws,
+                            h2,
+                        } => {
                             inbound::vless::handle(
                                 stream,
                                 task_context,
@@ -1124,6 +1192,7 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                                 uuid,
                                 tls,
                                 ws,
+                                h2,
                             )
                             .await;
                         }

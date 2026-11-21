@@ -9,6 +9,7 @@ use marmo_proto::vless::{
 };
 use marmo_proto::xudp::{STATUS_END, STATUS_KEEP, STATUS_KEEPALIVE, STATUS_NEW};
 use marmo_transport::BoxStream;
+use marmo_transport::h2::H2Client;
 use marmo_transport::tls::TlsClient;
 use marmo_transport::ws::WsClient;
 use tokio::io::AsyncWriteExt;
@@ -23,10 +24,11 @@ pub(crate) async fn connect(
     server: &Endpoint,
     tls: Option<&TlsClient>,
     ws: Option<&WsClient>,
+    h2: Option<&H2Client>,
     uuid: &Uuid,
     target: &Endpoint,
 ) -> io::Result<(BoxStream, Option<SocketAddr>)> {
-    let (mut stream, bound) = open_stream(server, tls, ws).await?;
+    let (mut stream, bound) = open_stream(server, tls, ws, h2).await?;
     write_request(&mut stream, uuid, target, COMMAND_TCP).await?;
     Ok((Box::new(ClientStream::new(stream)), bound))
 }
@@ -82,10 +84,11 @@ pub(crate) async fn connect_udp(
     server: &Endpoint,
     tls: Option<&TlsClient>,
     ws: Option<&WsClient>,
+    h2: Option<&H2Client>,
     uuid: &Uuid,
     target: &Endpoint,
 ) -> io::Result<VlessUdpClient> {
-    let (mut stream, _bound) = open_stream(server, tls, ws).await?;
+    let (mut stream, _bound) = open_stream(server, tls, ws, h2).await?;
     write_request(&mut stream, uuid, target, COMMAND_UDP).await?;
     read_response_header(&mut stream).await?;
     Ok(VlessUdpClient {
@@ -163,10 +166,11 @@ pub(crate) async fn connect_xudp(
     server: &Endpoint,
     tls: Option<&TlsClient>,
     ws: Option<&WsClient>,
+    h2: Option<&H2Client>,
     uuid: &Uuid,
     target: &Endpoint,
 ) -> io::Result<VlessXudpClient> {
-    let (mut stream, _bound) = open_stream(server, tls, ws).await?;
+    let (mut stream, _bound) = open_stream(server, tls, ws, h2).await?;
     let mut header = [0_u8; 1 + 16 + 1 + 1];
     let length = encode_mux_request(uuid, &mut header)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
@@ -184,6 +188,7 @@ async fn open_stream(
     server: &Endpoint,
     tls: Option<&TlsClient>,
     ws: Option<&WsClient>,
+    h2: Option<&H2Client>,
 ) -> io::Result<(BoxStream, Option<SocketAddr>)> {
     let inner = crate::direct::connect(server).await?;
     let bound = inner.local_addr().ok();
@@ -193,6 +198,8 @@ async fn open_stream(
     };
     if let Some(ws) = ws {
         stream = ws.connect(stream).await.map_err(io::Error::other)?.stream;
+    } else if let Some(h2) = h2 {
+        stream = h2.connect(stream).await.map_err(io::Error::other)?;
     }
     Ok((stream, bound))
 }

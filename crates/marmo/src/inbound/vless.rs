@@ -9,6 +9,7 @@ use marmo_proto::vless::{
     Uuid, is_mux_target, request_progress,
 };
 use marmo_proto::xudp::{STATUS_END, STATUS_KEEP, STATUS_KEEPALIVE, STATUS_NEW};
+use marmo_transport::h2::H2Server;
 use marmo_transport::tls::TlsServer;
 use marmo_transport::ws::WsServer;
 use marmo_transport::{BoxStream, RelayOptions, relay};
@@ -38,6 +39,7 @@ pub(crate) async fn handle(
     uuid: Arc<Uuid>,
     tls: Arc<TlsServer>,
     ws: Option<Arc<WsServer>>,
+    h2: Option<Arc<H2Server>>,
 ) {
     let token = context.supervisor.token();
     let source = client.peer_addr().ok().map(Endpoint::from);
@@ -45,7 +47,7 @@ pub(crate) async fn handle(
         _ = token.cancelled() => return,
         result = timeout(
             context.limits.handshake_timeout,
-            prepare(client, &tls, ws.as_deref(), &uuid),
+            prepare(client, &tls, ws.as_deref(), h2.as_deref(), &uuid),
         ) => result,
     };
     let (
@@ -91,12 +93,15 @@ async fn prepare(
     client: TcpStream,
     tls: &TlsServer,
     ws: Option<&WsServer>,
+    h2: Option<&H2Server>,
     uuid: &Uuid,
 ) -> io::Result<Prepared> {
     let accepted = tls.accept(Box::new(client)).await.map_err(tls_error)?;
     let mut stream = accepted.stream;
     if let Some(ws) = ws {
         stream = ws.accept(stream).await.map_err(io::Error::other)?.stream;
+    } else if let Some(h2) = h2 {
+        stream = h2.accept(stream).await.map_err(io::Error::other)?;
     }
     let mut buffer = [0_u8; REQUEST_HEADER_MAX];
     let mut filled = 0;
