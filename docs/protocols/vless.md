@@ -163,8 +163,8 @@ The inbound always requires TLS; plaintext VLESS inbound is not supported.
 XHTTP (formerly SplitHTTP) is Xray's HTTP-carried transport and is not
 implemented. Current Xray releases removed their HTTP/2 transport in favour of
 XHTTP, so XHTTP is the transport to add when compatibility with current Xray
-peers is required. It is not in the current plan or the R5 schedule; it needs
-its own ADR and design.
+peers is required. It is tracked as roadmap item P3-6 and needs its own ADR
+before implementation; `h3` depends on the QUIC adapter.
 
 Planned scope when it is taken up:
 

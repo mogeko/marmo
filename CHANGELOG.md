@@ -66,7 +66,7 @@ and behavior may change between minor releases.
 
 ## Known limitations
 
-- VMess, QUIC/TUIC/Hysteria2, gRPC, DNS cache/DoH, sniffing, rule sets,
+- VMess, QUIC/TUIC/Hysteria2, gRPC/XHTTP, DNS cache/DoH, sniffing, rule sets,
   process rules, HTTP/2 root multiplexing/pooling, `http_head` health checks,
   jitter, and exponential backoff are not implemented.
 - `Instance` serves one VLESS stream per HTTP/2 connection.

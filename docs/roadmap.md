@@ -13,7 +13,7 @@
 | 0 | Decisions, workspace, CI, baseline | Complete |
 | 1 | Minimal usable proxy | Complete |
 | 2 | Full protocol/transport set, routing depth, selectors, DNS | In progress |
-| 3 | QUIC, TUIC, Hysteria2, gRPC | Not started |
+| 3 | QUIC, TUIC, Hysteria2, gRPC, XHTTP | Not started |
 | 4 | TUN/transparent, platform hardening, external audit | Not started |
 
 Phase 2 is not fully closed, so Phase 3 should not be treated as the only
@@ -79,7 +79,7 @@ any order after their dependencies.
 of Phase 2 by an ADR. VMess is currently deferred by the architecture; if it
 stays deferred, record that decision rather than leaving Phase 2 ambiguous.
 
-## Phase 3 — QUIC, TUIC, Hysteria2, gRPC
+## Phase 3 — QUIC, TUIC, Hysteria2, gRPC, XHTTP
 
 **Status: not started.** Phase 3 depends on Phase 2 closeout for release
 sequencing, but the QUIC adapter can be developed in parallel once the
@@ -92,10 +92,16 @@ datagram/endpoint boundary is settled.
 | P3-3 | TUIC inbound/outbound | Planned | P3-2 | Auth, stream/datagram relay, congestion config, reference interop | 2–3 d |
 | P3-4 | Hysteria2 inbound/outbound | Planned | P3-2 | TLS-over-QUIC, UDP relay, Brutal/congestion policy, reference interop | 2–4 d |
 | P3-5 | gRPC transport | Planned | P2-4 | `tonic`/H2 framing, `application/grpc`, trailers, VLESS/VMess interop | 1–2 d |
+| P3-6 | XHTTP transport | Planned (needs ADR) | P2-4; P3-2 for `h3` | `transport.network = "xhttp"`, stream-one first, reference interop, bounded bodies | 2–4 d |
+
+XHTTP is newer than ADR-0002: current Xray releases removed HTTP/2 in favour
+of XHTTP, so it is the compatibility transport to add after the H2 work. It
+needs its own ADR before implementation; `h3` depends on the QUIC adapter.
 
 **Phase 3 gate:** QUIC adapter bounded and cancellable; TUIC and Hysteria2
 interop against self-hosted reference implementations; gRPC framing/trailer
-tests; fuzz/decoder coverage where a new codec exists; docs updated.
+tests; XHTTP ADR and stream-one interop; fuzz/decoder coverage where a new
+codec exists; docs updated.
 
 Open question: Hysteria2's Brutal congestion controller must fit `quinn`'s
 controller trait, or the design needs an ADR before implementation.
@@ -126,6 +132,7 @@ P1 core (net, config, relay, limits)
   +--> P2-2 Trojan --+
   +--> P2-3 TLS -----+--> P2-4 WS/H2 --+--> P2-12 H2 pooling
   |                                    +--> P3-5 gRPC
+  |                                    +--> P3-6 XHTTP (h3 after P3-2)
   +--> P2-5 selectors/health
   +--> P1-6 routing --+--> P2-9 rule sets --> P4-1 TUN
                       +--> P2-10 process rules
@@ -146,9 +153,28 @@ P1 core (net, config, relay, limits)
    P2-11 DNS, P2-12 H2 pooling; record VMess as deferred or schedule it.
 2. Settle P3-1 datagram/endpoint boundary.
 3. Build P3-2 QUIC, then P3-3 TUIC and P3-4 Hysteria2.
-4. P3-5 gRPC can run in parallel once H2 is stable.
+4. P3-5 gRPC and P3-6 XHTTP can run in parallel once H2 is stable; XHTTP `h3`
+   follows P3-2.
 5. Phase 4 TUN/transparent depends on routing and platform work; external audit
    is last.
+
+## Post-1.0 backlog
+
+These are documented capabilities that are not part of the Phase 0-4 exit
+criteria. They are tracked here so they do not disappear from the docs.
+
+| ID | Item | Status | Notes |
+| --- | --- | --- | --- |
+| P5-1 | SOCKS5 outbound | Planned | architecture §2 marks it later work |
+| P5-2 | `http_head` health checks, jitter, exponential backoff | Planned | selection/health follow-up |
+| P5-3 | Config reload (`ArcSwap`) | Planned | architecture §5 |
+| P5-4 | `tracing` spans, structured logs, and complete metrics | Planned | architecture §17; add rule-hit, dropped-datagram, failure, and per-node health counters |
+| P5-5 | XUDP per-packet targets, GlobalID/cone NAT | Deferred | one fixed destination per stream today |
+| P5-6 | Shadowsocks 2022 ChaCha20, anti-probing, non-direct UDP, padding policies | Deferred | direct-only UDP today |
+| P5-7 | TLS resumption/0-RTT/ECH/OCSP/CRL | Deferred | depends on `rustls` capability |
+| P5-8 | Trojan-Go WebSocket/Mux/XTLS | Deferred | not part of standard Trojan |
+| P5-9 | WS early data/heartbeat; VLESS `flow`/XTLS Vision | Deferred | compatibility extensions |
+| P5-10 | Windows-specific process matching | Planned | with P2-10, best-effort |
 
 ## Out of scope
 

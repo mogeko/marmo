@@ -77,7 +77,7 @@ Everything else is post-1.0 work (§19):
 | --- | --- |
 | SOCKS5 CONNECT + UDP ASSOCIATE inbound | VMess |
 | HTTP CONNECT + forward inbound | QUIC, TUIC, Hysteria2 |
-| HTTP CONNECT outbound | gRPC transport |
+| HTTP CONNECT outbound | gRPC and XHTTP transports |
 | Shadowsocks 2022 TCP/UDP | DNS cache, DoH/DoT |
 | Trojan inbound/outbound (TLS, TCP/UDP, fallback) | GEOIP/GEOSITE rule sets |
 | VLESS inbound/outbound (TCP/TLS/WS/H2, TCP/UoT/XUDP) | sniffer, process rules |
@@ -472,8 +472,9 @@ and interop suite. `Future` means it is not part of the current release.
 VLESS supports TCP, simple UoT, and XUDP over TCP, TLS, WebSocket, and HTTP/2,
 with the strict `transport` object of ADR-0016. `Instance` serves one VLESS
 stream per HTTP/2 connection; root-level multiplexing/pooling is future work.
-gRPC is future work built on `h2`/`tonic`. VMess is deferred: legacy CFB is not
-planned.
+gRPC is future work built on `h2`/`tonic`. XHTTP is future work for current
+Xray compatibility (roadmap P3-6); it needs an ADR and `h3` depends on the QUIC
+adapter. VMess is deferred: legacy CFB is not planned.
 
 ## 13. Dependencies and transports
 
@@ -773,6 +774,7 @@ work list is in [`roadmap.md`](roadmap.md); the summary is:
 | QUIC, TUIC, Hysteria2 | `quinn` |
 | DNS cache and DoH/DoT | `hickory-resolver` |
 | gRPC transport | `h2`/`tonic` |
+| XHTTP transport | `h2`, later `quinn` (`h3`) |
 | Rule sets, GEOIP/GEOSITE, process rules | `aho-corasick`, `sysinfo` |
 | HTTP/2 root multiplexing and pooling | `h2` |
 | `http_head` health checks, jitter, backoff | `tokio::time` |
