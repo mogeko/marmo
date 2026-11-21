@@ -42,6 +42,7 @@ Statuses: `Proposed` → `Accepted` | `Rejected` | `Superseded by ADR-NNNN`.
 | [0019](0019-workspace-and-packaging.md) | Workspace layout and packaging | Accepted (2026-11-21) | five crates |
 | [0020](0020-license.md) | License change | Accepted (2026-11-21; amended) | MIT OR Apache-2.0; `cargo tree` license review |
 | [0021](0021-websocket-backend.md) | WebSocket backend and permessage-deflate | Accepted (2026-11-21) | `ws-net` + tokio pump; compression enabled |
+| [0022](0022-vless-http2-method.md) | VLESS HTTP/2 transport method | Accepted (2026-11-21) | `PUT` client, no content type; `POST`/`PUT` server |
 
 ## Eras
 
@@ -98,6 +99,8 @@ ADR-0017–0020 were accepted on 2026-11-21:
 - **ADR-0020**: relicensed to MIT OR Apache-2.0.
 - **ADR-0021**: WebSocket runs on `ws-net` with a tokio pump, enabling RFC 7692
   permessage-deflate; it supersedes ADR-0018's WebSocket crate choice.
+- **ADR-0022**: HTTP/2 uses `PUT` without a content type on the client and
+  accepts `POST`/`PUT` on the server; it supersedes ADR-0016's method clause.
 
 ADR-0001, 0003, 0007, 0010, 0013, and 0014 are superseded. ADR-0009 is
 superseded only in its license half; its clean-room protocol rule remains in

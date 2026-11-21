@@ -17,8 +17,10 @@ HTTP/2 use the first-party packages from ADR-0013 and ADR-0014.
   before the VLESS header is parsed.
 - WebSocket transport uses `path` and `host`, and optionally
   `permessage-deflate` (`compression`) and subprotocols (`subprotocols`).
-  HTTP/2 uses a POST stream with `:authority` from `host`, `:path` from `path`,
-  and requires ALPN `h2` (defaulted when `tls.alpn` is absent).
+  HTTP/2 uses a `PUT` stream with `:authority` from `host` and `:path` from
+  `path`, and requires ALPN `h2` (defaulted when `tls.alpn` is absent). The
+  client sends no `content-type`; the server accepts `PUT` and `POST` and
+  ignores the header (ADR-0022).
 - Inbound UUID authentication uses a constant-time comparison, then routes and
   connects to the selected outbound. The empty response header is sent only
   after the outbound connection is established.
@@ -164,6 +166,30 @@ The inbound always requires TLS; plaintext VLESS inbound is not supported.
   cannot race with a writer. TLS 1.3 `KeyUpdate` is handled by the in-tree
   record layer, with disjoint read/write key state.
 - No anti-probing or replay behavior beyond what TLS provides.
+
+## XHTTP (future work)
+
+XHTTP (formerly SplitHTTP) is Xray's HTTP-carried transport and is not
+implemented. Current Xray releases removed their HTTP/2 transport in favour of
+XHTTP, so XHTTP is the transport to add when compatibility with current Xray
+peers is required. It is not in the current plan or the R5 schedule; it needs
+its own ADR and design.
+
+Planned scope when it is taken up:
+
+- `transport.network = "xhttp"` with `path` and `host`, over TLS; ALPN `h2`
+  first, `h3` later if QUIC is available.
+- Start with stream-one: one HTTP request/response whose bodies carry the
+  VLESS byte stream, matching Xray's `stream-one` mode.
+- Evaluate stream-up/stream-down and separate uplink/downlink requests only if
+  real peers require them.
+- Padding, header names, and metadata only as far as needed for interop; no
+  arbitrary header configuration.
+- Bounded request/response bodies, headers, and buffers; no h2c.
+- Tests: config validation, loopback TCP/UoT/XUDP, Xray interop in both
+  directions, and a fixture derived from the public Xray documentation.
+- Clean-room from the public Xray XHTTP description; record the sources in this
+  file before implementation.
 
 ## Tests
 

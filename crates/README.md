@@ -23,8 +23,10 @@ cargo audit
 cargo tree --workspace --format '{l}'   # license review
 ```
 
-CI runs the first three on Linux, macOS, and Windows; the copyleft check and
-`cargo audit` run on Linux. `cargo-fuzz` runs on nightly only.
+CI runs the first three on Linux, macOS, and Windows. The copyleft check and
+`cargo audit` run in a separate `Dependencies` workflow, only when a manifest or
+`Cargo.lock` changes; Dependabot alerts cover advisories for unchanged
+dependencies. `cargo-fuzz` runs on nightly only.
 
 ## Rules
 
