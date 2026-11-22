@@ -24,6 +24,8 @@ pub struct Config {
     pub version: u8,
     /// Global connection and timeout policy.
     pub limits: Limits,
+    /// Process-identity lookup bounds.
+    pub process: Process,
     /// Configured inbounds.
     pub inbounds: Vec<Inbound>,
     /// Configured outbounds.
@@ -71,6 +73,7 @@ impl Default for Config {
         Self {
             version: 2,
             limits: Limits::default(),
+            process: Process::default(),
             inbounds: Vec::new(),
             outbounds: Vec::new(),
             route: Route::default(),
@@ -110,6 +113,31 @@ impl Default for Limits {
             idle_timeout_s: 300,
             uplink_only_s: 1,
             downlink_only_s: 1,
+        }
+    }
+}
+
+/// Bounds for the injected process resolver.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Process {
+    /// Cache entry lifetime in seconds; `0` disables the library cache.
+    pub cache_ttl_s: u16,
+    /// Maximum cache entries; `0` disables the library cache.
+    pub cache_capacity: u16,
+    /// Maximum wait for one resolver call in milliseconds.
+    pub lookup_timeout_ms: u16,
+    /// Maximum concurrent resolver calls.
+    pub max_inflight: u16,
+}
+
+impl Default for Process {
+    fn default() -> Self {
+        Self {
+            cache_ttl_s: 5,
+            cache_capacity: 1024,
+            lookup_timeout_ms: 50,
+            max_inflight: 64,
         }
     }
 }
@@ -535,6 +563,12 @@ pub struct Rule {
     /// Inbound tags.
     #[serde(default)]
     pub inbound: Option<Vec<String>>,
+    /// Process executable names.
+    #[serde(default)]
+    pub process_name: Option<Vec<String>>,
+    /// Process executable paths.
+    #[serde(default)]
+    pub process_path: Option<Vec<String>>,
     /// Outbound tag selected on match.
     pub outbound: String,
 }
@@ -656,6 +690,7 @@ mod tests {
         let config = Config::from_json("{}").expect("parse");
         assert_eq!(config.version, 2);
         assert_eq!(config.limits, Limits::default());
+        assert_eq!(config.process, Process::default());
         assert!(config.inbounds.is_empty());
         assert!(config.outbounds.is_empty());
         assert_eq!(config.route.final_outbound, "direct");

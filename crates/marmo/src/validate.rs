@@ -12,7 +12,8 @@ use zeroize::Zeroize as _;
 
 use crate::config::{
     ClientAuth, Config, ConfigError, Inbound, InboundProtocol, Limits as ConfigLimits, Outbound,
-    OutboundProtocol, Route, Rule, Sniffing, StreamNetwork, StreamTransport, Tls,
+    OutboundProtocol, Process as ConfigProcess, Route, Rule, Sniffing, StreamNetwork,
+    StreamTransport, Tls,
 };
 
 impl Config {
@@ -31,6 +32,7 @@ impl Config {
             return Err(fail("version", message));
         }
         validate_limits(&self.limits)?;
+        validate_process(&self.process)?;
         validate_inbounds(&self.inbounds)?;
         validate_outbounds(&self.outbounds)?;
         validate_route(&self.route, &self.outbounds, &self.inbounds)?;
@@ -53,6 +55,19 @@ fn validate_limits(limits: &ConfigLimits) -> Result<(), ConfigError> {
     }
     if limits.downlink_only_s > 86_400 {
         return Err(fail("limits.downlink_only_s", "must be at most 86400"));
+    }
+    Ok(())
+}
+
+fn validate_process(process: &ConfigProcess) -> Result<(), ConfigError> {
+    if process.cache_ttl_s > 3600 {
+        return Err(fail("process.cache_ttl_s", "must be at most 3600"));
+    }
+    if !(1..=500).contains(&process.lookup_timeout_ms) {
+        return Err(fail("process.lookup_timeout_ms", "must be 1..500"));
+    }
+    if !(1..=1024).contains(&process.max_inflight) {
+        return Err(fail("process.max_inflight", "must be 1..1024"));
     }
     Ok(())
 }
@@ -953,6 +968,16 @@ fn validate_rule(rule: &Rule, index: usize, inbounds: &[Inbound]) -> Result<(), 
     }
     validate_port_ranges(rule.port_range.as_deref(), index)?;
     validate_rule_inbounds(rule.inbound.as_deref(), index, inbounds)?;
+    validate_rule_values(
+        rule.process_name.as_deref(),
+        &format!("route.rules[{index}].process_name"),
+        Some(255),
+    )?;
+    validate_rule_values(
+        rule.process_path.as_deref(),
+        &format!("route.rules[{index}].process_path"),
+        Some(4096),
+    )?;
     Ok(())
 }
 
@@ -968,6 +993,9 @@ fn validate_rule_values(
     for (index, value) in values.iter().enumerate() {
         if value.is_empty() {
             return Err(fail(format!("{path}[{index}]"), "empty value"));
+        }
+        if value.contains('\0') {
+            return Err(fail(format!("{path}[{index}]"), "must not contain NUL"));
         }
         if let Some(max_len) = max_len {
             if value.len() > max_len {
@@ -1576,6 +1604,30 @@ mod tests {
             "password":"secret","tls":{"alpn":["h2"],"required_alpn":"http/1.1"}
         }]}"#;
         assert_path(error(required_missing), "outbounds[0].tls.required_alpn");
+    }
+
+    #[test]
+    fn validates_process_bounds() {
+        assert_path(
+            error(r#"{"process":{"cache_ttl_s":3601}}"#),
+            "process.cache_ttl_s",
+        );
+        assert_path(
+            error(r#"{"process":{"lookup_timeout_ms":0}}"#),
+            "process.lookup_timeout_ms",
+        );
+        assert_path(
+            error(r#"{"process":{"max_inflight":1025}}"#),
+            "process.max_inflight",
+        );
+        assert_path(
+            error(r#"{"route":{"rules":[{"process_name":[""],"outbound":"direct"}]}}"#),
+            "route.rules[0].process_name[0]",
+        );
+        assert_path(
+            error(r#"{"route":{"rules":[{"process_path":["/a","/a"],"outbound":"direct"}]}}"#),
+            "route.rules[0].process_path[1]",
+        );
     }
 
     #[test]

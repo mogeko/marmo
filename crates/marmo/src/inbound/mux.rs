@@ -229,7 +229,9 @@ async fn run_tcp(session: SessionContext, mut receiver: mpsc::Receiver<Uplink>) 
             &session.source,
             &session.target,
             Network::Tcp,
-        ) else {
+        )
+        .await
+        else {
             let _ = session.writer.lock().await.end_error(id, b"no route").await;
             return;
         };
@@ -295,7 +297,9 @@ async fn run_udp(session: SessionContext, mut receiver: mpsc::Receiver<Uplink>) 
             &session.source,
             &session.target,
             Network::Udp,
-        ) else {
+        )
+        .await
+        else {
             let _ = session.writer.lock().await.end_error(id, b"no route").await;
             return;
         };
@@ -349,7 +353,7 @@ async fn run_udp(session: SessionContext, mut receiver: mpsc::Receiver<Uplink>) 
     let _ = closed.try_send(id);
 }
 
-fn route(
+async fn route(
     context: &Context, inbound: &str, source: &Endpoint, target: &Endpoint, network: Network,
 ) -> Option<Action> {
     let domain = target.domain().map(str::to_owned);
@@ -359,6 +363,7 @@ fn route(
         destination: target.clone(),
         domain: domain.as_deref(),
         inbound: Some(inbound),
+        process: None,
     };
-    Some(context.router.route(&metadata))
+    Some(context.route(metadata).await)
 }

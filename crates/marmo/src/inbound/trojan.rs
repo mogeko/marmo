@@ -174,7 +174,7 @@ async fn connect_relay(
         leftover = Vec::new();
     }
 
-    let Some(action) = route(context, inbound, source, &target, domain.as_deref()) else {
+    let Some(action) = route(context, inbound, source, &target, domain.as_deref()).await else {
         return;
     };
     let connected = tokio::select! {
@@ -234,7 +234,9 @@ async fn handle_udp(
             source.clone(),
             &destination,
             destination.domain(),
-        ) else {
+        )
+        .await
+        else {
             continue;
         };
         if sender.send((action, destination, payload)).await.is_err() {
@@ -307,7 +309,7 @@ async fn fallback_relay(
     let (Some(target), false) = (fallback, prefix.is_empty()) else {
         return;
     };
-    let Some(action) = route(context, inbound, source, &target, None) else {
+    let Some(action) = route(context, inbound, source, &target, None).await else {
         return;
     };
     let connected = tokio::select! {
@@ -324,17 +326,18 @@ async fn fallback_relay(
     relay_streams(stream, remote, context, token).await;
 }
 
-fn route(
+async fn route(
     context: &Context, inbound: &str, source: Endpoint, target: &Endpoint, domain: Option<&str>,
-) -> Option<crate::routing::Action> {
+) -> Option<Action> {
     let metadata = Metadata {
         network: Network::Tcp,
         source,
         destination: target.clone(),
         domain,
         inbound: Some(inbound),
+        process: None,
     };
-    Some(context.router.route(&metadata))
+    Some(context.route(metadata).await)
 }
 
 async fn relay_streams(

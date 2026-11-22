@@ -119,7 +119,7 @@ async fn connect_tunnel(
         leftover = Vec::new();
     }
 
-    let action = route(context, inbound, source, &destination, domain.as_deref());
+    let action = route(context, inbound, source, &destination, domain.as_deref()).await;
     if matches!(action, Action::Reject(_)) {
         if !replied {
             let _ = respond(&mut stream, "403 Forbidden").await;
@@ -186,7 +186,8 @@ async fn forward(
         source,
         &target.endpoint,
         target.endpoint.domain(),
-    );
+    )
+    .await;
     if matches!(action, Action::Reject(_)) {
         let _ = respond(&mut client, "403 Forbidden").await;
         return Ok(None);
@@ -206,7 +207,7 @@ async fn forward(
     Ok(Some((Box::new(client) as BoxStream, remote)))
 }
 
-fn route(
+async fn route(
     context: &Context, inbound: &str, source: Endpoint, destination: &Endpoint,
     domain: Option<&str>,
 ) -> Action {
@@ -216,8 +217,9 @@ fn route(
         destination: destination.clone(),
         domain,
         inbound: Some(inbound),
+        process: None,
     };
-    context.router.route(&metadata)
+    context.route(metadata).await
 }
 
 enum HeadError {

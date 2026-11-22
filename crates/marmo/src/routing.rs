@@ -13,6 +13,7 @@ use marmo_net::{Cidr, Endpoint, Network};
 use thiserror::Error;
 
 use crate::config::Config;
+use crate::process::ProcessInfo;
 use crate::ruleset::{DomainSet, IpSet, RuleSets};
 
 /// Index of an outbound in `Config::outbounds`.
@@ -68,12 +69,15 @@ pub struct Metadata<'a> {
     pub domain: Option<&'a str>,
     /// Inbound tag, reserved for the future inbound matcher.
     pub inbound: Option<&'a str>,
+    /// Local process identity, when a resolver supplied one.
+    pub process: Option<ProcessInfo>,
 }
 
 /// A compiled rule list and its final action.
 pub struct Router {
     rules: Vec<CompiledRule>,
     final_action: Action,
+    needs_process: bool,
 }
 
 impl fmt::Debug for Router {
@@ -82,6 +86,7 @@ impl fmt::Debug for Router {
             .debug_struct("Router")
             .field("rules", &self.rules.len())
             .field("final_action", &self.final_action)
+            .field("needs_process", &self.needs_process)
             .finish()
     }
 }
@@ -105,9 +110,13 @@ impl Router {
         }
 
         let mut rules = Vec::with_capacity(config.route.rules.len());
+        let mut needs_process = false;
         for (index, rule) in config.route.rules.iter().enumerate() {
             let path = format!("route.rules[{index}]");
             let cidrs = compile_cidrs(rule.ip_cidr.as_deref(), &path)?;
+            let process_names = compile_values(rule.process_name.as_deref());
+            let process_paths = compile_values(rule.process_path.as_deref());
+            needs_process |= !process_names.is_empty() || !process_paths.is_empty();
             rules.push(CompiledRule {
                 domains: compile_domains(rule.domain.as_deref()),
                 suffixes: compile_domains(rule.domain_suffix.as_deref()),
@@ -121,7 +130,9 @@ impl Router {
                 ports: rule.port.clone().unwrap_or_default(),
                 port_ranges: compile_port_ranges(rule.port_range.as_deref()),
                 network: rule.network,
-                inbounds: compile_inbounds(rule.inbound.as_deref()),
+                inbounds: compile_values(rule.inbound.as_deref()),
+                process_names,
+                process_paths,
                 action: compile_action(&rule.outbound, format!("{path}.outbound"), &outbounds)?,
             });
         }
@@ -134,7 +145,14 @@ impl Router {
         Ok(Self {
             rules,
             final_action,
+            needs_process,
         })
+    }
+
+    /// Returns true when any rule has a process matcher.
+    #[must_use]
+    pub fn needs_process(&self) -> bool {
+        self.needs_process
     }
 
     /// Returns the first matching action, or the final action.
@@ -158,6 +176,8 @@ struct CompiledRule {
     port_ranges: Vec<(u16, u16)>,
     network: Option<Network>,
     inbounds: Vec<Box<str>>,
+    process_names: Vec<Box<str>>,
+    process_paths: Vec<Box<str>>,
     action: Action,
 }
 
@@ -255,6 +275,36 @@ impl CompiledRule {
                 return false;
             }
         }
+
+        if !self.process_names.is_empty() || !self.process_paths.is_empty() {
+            let Some(process) = metadata.process.as_ref() else {
+                return false;
+            };
+            if !self.process_names.is_empty() {
+                let Some(name) = process.name() else {
+                    return false;
+                };
+                if !self
+                    .process_names
+                    .iter()
+                    .any(|expected| expected.as_ref() == name)
+                {
+                    return false;
+                }
+            }
+            if !self.process_paths.is_empty() {
+                let Some(path) = process.path() else {
+                    return false;
+                };
+                if !self
+                    .process_paths
+                    .iter()
+                    .any(|expected| expected.as_ref() == path)
+                {
+                    return false;
+                }
+            }
+        }
         true
     }
 }
@@ -337,7 +387,7 @@ fn compile_port_ranges(values: Option<&[[u16; 2]]>) -> Vec<(u16, u16)> {
     merged
 }
 
-fn compile_inbounds(values: Option<&[String]>) -> Vec<Box<str>> {
+fn compile_values(values: Option<&[String]>) -> Vec<Box<str>> {
     values
         .unwrap_or(&[])
         .iter()
@@ -448,7 +498,7 @@ pub enum RoutingError {
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
-    use std::sync::Arc;
+    use std::sync::{Arc, RwLock};
 
     use super::*;
 
@@ -480,6 +530,7 @@ mod tests {
             destination,
             domain,
             inbound: None,
+            process: None,
         }
     }
 
@@ -793,6 +844,86 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    struct SwappableDomainSet(RwLock<&'static str>);
+
+    impl DomainSet for SwappableDomainSet {
+        fn contains(&self, domain: &str) -> bool {
+            *self.0.read().expect("set lock") == domain
+        }
+    }
+
+    #[test]
+    fn provider_data_can_change_without_recompiling() {
+        let config = Config::from_json(
+            r#"{
+              "outbounds": [{ "tag": "a", "protocol": "direct" }],
+              "route": {
+                "rules": [{ "domain_set": ["sites"], "outbound": "a" }],
+                "final": "direct"
+              }
+            }"#,
+        )
+        .expect("config");
+        let set = Arc::new(SwappableDomainSet(RwLock::new("one.example")));
+        let mut sets = RuleSets::new();
+        sets.add_domain("sites", set.clone()).expect("domain set");
+        let router = Router::compile_with_sets(&config, &sets).expect("router");
+
+        let first = metadata(None, domain("one.example", 443), Network::Tcp);
+        assert_eq!(
+            router.route(&first),
+            Action::Route(OutboundId::from_index(0))
+        );
+
+        *set.0.write().expect("set lock") = "two.example";
+        assert_eq!(router.route(&first), Action::Direct);
+        let second = metadata(None, domain("two.example", 443), Network::Tcp);
+        assert_eq!(
+            router.route(&second),
+            Action::Route(OutboundId::from_index(0))
+        );
+    }
+
+    #[test]
+    fn matches_process_name_and_path() {
+        let router = router(
+            r#"{
+              "outbounds": [
+                { "tag": "name", "protocol": "direct" },
+                { "tag": "path", "protocol": "direct" }
+              ],
+              "route": {
+                "rules": [
+                  { "process_name": ["curl"], "outbound": "name" },
+                  { "process_path": ["/usr/bin/git"], "outbound": "path" }
+                ],
+                "final": "direct"
+              }
+            }"#,
+        );
+        assert!(router.needs_process());
+
+        let mut by_name = metadata(None, ip(1, 443), Network::Tcp);
+        by_name.process = Some(ProcessInfo::new(Some(Arc::from("curl")), None));
+        assert_eq!(
+            router.route(&by_name),
+            Action::Route(OutboundId::from_index(0))
+        );
+
+        let mut by_path = metadata(None, ip(1, 443), Network::Tcp);
+        by_path.process = Some(ProcessInfo::new(
+            Some(Arc::from("git")),
+            Some(Arc::from("/usr/bin/git")),
+        ));
+        assert_eq!(
+            router.route(&by_path),
+            Action::Route(OutboundId::from_index(1))
+        );
+
+        let unknown = metadata(None, ip(1, 443), Network::Tcp);
+        assert_eq!(router.route(&unknown), Action::Direct);
     }
 
     #[test]
