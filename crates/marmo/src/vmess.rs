@@ -409,10 +409,10 @@ impl ReplayFilter {
         if self.entries.contains_key(&auth_id) {
             return false;
         }
-        if self.entries.len() >= REPLAY_CAPACITY {
-            if let Some((old, _)) = self.order.pop_front() {
-                self.entries.remove(&old);
-            }
+        if self.entries.len() >= REPLAY_CAPACITY
+            && let Some((old, _)) = self.order.pop_front()
+        {
+            self.entries.remove(&old);
         }
         self.entries.insert(auth_id, now);
         self.order.push_back((auth_id, now));

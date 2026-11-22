@@ -1,7 +1,7 @@
 # Architecture
 
 Status: **Current Rust architecture.** Accepted decisions are ADR-0017 through
-ADR-0029. The library is the only implementation in this repository; there is
+ADR-0030. The library is the only implementation in this repository; there is
 no CLI, daemon, GUI, or application layer.
 
 ## 1. Purpose
@@ -45,11 +45,11 @@ handling, and configuration storage.
 ## 4. Constraints
 
 - **Language**: Rust, edition 2024. The MSRV is the lowest stable release that
-  satisfies the pinned dependency set; it starts at 1.87 and is recorded in
-  `Cargo.toml`. CI builds both the current stable and 1.87.0. The MSRV rose
-  from 1.85 to 1.87 for `ctutils` >= 0.4.4 (RUSTSEC-2026-0385). Raising it
-  again needs a commit message that names the dependency and the version that
-  forced it.
+  satisfies the pinned dependency set; it starts at 1.88 and is recorded in
+  `Cargo.toml`. CI builds both the current stable and 1.88.0. The MSRV rose
+  from 1.85 to 1.87 for `ctutils` >= 0.4.4 (RUSTSEC-2026-0385), then from 1.87
+  to 1.88 for `hickory-resolver` 0.26.3 (ADR-0030). Raising it again needs a
+  commit message that names the dependency and the version that forced it.
 - **Runtime**: tokio is the only supported runtime. The embedder owns the
   runtime; the library takes a `tokio::runtime::Handle` and never builds one
   implicitly. Codecs and policy code are runtime-free, but the I/O layer is
@@ -79,7 +79,7 @@ Everything else is post-1.0 work (§19):
 | SOCKS5 CONNECT + UDP ASSOCIATE inbound | — |
 | HTTP CONNECT + forward inbound | QUIC, TUIC, Hysteria2 |
 | HTTP CONNECT outbound | gRPC and XHTTP transports |
-| Shadowsocks 2022 TCP/UDP | DNS cache, DoH/DoT |
+| Shadowsocks 2022 TCP/UDP | — |
 | Trojan inbound/outbound (TLS, TCP/UDP, fallback) | — |
 | VLESS inbound/outbound (TCP/TLS/WS/H2, TCP/UoT/XUDP, Mux.Cool) | — |
 | VMess inbound/outbound (AEAD, TCP/UDP, Mux.Cool, TLS/WS/H2) | — |
@@ -88,6 +88,7 @@ Everything else is post-1.0 work (§19):
 | domain/suffix/keyword/CIDR/port/range/inbound rules; injected domain/IP sets | TUN, transparent proxying |
 | process rules via an injected `ProcessResolver` | Windows-specific process matching |
 | strict JSON config, limits, metrics | — |
+| DNS TTL cache, DoH/DoT, injected resolver | — |
 | TLS/HTTP/H2 sniffing with buffered replay | — |
 
 ## 5. Runtime model
@@ -122,7 +123,9 @@ Rules:
   in the configuration and are parsed during `bind()`; the embedder reads
   files or fetches secrets (ADR-0023). Rule-set data and process identity are
   injected as `DomainSet`/`IpSet` and `ProcessResolver` implementations; the
-  embedder owns storage, OS access, and reload (ADR-0028, ADR-0029).
+  embedder owns storage, OS access, and reload (ADR-0028, ADR-0029). DNS
+  upstreams are explicit IP endpoints; the resolver never reads `resolv.conf`
+  or `hosts` (ADR-0030).
 - **Config is immutable per instance.** Reload is post-1.0: it
   builds a new `CompiledConfig` and publishes it through `ArcSwap`, so the data
   plane never locks.
@@ -164,7 +167,7 @@ depends only on upstream crates and the erased stream boundary.
   +-----+-----+     +-----+------+                    +------+-----+
         |                 |                                  |
         |           +-----v------+                           |
-        |           |    dns     | (post-1.0)                      |
+        |           |    dns     |                           |
         |           |  resolver  |                           |
         |           +-----+------+                           |
         |                 |                                  |
@@ -330,10 +333,17 @@ small copy type. Rules are immutable after construction and live behind an
 
 ### 8.7 Resolver and sniffer
 
-The resolver interface (TTL cache, DoH/DoT policy) is post-1.0; current dials
-go through the system resolver (`tokio::net::lookup_host`). The sniffer is
-opt-in per inbound (`"sniffing": { "enabled": true, "protocols": [...] }`). It
-peeks at a bounded prefix of the stream and returns a domain from a TLS
+The resolver is opt-in through a `dns` configuration block and the non-default
+`dns` Cargo feature (ADR-0030). It owns a bounded TTL cache, a total lookup
+deadline, an in-flight limit, two upstream tiers, and UDP/TCP/DoT/DoH
+transports through `hickory-resolver`. Embedders may replace the upstream with
+`InstanceBuilder::dns_resolver`; the library cache and bounds still apply. A
+literal IP bypasses DNS. Without a `dns` block, dials use the system resolver
+(`tokio::net::lookup_host`).
+
+The sniffer is opt-in per inbound
+(`"sniffing": { "enabled": true, "protocols": [...] }`). It peeks at a
+bounded prefix of the stream and returns a domain from a TLS
 `ClientHello` server name, an HTTP/1 `Host` header, or the first plaintext
 HTTP/2 `:authority`. Sniffed bytes are buffered and replayed to the relay so no
 data is lost. An inbound-provided domain always wins; sniffing only fills the
@@ -413,9 +423,17 @@ VLESS simple UoT binds one destination).
 
 - Inbound-provided domains (SOCKS5/HTTP) are authoritative and avoid DNS on the
   proxy side until the outbound needs an IP.
-- The resolver is used for outbound dials that need an IP and for rules that
-  need one. `direct` uses the system resolver by default; DoH/DoT and a cache
-  arrive in post-1.0.
+- The resolver is used for direct dials that need an IP: the `direct`
+  outbound, direct UDP, and every configured proxy-server endpoint. A protocol
+  outbound sends a domain destination unresolved, so remote DNS remains the
+  default for proxied traffic.
+- `ip_cidr` and `geoip` match literal destination IPs only. DNS is not
+  performed to satisfy a routing rule; that would query for traffic a remote
+  outbound could resolve itself and would need a detour policy (ADR-0030).
+- Without a `dns` block, `direct` uses the system resolver. With one, the
+  configured upstreams are authoritative; there is no implicit system or
+  plaintext fallback. Cache TTL, capacity, timeout, in-flight limit, and
+  fallback policy are bounded by config.
 - Sniffing is opt-in per inbound and never replaces an inbound-provided
   domain. It fills the routing domain from TLS SNI, HTTP/1 `Host`, or plaintext
   HTTP/2 `:authority`; the peeked bytes are replayed unchanged.
@@ -517,7 +535,7 @@ UDP by default and `mux: true` for client-side pooling (ADR-0027).
 | HTTP/1.1 | `httparse` (+ `hyper` only if needed) | the inbound is minimal; no general server |
 | VMess crypto | `md-5`, `sha3`, `hmac`, `chacha20poly1305` | CmdKey, SHAKE128 masks, HMAC KDF, ChaCha body |
 | QUIC (post-1.0) | `quinn` | streams, datagrams, custom congestion control |
-| DNS (post-1.0) | `hickory-resolver` | system, DoH, DoT, cache |
+| DNS (`dns` feature) | `hickory-resolver` | UDP, TCP, DoT, DoH, TTL cache |
 | Config | `serde`, `serde_json`, `serde_path_to_error` | strict parsing, path-aware errors |
 | Errors | `thiserror` | typed errors; `anyhow` only in examples/tests |
 | Secrets | `secrecy`, `zeroize` | no secret in `Debug` or logs |
@@ -532,6 +550,10 @@ Rules:
 
 - **No forked TLS, HTTP/2, or WebSocket.** When a needed capability is missing
   upstream, pin a newer version; do not fork a transport into this repository.
+- **The `dns` feature is a capability gate.** It is off by default and enables
+  the DNS subsystem and `hickory-resolver`; it does not select a backend or a
+  transport implementation. There is no runtime fallback when it is disabled:
+  a `dns` configuration block is a validation error.
 - **One crypto provider.** `aws-lc-rs` (the `rustls` default) is pinned; it
   requires a C toolchain and assembly. `ring` is not a second supported
   backend. ADR-0018 records the accepted build prerequisite.
@@ -658,6 +680,9 @@ impl InstanceBuilder {
     pub fn runtime(self, handle: tokio::runtime::Handle) -> Self;
     pub fn metrics(self, sink: Arc<dyn MetricsSink>) -> Self;
     pub fn shutdown_grace(self, grace: Duration) -> Self;
+    // DNS is compiled only with the `dns` feature and conflicts with built-in
+    // dns.servers/fallback/tls.
+    pub fn dns_resolver(self, resolver: Arc<dyn DnsResolver>) -> Self;
     pub fn build(self) -> Result<Instance, BuildError>;
 }
 
@@ -691,8 +716,9 @@ Errors:
 
 - `ConfigError` renders the JSON path (`inbounds[0].port`) via
   `serde_path_to_error`; it is the only error a config typo produces.
-- `BuildError` covers `NoRuntime`, unresolved outbound/tag references, and
-  selector-graph invariants. No I/O happens here.
+- `BuildError` covers `NoRuntime`, unresolved outbound/tag references,
+  selector-graph invariants, DNS construction, and a DNS resolver/server
+  conflict. No I/O happens here.
 - `BindError` carries the inbound tag, the resolved address, and the
   `io::Error`. A partial bind rolls back every listener already bound.
 - `ServeError` is fatal listener failure or a drain failure; normal shutdown
@@ -715,10 +741,14 @@ are the runtime-chosen traits, and `tower` compatibility is not promised.
 - Global `limits` (`max_connections`, `handshake_timeout_s`,
   `idle_timeout_s`, `uplink_only_s`, `downlink_only_s`) are validated in
   `build()`. UDP session caps remain per-inbound fixed bounds.
+- A top-level `dns` object is optional. It is accepted only when the `dns`
+  Cargo feature is enabled; without it the same document fails validation with
+  a clear feature error. Upstream addresses are literal IP endpoints, and the
+  TLS trust store is the platform store or an inline `dns.tls.ca` PEM.
 - The library performs no filesystem I/O for credentials: `build()` and
   `bind()` never read files, and `spawn_blocking` is not needed on this path.
 - Secrets use `SecretString`/`zeroize`; `Debug` redacts passwords, UUIDs, and
-  keys. No payload, credential, or SNI is logged at `info`.
+  keys. No payload, credential, SNI, or DNS query name is logged at `info`.
 - The library installs no global tracing subscriber and no signal handler; the
   embedder owns both.
 - No C ABI in v1. Semver applies to the Rust API; pre-1.0 may break between
@@ -757,15 +787,20 @@ Module boundaries inside `marmo` are enforced by review, not by the compiler.
   `tokio::time::pause()` makes timeout and half-close tests deterministic.
 - Integration tests bind loopback port 0 and exercise real sockets through
   tokio. No live third-party servers in CI.
+- DNS integration tests are feature-gated (`--features dns`) and use local UDP,
+  DoT, and DoH fixtures; they never contact a public resolver.
 - Protocol tests use synthetic vectors and the fuzz corpus in `fuzz/corpus/`;
   no fixture is a capture of real traffic.
 - `proptest` covers parsers and config validation; `cargo-fuzz` covers every
   decoder and the framing glue we own (nightly only). Malformed input returns
-  a typed error, never panics.
+  a typed error, never panics. The DNS wire decoder is hickory's, so the
+  feature adds config tests rather than a new fuzz target.
 - Interop runs against self-hosted reference binaries outside CI. No GPL code
   is linked, ported, or distributed.
 - CI matrix: Linux x86_64, macOS arm64, Windows x86_64; `cargo fmt --check`,
   `clippy -D warnings`, `cargo test`, `cargo audit`, and the copyleft check.
+  A Linux docs job builds every feature with `RUSTDOCFLAGS="-D warnings"` so
+  broken intra-doc links and other rustdoc warnings fail CI.
 - Benchmarks (`criterion`) and `miri`/`loom` runs are opt-in and never part of
   the default test job.
 
@@ -774,7 +809,9 @@ Module boundaries inside `marmo` are enforced by review, not by the compiler.
 - `tracing` spans per connection (`inbound`, `outbound`, `network`, hashed
   SNI) and per UDP session; default level is `info`.
 - Counters: accepted/active/rejected/failed connections, bytes per direction,
-  UDP sessions, rule hits, health-check latency/failures, dropped datagrams.
+  UDP sessions, rule hits, health-check latency/failures, dropped datagrams,
+  and DNS queries/cache hits/fallbacks/failures. DNS query names are never
+  recorded.
 - Optional `MetricsSink` for embedders; no Prometheus dependency in the core.
 - Secrets and payloads are never recorded as span fields; redaction is a
   review checklist item, not a best-effort filter.
@@ -793,11 +830,16 @@ Module boundaries inside `marmo` are enforced by review, not by the compiler.
   crate with `unsafe` or a build script.
 - Cancellation safety is a security property: a dropped protocol state machine
   must not leave a half-authenticated session reachable.
-- Injected `DomainSet`/`IpSet` and `ProcessResolver` implementations are
-  trusted embedder code. The library bounds tag count, cache size, lookup
-  timeout, and in-flight calls, but it cannot verify provider memory bounds,
-  checksums, or platform behavior. Process identity is not a security
-  boundary; process names and paths are never logged.
+- DNS answers are untrusted input. The resolver bounds the address list,
+  in-flight queries, cache entries, and the total deadline; TLS verification
+  uses the platform store or an explicit inline CA, and plaintext fallback is
+  an explicit configuration choice (ADR-0030).
+- Injected `DomainSet`/`IpSet`, `ProcessResolver`, and `DnsResolver`
+  implementations are trusted embedder code. The library bounds tag count,
+  process and DNS cache size, lookup timeout, and in-flight calls, but it
+  cannot verify provider memory bounds, checksums, or platform behavior.
+  Process identity is not a security boundary; process names, paths, and DNS
+  query names are never logged.
 
 ## 19. Roadmap
 
@@ -807,7 +849,6 @@ The current release line is `0.0.3`. The dependency-ordered work list is in
 | Item | Enabled by |
 | --- | --- |
 | QUIC, TUIC, Hysteria2 | `quinn` |
-| DNS cache and DoH/DoT | `hickory-resolver` |
 | gRPC transport | `h2`/`tonic` |
 | XHTTP transport | `h2`, later `quinn` (`h3`) |
 | Rule sets, GEOIP/GEOSITE | injected `DomainSet`/`IpSet` |
@@ -826,6 +867,7 @@ The current release line is `0.0.3`. The dependency-ordered work list is in
 | License-change consent | both copyright holders must agree; ADR-0020 records the decision |
 | Tokio lock-in | accepted in ADR-0017; codecs and policy remain runtime-free |
 | Ecosystem churn in `rustls`/`quinn`/`h2` | adapters isolate versions; pin minor ranges |
+| DNS dependency churn and MSRV | `hickory-resolver` 0.26.3 is pinned and feature-gated; ADR-0030 records the MSRV bump and review |
 | External audit | not yet commissioned; required before a production-readiness claim |
 
 Open questions:
@@ -837,7 +879,7 @@ Open questions:
 
 ## 21. Decision index
 
-Current decisions are ADR-0017 through ADR-0029. Historical decisions from the
+Current decisions are ADR-0017 through ADR-0030. Historical decisions from the
 initial implementation are ADR-0001 through ADR-0016 and remain in
 [`docs/decisions/`](decisions/README.md); their bodies are unchanged.
 
@@ -856,3 +898,4 @@ initial implementation are ADR-0001 through ADR-0016 and remain in
 | [0027](decisions/0027-client-mux.md) | Client-side Mux.Cool outbound | Accepted |
 | [0028](decisions/0028-rule-sets.md) | Injected rule sets | Accepted |
 | [0029](decisions/0029-process-identity.md) | Process identity injection | Accepted |
+| [0030](decisions/0030-dns-resolver.md) | DNS cache and DoH/DoT resolver | Accepted |

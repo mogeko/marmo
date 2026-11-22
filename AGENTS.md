@@ -28,14 +28,15 @@ selection.
 
 ## Toolchain
 
-- Edition 2024, MSRV 1.87. Raise it only with a commit message naming the
+- Edition 2024, MSRV 1.88. Raise it only with a commit message naming the
   dependency that forced the change.
 - tokio is the runtime. The library never creates or shuts down a runtime; the
   builder uses `Handle::try_current()` and may be given an explicit handle.
 - `marmo-proto` and `marmo` are `#![forbid(unsafe_code)]`.
   `marmo-transport` denies unsafe by default; an unsafe block needs a written
   justification and a safety comment.
-- No feature flag selects a backend or transport implementation.
+- No feature flag selects a backend or transport implementation. The `dns`
+  feature is a capability gate for the optional DNS subsystem (ADR-0030).
 
 ## Style
 
@@ -65,21 +66,26 @@ selection.
 
 ```sh
 cargo test --workspace --locked
+cargo test --workspace --locked --all-features
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo +1.87.0 test --workspace --locked
+cargo clippy --workspace --all-targets --locked --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
+cargo +1.88.0 test --workspace --locked --all-features
 cargo audit
 cargo tree --workspace --format '{l}'   # license review
 cargo +nightly fuzz build
 ```
 
+The `dns` feature is off by default; run the feature suite with
+`--all-features`.
+
 Run one test with `cargo test -p marmo --test <name>` or
 `cargo test -p marmo-proto <filter>`. Loopback tests use port 0; never use
 live third-party servers in tests.
 
-CI runs the first four checks on Linux, macOS, and Windows. The copyleft check
-and `cargo audit` run in the `Dependencies` workflow; the PR-only fuzz smoke
-runs all decoder targets.
+CI runs the first four checks on Linux, macOS, and Windows, and the doc check
+on Linux. The copyleft check and `cargo audit` run in the `Dependencies`
+workflow; the PR-only fuzz smoke runs all decoder targets.
 
 ## Review checklist
 

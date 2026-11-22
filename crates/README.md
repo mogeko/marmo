@@ -24,29 +24,29 @@ URLs because crates.io renders only the package tarball.
 cargo test --workspace
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
 cargo audit
 cargo tree --workspace --format '{l}'   # license review
 ```
 
-CI runs the first three on Linux, macOS, and Windows. The copyleft check and
-`cargo audit` run in a separate `Dependencies` workflow, only when a manifest or
-`Cargo.lock` changes; Dependabot alerts cover advisories for unchanged
-dependencies. `cargo-fuzz` runs on nightly only. Pushing a `vX.Y.Z` tag runs the
-`Release` workflow, which publishes the four published crates through
-`crates-io-auth-action`; configure crates.io trusted publishing for
-`.github/workflows/release.yml`, the `publish` job, and the `release`
-environment first.
+CI runs the first three on Linux, macOS, and Windows, and the doc check on Linux.
+The copyleft check and `cargo audit` run in a separate `Dependencies` workflow,
+only when a manifest or `Cargo.lock` changes; Dependabot alerts cover advisories
+for unchanged dependencies. `cargo-fuzz` runs on nightly only. Pushing a `vX.Y.Z`
+tag runs the `Release` workflow.
 
 ## Rules
 
-- Edition 2024, MSRV 1.87 in `Cargo.toml`. CI tests 1.87.0 and the current
+- Edition 2024, MSRV 1.88 in `Cargo.toml`. CI tests 1.88.0 and the current
   stable; raise the MSRV only with a commit message that names the dependency
   that forced it.
 - `marmo-proto` and `marmo` are `#![forbid(unsafe_code)]`. `marmo-transport`
   denies unsafe by default; any block needs a written justification and a
   safety comment.
-- No feature flag selects a backend or a transport implementation. Features
-  are limited to test/bench support.
+- No feature flag selects a backend or a transport implementation. The `dns`
+  feature is a capability gate for the optional DNS subsystem (ADR-0030); it is
+  off by default, and the default workspace suite runs without it. Other
+  features are limited to test/bench support.
 - Errors are `thiserror` enums, `#[non_exhaustive]`; `anyhow` stays in examples
   and tests. Config is schema version 2; TLS credentials are inline PEM
   (ADR-0023).

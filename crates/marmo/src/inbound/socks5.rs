@@ -342,10 +342,10 @@ async fn udp_associate(
                 };
                 match client_address {
                     None => {
-                        if let Some(expected) = tcp_peer_ip {
-                            if source.ip() != expected {
-                                continue;
-                            }
+                        if let Some(expected) = tcp_peer_ip
+                            && source.ip() != expected
+                        {
+                            continue;
                         }
                         client_address = Some(source);
                     }

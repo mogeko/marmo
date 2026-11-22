@@ -10,10 +10,13 @@ use base64::engine::general_purpose::STANDARD;
 use marmo_net::{Cidr, Endpoint};
 use zeroize::Zeroize as _;
 
+use std::collections::HashSet;
+use std::net::SocketAddr;
+
 use crate::config::{
-    ClientAuth, Config, ConfigError, Inbound, InboundProtocol, Limits as ConfigLimits, Outbound,
-    OutboundProtocol, Process as ConfigProcess, Route, Rule, Sniffing, StreamNetwork,
-    StreamTransport, Tls,
+    ClientAuth, Config, ConfigError, Dns as ConfigDns, DnsProtocol, DnsServer, Inbound,
+    InboundProtocol, Limits as ConfigLimits, Outbound, OutboundProtocol, Process as ConfigProcess,
+    Route, Rule, Sniffing, StreamNetwork, StreamTransport, Tls,
 };
 
 impl Config {
@@ -33,6 +36,15 @@ impl Config {
         }
         validate_limits(&self.limits)?;
         validate_process(&self.process)?;
+        if self.dns.is_some() && !cfg!(feature = "dns") {
+            return Err(fail(
+                "dns",
+                "dns support is not compiled in; enable the `dns` feature",
+            ));
+        }
+        if let Some(dns) = self.dns.as_ref() {
+            validate_dns(dns)?;
+        }
         validate_inbounds(&self.inbounds)?;
         validate_outbounds(&self.outbounds)?;
         validate_route(&self.route, &self.outbounds, &self.inbounds)?;
@@ -70,6 +82,131 @@ fn validate_process(process: &ConfigProcess) -> Result<(), ConfigError> {
         return Err(fail("process.max_inflight", "must be 1..1024"));
     }
     Ok(())
+}
+
+fn validate_dns(dns: &ConfigDns) -> Result<(), ConfigError> {
+    if dns.servers.len() > 8 {
+        return Err(fail("dns.servers", "must have at most 8 entries"));
+    }
+    if dns.fallback.len() > 8 {
+        return Err(fail("dns.fallback", "must have at most 8 entries"));
+    }
+    if dns.servers.len() + dns.fallback.len() > 16 {
+        return Err(fail(
+            "dns",
+            "must have at most 16 servers across servers and fallback",
+        ));
+    }
+    if dns.servers.is_empty() && !dns.fallback.is_empty() {
+        return Err(fail(
+            "dns.fallback",
+            "requires at least one dns.servers entry",
+        ));
+    }
+
+    let mut seen = HashSet::new();
+    for (index, server) in dns.servers.iter().enumerate() {
+        let path = format!("dns.servers[{index}]");
+        let address = validate_dns_server(server, &path)?;
+        if !seen.insert((server.protocol, address)) {
+            return Err(fail(path, "duplicate protocol and address"));
+        }
+    }
+    for (index, server) in dns.fallback.iter().enumerate() {
+        let path = format!("dns.fallback[{index}]");
+        let address = validate_dns_server(server, &path)?;
+        if !seen.insert((server.protocol, address)) {
+            return Err(fail(path, "duplicate protocol and address"));
+        }
+    }
+
+    if !(100..=30_000).contains(&dns.timeout_ms) {
+        return Err(fail("dns.timeout_ms", "must be 100..30000"));
+    }
+    if !(1..=1024).contains(&dns.max_inflight) {
+        return Err(fail("dns.max_inflight", "must be 1..1024"));
+    }
+    if dns.min_ttl_s > 86_400 {
+        return Err(fail("dns.min_ttl_s", "must be at most 86400"));
+    }
+    if !(1..=86_400).contains(&dns.max_ttl_s) {
+        return Err(fail("dns.max_ttl_s", "must be 1..86400"));
+    }
+    if dns.min_ttl_s > dns.max_ttl_s {
+        return Err(fail("dns.min_ttl_s", "must not exceed dns.max_ttl_s"));
+    }
+    if dns.negative_ttl_s > 3600 {
+        return Err(fail("dns.negative_ttl_s", "must be at most 3600"));
+    }
+    if let Some(ca) = dns.tls.as_ref().and_then(|tls| tls.ca.as_deref()) {
+        if ca.is_empty() {
+            return Err(fail("dns.tls.ca", "must not be empty"));
+        }
+        if ca.len() > 64 * 1024 {
+            return Err(fail("dns.tls.ca", "must be at most 65536 bytes"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_dns_server(server: &DnsServer, path: &str) -> Result<SocketAddr, ConfigError> {
+    let address = server.address.parse::<SocketAddr>().map_err(|_| {
+        fail(
+            format!("{path}.address"),
+            "must be an IP address with a port",
+        )
+    })?;
+    if address.port() == 0 {
+        return Err(fail(format!("{path}.address"), "port must not be zero"));
+    }
+
+    if let Some(name) = server.server_name.as_deref() {
+        if name.is_empty() {
+            return Err(fail(format!("{path}.server_name"), "must not be empty"));
+        }
+        if name.len() > 253 {
+            return Err(fail(
+                format!("{path}.server_name"),
+                "must be at most 253 bytes",
+            ));
+        }
+        if !name.is_ascii() || name.bytes().any(|byte| byte <= 0x20 || byte == 0x7f) {
+            return Err(fail(
+                format!("{path}.server_name"),
+                "must be printable ASCII",
+            ));
+        }
+    }
+
+    match server.protocol {
+        DnsProtocol::Udp | DnsProtocol::Tcp => {
+            if server.server_name.is_some() {
+                return Err(fail(
+                    format!("{path}.server_name"),
+                    "is only valid for tls or https",
+                ));
+            }
+            if server.path.is_some() {
+                return Err(fail(format!("{path}.path"), "is only valid for https"));
+            }
+        }
+        DnsProtocol::Tls => {
+            if server.path.is_some() {
+                return Err(fail(format!("{path}.path"), "is only valid for https"));
+            }
+        }
+        DnsProtocol::Https => {
+            if let Some(path_value) = server.path.as_deref() {
+                if !path_value.starts_with('/') {
+                    return Err(fail(format!("{path}.path"), "must start with '/'"));
+                }
+                if path_value.len() > 512 {
+                    return Err(fail(format!("{path}.path"), "must be at most 512 bytes"));
+                }
+            }
+        }
+    }
+    Ok(address)
 }
 
 fn validate_inbounds(inbounds: &[Inbound]) -> Result<(), ConfigError> {
@@ -353,23 +490,24 @@ fn validate_inbound_transport(
     })?;
     match transport.network {
         StreamNetwork::H2 => {
-            if let Some(alpn) = tls.alpn.as_deref() {
-                if !contains(alpn, "h2") {
-                    return Err(fail(
-                        format!("inbounds[{index}].tls.alpn"),
-                        "must contain 'h2' for the h2 transport",
-                    ));
-                }
+            if let Some(alpn) = tls.alpn.as_deref()
+                && !contains(alpn, "h2")
+            {
+                return Err(fail(
+                    format!("inbounds[{index}].tls.alpn"),
+                    "must contain 'h2' for the h2 transport",
+                ));
             }
         }
         StreamNetwork::Ws => {
-            if let Some(alpn) = tls.alpn.as_deref() {
-                if !alpn.is_empty() && !contains(alpn, "http/1.1") {
-                    return Err(fail(
-                        format!("inbounds[{index}].tls.alpn"),
-                        "must contain 'http/1.1' for the ws transport",
-                    ));
-                }
+            if let Some(alpn) = tls.alpn.as_deref()
+                && !alpn.is_empty()
+                && !contains(alpn, "http/1.1")
+            {
+                return Err(fail(
+                    format!("inbounds[{index}].tls.alpn"),
+                    "must contain 'http/1.1' for the ws transport",
+                ));
             }
         }
         StreamNetwork::Tcp => {}
@@ -695,13 +833,13 @@ fn validate_vmess(outbound: &Outbound, index: usize) -> Result<(), ConfigError> 
 }
 
 fn validate_outbound_tls(tls: &Tls, server: &Endpoint, index: usize) -> Result<(), ConfigError> {
-    if let Some(sni) = tls.sni.as_deref() {
-        if sni.is_empty() {
-            return Err(fail(
-                format!("outbounds[{index}].tls.sni"),
-                "must not be empty",
-            ));
-        }
+    if let Some(sni) = tls.sni.as_deref()
+        && sni.is_empty()
+    {
+        return Err(fail(
+            format!("outbounds[{index}].tls.sni"),
+            "must not be empty",
+        ));
     }
     if !tls.insecure && tls.sni.is_none() && server.is_ip() {
         return Err(fail(
@@ -729,21 +867,21 @@ fn validate_outbound_tls(tls: &Tls, server: &Endpoint, index: usize) -> Result<(
             "requires client_private_key and vice versa",
         ));
     }
-    if let Some(value) = tls.client_certificate.as_deref() {
-        if !valid_pem(value) {
-            return Err(fail(
-                format!("outbounds[{index}].tls.client_certificate"),
-                "must be inline PEM (ADR-0023); file paths are not accepted",
-            ));
-        }
+    if let Some(value) = tls.client_certificate.as_deref()
+        && !valid_pem(value)
+    {
+        return Err(fail(
+            format!("outbounds[{index}].tls.client_certificate"),
+            "must be inline PEM (ADR-0023); file paths are not accepted",
+        ));
     }
-    if let Some(value) = tls.client_private_key.as_deref() {
-        if !valid_pem(value) {
-            return Err(fail(
-                format!("outbounds[{index}].tls.client_private_key"),
-                "must be inline PEM (ADR-0023); file paths are not accepted",
-            ));
-        }
+    if let Some(value) = tls.client_private_key.as_deref()
+        && !valid_pem(value)
+    {
+        return Err(fail(
+            format!("outbounds[{index}].tls.client_private_key"),
+            "must be inline PEM (ADR-0023); file paths are not accepted",
+        ));
     }
     validate_alpn(
         tls.alpn.as_deref(),
@@ -761,15 +899,15 @@ fn validate_outbound_transport(outbound: &Outbound, index: usize) -> Result<(), 
 
     match transport.network {
         StreamNetwork::Ws => {
-            if let Some(tls) = outbound.tls.as_ref() {
-                if let Some(alpn) = tls.alpn.as_deref() {
-                    if !alpn.is_empty() && !contains(alpn, "http/1.1") {
-                        return Err(fail(
-                            format!("outbounds[{index}].tls.alpn"),
-                            "must contain 'http/1.1' for the ws transport",
-                        ));
-                    }
-                }
+            if let Some(tls) = outbound.tls.as_ref()
+                && let Some(alpn) = tls.alpn.as_deref()
+                && !alpn.is_empty()
+                && !contains(alpn, "http/1.1")
+            {
+                return Err(fail(
+                    format!("outbounds[{index}].tls.alpn"),
+                    "must contain 'http/1.1' for the ws transport",
+                ));
             }
         }
         StreamNetwork::H2 => {
@@ -779,21 +917,21 @@ fn validate_outbound_transport(outbound: &Outbound, index: usize) -> Result<(), 
                     "required for the h2 transport",
                 )
             })?;
-            if let Some(alpn) = tls.alpn.as_deref() {
-                if !contains(alpn, "h2") {
-                    return Err(fail(
-                        format!("outbounds[{index}].tls.alpn"),
-                        "must contain 'h2' for the h2 transport",
-                    ));
-                }
+            if let Some(alpn) = tls.alpn.as_deref()
+                && !contains(alpn, "h2")
+            {
+                return Err(fail(
+                    format!("outbounds[{index}].tls.alpn"),
+                    "must contain 'h2' for the h2 transport",
+                ));
             }
-            if let Some(required) = tls.required_alpn.as_deref() {
-                if required != "h2" {
-                    return Err(fail(
-                        format!("outbounds[{index}].tls.required_alpn"),
-                        "must be 'h2' for the h2 transport",
-                    ));
-                }
+            if let Some(required) = tls.required_alpn.as_deref()
+                && required != "h2"
+            {
+                return Err(fail(
+                    format!("outbounds[{index}].tls.required_alpn"),
+                    "must be 'h2' for the h2 transport",
+                ));
             }
         }
         StreamNetwork::Tcp => {}
@@ -822,10 +960,10 @@ fn validate_transport_shape(transport: &StreamTransport, base: &str) -> Result<(
                     format!("invalid path '{}'", transport.path),
                 ));
             }
-            if let Some(host) = transport.host.as_deref() {
-                if !valid_host(host) {
-                    return Err(fail(format!("{base}.host"), "invalid host"));
-                }
+            if let Some(host) = transport.host.as_deref()
+                && !valid_host(host)
+            {
+                return Err(fail(format!("{base}.host"), "invalid host"));
             }
             if transport.network == StreamNetwork::H2 {
                 if transport.compression || transport.subprotocols.is_some() {
@@ -886,10 +1024,10 @@ fn validate_alpn(
             }
         }
     }
-    if let Some(needed) = required {
-        if !list.iter().any(|protocol| protocol == needed) {
-            return Err(fail(format!("{base}.required_alpn"), "not present in alpn"));
-        }
+    if let Some(needed) = required
+        && !list.iter().any(|protocol| protocol == needed)
+    {
+        return Err(fail(format!("{base}.required_alpn"), "not present in alpn"));
     }
     Ok(())
 }
@@ -958,13 +1096,13 @@ fn validate_rule(rule: &Rule, index: usize, inbounds: &[Inbound]) -> Result<(), 
             }
         }
     }
-    if let Some(ports) = rule.port.as_deref() {
-        if ports.is_empty() {
-            return Err(fail(
-                format!("route.rules[{index}].port"),
-                "must not be empty",
-            ));
-        }
+    if let Some(ports) = rule.port.as_deref()
+        && ports.is_empty()
+    {
+        return Err(fail(
+            format!("route.rules[{index}].port"),
+            "must not be empty",
+        ));
     }
     validate_port_ranges(rule.port_range.as_deref(), index)?;
     validate_rule_inbounds(rule.inbound.as_deref(), index, inbounds)?;
@@ -997,13 +1135,13 @@ fn validate_rule_values(
         if value.contains('\0') {
             return Err(fail(format!("{path}[{index}]"), "must not contain NUL"));
         }
-        if let Some(max_len) = max_len {
-            if value.len() > max_len {
-                return Err(fail(
-                    format!("{path}[{index}]"),
-                    format!("must be at most {max_len} bytes"),
-                ));
-            }
+        if let Some(max_len) = max_len
+            && value.len() > max_len
+        {
+            return Err(fail(
+                format!("{path}[{index}]"),
+                format!("must be at most {max_len} bytes"),
+            ));
         }
         if values[..index].contains(value) {
             return Err(fail(format!("{path}[{index}]"), "duplicate value"));
@@ -1679,5 +1817,103 @@ mod tests {
           "route":{"rules":[{"inbound":["socks"],"outbound":"direct"}]}
         }"#;
         assert!(parse(known_inbound).is_ok());
+    }
+
+    #[cfg(feature = "dns")]
+    #[test]
+    fn accepts_dns_for_builtin_and_injection() {
+        assert!(parse(r#"{"dns":{}}"#).is_ok());
+        let full = r#"{
+          "dns": {
+            "servers": [
+              { "protocol": "https", "address": "1.1.1.1:443", "path": "/dns-query" },
+              { "protocol": "tls", "address": "8.8.8.8:853", "server_name": "dns.google" }
+            ],
+            "fallback": [{ "protocol": "udp", "address": "1.0.0.1:53" }],
+            "tls": { "ca": "pem" }
+          }
+        }"#;
+        assert!(parse(full).is_ok());
+    }
+
+    #[cfg(feature = "dns")]
+    #[test]
+    fn rejects_bad_dns_addresses() {
+        assert_path(
+            error(r#"{"dns":{"servers":[{"protocol":"udp","address":"dns.example:53"}]}}"#),
+            "dns.servers[0].address",
+        );
+        assert_path(
+            error(r#"{"dns":{"servers":[{"protocol":"udp","address":"1.1.1.1:0"}]}}"#),
+            "dns.servers[0].address",
+        );
+    }
+
+    #[cfg(feature = "dns")]
+    #[test]
+    fn rejects_dns_protocol_fields() {
+        assert_path(
+            error(
+                r#"{"dns":{"servers":[{"protocol":"udp","address":"1.1.1.1:53","server_name":"x"}]}}"#,
+            ),
+            "dns.servers[0].server_name",
+        );
+        assert_path(
+            error(
+                r#"{"dns":{"servers":[{"protocol":"tls","address":"1.1.1.1:853","path":"/x"}]}}"#,
+            ),
+            "dns.servers[0].path",
+        );
+        assert_path(
+            error(
+                r#"{"dns":{"servers":[{"protocol":"https","address":"1.1.1.1:443","path":"x"}]}}"#,
+            ),
+            "dns.servers[0].path",
+        );
+    }
+
+    #[cfg(feature = "dns")]
+    #[test]
+    fn rejects_duplicate_dns_servers() {
+        let text = r#"{"dns":{"servers":[
+            {"protocol":"udp","address":"1.1.1.1:53"},
+            {"protocol":"udp","address":"1.1.1.1:53"}
+        ]}}"#;
+        assert_path(error(text), "dns.servers[1]");
+    }
+
+    #[cfg(feature = "dns")]
+    #[test]
+    fn rejects_bad_dns_ranges() {
+        assert_path(error(r#"{"dns":{"timeout_ms":99}}"#), "dns.timeout_ms");
+        assert_path(error(r#"{"dns":{"max_inflight":0}}"#), "dns.max_inflight");
+        assert_path(
+            error(r#"{"dns":{"min_ttl_s":10,"max_ttl_s":5}}"#),
+            "dns.min_ttl_s",
+        );
+        assert_path(
+            error(r#"{"dns":{"negative_ttl_s":3601}}"#),
+            "dns.negative_ttl_s",
+        );
+    }
+
+    #[cfg(feature = "dns")]
+    #[test]
+    fn rejects_dns_fallback_without_servers() {
+        assert_path(
+            error(r#"{"dns":{"fallback":[{"protocol":"udp","address":"1.0.0.1:53"}]}}"#),
+            "dns.fallback",
+        );
+    }
+
+    #[cfg(feature = "dns")]
+    #[test]
+    fn rejects_too_many_dns_servers() {
+        let servers = (1..=9)
+            .map(|index| format!(r#"{{"protocol":"udp","address":"1.1.1.{index}:53"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let text = format!(r#"{{"dns":{{"servers":[{servers}]}}}}"#);
+        assert_path(error(&text), "dns.servers");
     }
 }

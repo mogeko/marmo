@@ -26,6 +26,9 @@ pub struct Config {
     pub limits: Limits,
     /// Process-identity lookup bounds.
     pub process: Process,
+    /// Optional DNS resolver policy. `None` uses the system resolver.
+    #[serde(default)]
+    pub dns: Option<Dns>,
     /// Configured inbounds.
     pub inbounds: Vec<Inbound>,
     /// Configured outbounds.
@@ -74,6 +77,7 @@ impl Default for Config {
             version: 2,
             limits: Limits::default(),
             process: Process::default(),
+            dns: None,
             inbounds: Vec::new(),
             outbounds: Vec::new(),
             route: Route::default(),
@@ -140,6 +144,88 @@ impl Default for Process {
             max_inflight: 64,
         }
     }
+}
+
+/// DNS resolver configuration.
+///
+/// The DNS subsystem and this configuration are inert unless the `dns` Cargo
+/// feature is enabled. With the feature enabled, `None` keeps the system
+/// resolver and `Some` installs the configured cache and upstreams.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Dns {
+    /// Preferred upstream servers, tried first.
+    pub servers: Vec<DnsServer>,
+    /// Servers tried only after every preferred server fails.
+    pub fallback: Vec<DnsServer>,
+    /// Total deadline for one lookup across both tiers.
+    pub timeout_ms: u16,
+    /// Maximum concurrent upstream lookups.
+    pub max_inflight: u16,
+    /// Maximum cache entries; `0` disables the library cache.
+    pub cache_capacity: u16,
+    /// Lower bound applied to a positive answer's TTL.
+    pub min_ttl_s: u32,
+    /// Upper bound applied to a positive answer's TTL.
+    pub max_ttl_s: u32,
+    /// Cache lifetime for NXDOMAIN/NODATA; `0` disables negative caching.
+    pub negative_ttl_s: u16,
+    /// TLS trust configuration for DoT/DoH servers.
+    pub tls: Option<DnsTls>,
+}
+
+impl Default for Dns {
+    fn default() -> Self {
+        Self {
+            servers: Vec::new(),
+            fallback: Vec::new(),
+            timeout_ms: 5000,
+            max_inflight: 64,
+            cache_capacity: 1024,
+            min_ttl_s: 0,
+            max_ttl_s: 3600,
+            negative_ttl_s: 30,
+            tls: None,
+        }
+    }
+}
+
+/// One configured DNS upstream.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DnsServer {
+    /// Transport protocol.
+    pub protocol: DnsProtocol,
+    /// Literal `IP:port` address; hostnames are rejected.
+    pub address: String,
+    /// TLS server name for `tls`/`https`; defaults to the address literal.
+    #[serde(default)]
+    pub server_name: Option<String>,
+    /// HTTP path for `https`; defaults to `/dns-query`.
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// DNS upstream transport.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DnsProtocol {
+    /// Plaintext DNS over UDP.
+    Udp,
+    /// Plaintext DNS over TCP.
+    Tcp,
+    /// DNS over TLS.
+    Tls,
+    /// DNS over HTTPS (HTTP/2).
+    Https,
+}
+
+/// TLS trust configuration for DNS servers.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DnsTls {
+    /// Inline PEM trust anchors; replaces platform roots when present.
+    pub ca: Option<String>,
 }
 
 /// An inbound listener.
@@ -617,6 +703,13 @@ impl fmt::Debug for Config {
         f.debug_struct("Config")
             .field("version", &self.version)
             .field("limits", &self.limits)
+            .field(
+                "dns",
+                &self
+                    .dns
+                    .as_ref()
+                    .map(|dns| (dns.servers.len(), dns.fallback.len())),
+            )
             .field("inbounds", &self.inbounds.len())
             .field("outbounds", &self.outbounds.len())
             .field("route", &self.route)
@@ -691,9 +784,57 @@ mod tests {
         assert_eq!(config.version, 2);
         assert_eq!(config.limits, Limits::default());
         assert_eq!(config.process, Process::default());
+        assert!(config.dns.is_none());
         assert!(config.inbounds.is_empty());
         assert!(config.outbounds.is_empty());
         assert_eq!(config.route.final_outbound, "direct");
+    }
+
+    #[cfg(feature = "dns")]
+    #[test]
+    fn parses_dns_config() {
+        let text = r#"{
+          "dns": {
+            "servers": [
+              {
+                "protocol": "https",
+                "address": "1.1.1.1:443",
+                "server_name": "cloudflare-dns.com",
+                "path": "/dns-query"
+              },
+              { "protocol": "tls", "address": "8.8.8.8:853" }
+            ],
+            "fallback": [{ "protocol": "udp", "address": "1.0.0.1:53" }],
+            "timeout_ms": 1500,
+            "cache_capacity": 0,
+            "tls": { "ca": "cert" }
+          }
+        }"#;
+        let config = Config::from_json(text).expect("parse");
+        let dns = config.dns.as_ref().expect("dns");
+        assert_eq!(dns.servers.len(), 2);
+        assert_eq!(dns.servers[0].protocol, DnsProtocol::Https);
+        assert_eq!(dns.servers[0].path.as_deref(), Some("/dns-query"));
+        assert_eq!(dns.fallback[0].protocol, DnsProtocol::Udp);
+        assert_eq!(dns.timeout_ms, 1500);
+        assert_eq!(dns.cache_capacity, 0);
+        assert_eq!(
+            dns.tls.as_ref().and_then(|tls| tls.ca.as_deref()),
+            Some("cert")
+        );
+    }
+
+    #[cfg(not(feature = "dns"))]
+    #[test]
+    fn rejects_dns_when_feature_is_disabled() {
+        let error = Config::from_json(r#"{"dns":{"servers":[]}}"#).expect_err("reject");
+        match error {
+            ConfigError::Validate { path, message } => {
+                assert_eq!(path, "dns");
+                assert!(message.contains("dns support is not compiled in"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

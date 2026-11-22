@@ -257,10 +257,10 @@ impl CompiledRule {
             return false;
         }
 
-        if let Some(network) = self.network {
-            if network != metadata.network {
-                return false;
-            }
+        if let Some(network) = self.network
+            && network != metadata.network
+        {
+            return false;
         }
 
         if !self.inbounds.is_empty() {
@@ -376,11 +376,11 @@ fn compile_port_ranges(values: Option<&[[u16; 2]]>) -> Vec<(u16, u16)> {
     ranges.sort_unstable();
     let mut merged: Vec<(u16, u16)> = Vec::with_capacity(ranges.len());
     for (start, end) in ranges {
-        if let Some(last) = merged.last_mut() {
-            if start <= last.1.saturating_add(1) {
-                last.1 = last.1.max(end);
-                continue;
-            }
+        if let Some(last) = merged.last_mut()
+            && start <= last.1.saturating_add(1)
+        {
+            last.1 = last.1.max(end);
+            continue;
         }
         merged.push((start, end));
     }

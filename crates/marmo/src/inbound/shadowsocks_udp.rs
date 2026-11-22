@@ -13,15 +13,13 @@ use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 use tokio::time::interval;
 
-use crate::direct;
+use crate::direct::Dialer;
 use crate::instance::Context;
 use crate::routing::Metadata;
 use crate::shadowsocks::{random_bytes, unix_now};
 
 /// Fixed session-table capacity.
 const MAX_SESSIONS: usize = 128;
-/// Bound on cached direct-UDP resolutions per session.
-const DIRECT_CACHE: usize = 64;
 /// Largest plaintext payload carried by one packet.
 const MAX_PAYLOAD: usize = 65_535;
 /// Largest encoded packet: separate header, body header, address, payload, tag.
@@ -61,17 +59,23 @@ pub(crate) async fn serve(
                 if sessions
                     .get(&client_session)
                     .is_some_and(|session| session.task.is_finished())
-                {
-                    if let Some(session) = sessions.remove(&client_session) {
+                    && let Some(session) = sessions.remove(&client_session) {
                         session.task.abort();
                     }
-                }
                 if !sessions.contains_key(&client_session) {
                     reap_sessions(&mut sessions, context.limits.idle_timeout);
                     if sessions.len() >= MAX_SESSIONS {
                         continue;
                     }
-                    let Some(session) = Session::create(&listener, method, &key, client_session, source).await
+                    let Some(session) = Session::create(
+                        &listener,
+                        method,
+                        &key,
+                        client_session,
+                        source,
+                        context.dialer.clone(),
+                    )
+                    .await
                     else {
                         continue;
                     };
@@ -126,14 +130,14 @@ struct Session {
     state: Arc<Mutex<ClientState>>,
     window: Window,
     ipv4: bool,
-    resolved: HashMap<Endpoint, SocketAddr>,
+    dialer: Dialer,
     task: JoinHandle<()>,
 }
 
 impl Session {
     async fn create(
         listener: &Arc<UdpSocket>, method: Method, key: &Arc<Key>, client_session_id: [u8; 8],
-        source: SocketAddr,
+        source: SocketAddr, dialer: Dialer,
     ) -> Option<Self> {
         let ipv4 = source.is_ipv4();
         let bind = if ipv4 {
@@ -202,21 +206,13 @@ impl Session {
             state,
             window: Window::default(),
             ipv4,
-            resolved: HashMap::new(),
+            dialer,
             task,
         })
     }
 
-    async fn resolve(&mut self, destination: &Endpoint) -> Option<SocketAddr> {
-        if let Some(address) = self.resolved.get(destination) {
-            return Some(*address);
-        }
-        let address = direct::resolve_udp(destination, self.ipv4).await.ok()?;
-        if self.resolved.len() >= DIRECT_CACHE {
-            self.resolved.clear();
-        }
-        self.resolved.insert(destination.clone(), address);
-        Some(address)
+    async fn resolve(&self, destination: &Endpoint) -> Option<SocketAddr> {
+        self.dialer.resolve_udp(destination, self.ipv4).await.ok()
     }
 
     fn touch(&self, source: SocketAddr) {

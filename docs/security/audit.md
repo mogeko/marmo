@@ -5,7 +5,7 @@
   before a production-readiness claim.
 - Related: ADR-0009 (clean-room), ADR-0018 (dependencies and crypto),
   ADR-0020 (license), ADR-0028 (injected rule sets), ADR-0029 (process
-  identity injection).
+  identity injection), ADR-0030 (DNS resolver).
 
 ## 1. Threat model
 
@@ -19,7 +19,7 @@ Adversaries:
    listener, including slow or truncated handshakes.
 2. An authenticated but malicious proxy client that sends hostile framing after
    authentication.
-3. A malicious or compromised upstream TLS server or proxy peer.
+3. A malicious or compromised upstream TLS server, proxy peer, or DNS resolver.
 4. A malicious configuration file is treated as trusted input from the
    embedder; parsing is still bounded so a huge file cannot allocate without
    limit.
@@ -65,13 +65,20 @@ not implemented in this revision (QUIC, TUIC, Hysteria2).
   4 MiB in-flight downlink budget. TCP downlink applies backpressure; UDP drops
   under queue pressure. Session ids are never reused, and all pool tasks are
   tracked and cancelled with the instance.
-- **Injected routing providers.** `DomainSet`, `IpSet`, and `ProcessResolver`
-  are trusted embedder code. The library bounds tag count, process-cache size,
-  lookup timeout, and in-flight resolver calls; provider data bounds and
-  storage integrity are outside the library. Process identity is best-effort,
-  is not a security boundary, and is never logged. A provider error is a
-  non-match, not a connection failure; a provider panic is a contract
-  violation.
+- **DNS.** The optional resolver uses explicit IP endpoints and never reads
+  `resolv.conf` or `hosts`. DoT/DoH verify against the platform trust store or
+  an explicit inline CA; there is no `insecure` switch. Answers are capped at
+  16 addresses, the cache is bounded, each lookup has a total deadline and an
+  in-flight limit, and query names are never logged. Plaintext fallback is an
+  explicit configuration choice; there is no implicit system fallback. The
+  DNS wire decoder and transports are hickory's, not ours.
+- **Injected routing providers.** `DomainSet`, `IpSet`, `ProcessResolver`, and
+  `DnsResolver` are trusted embedder code. The library bounds tag count,
+  process and DNS cache size, lookup timeout, and in-flight resolver calls;
+  provider data bounds and storage integrity are outside the library. Process
+  identity is best-effort, is not a security boundary, and is never logged. A
+  provider error is a non-match or lookup failure, not a panic path; a provider
+  panic is a contract violation.
 
 ## 3. Open obligations
 
@@ -86,6 +93,7 @@ not implemented in this revision (QUIC, TUIC, Hysteria2).
 | Resource bounds | Re-check every queue, table, and cache on new features; no unbounded per-peer state. |
 | Injected providers | Audit each `DomainSet`/`IpSet`/`ProcessResolver` implementation for the declared contract: in-memory, non-blocking, allocation-free, bounded, and panic-free. |
 | Process identity | Treat process matching as policy convenience, not authorization; do not log names or paths. |
+| DNS | Review the `hickory-resolver` dependency on upgrades; keep the cache, deadline, and in-flight bounds; verify that no query name reaches logs or metrics. |
 | Secrets | Keep redaction and zeroization tests for every new credential-bearing type. |
 | Supply chain | Review new build scripts, proc macros, and `unsafe`; keep the lockfile and audit gate current. |
 
@@ -100,6 +108,10 @@ not implemented in this revision (QUIC, TUIC, Hysteria2).
 - The library is a proxy: a configuration mistake can expose a listener or
   disable verification for a loopback test target. Validation narrows the
   latter but does not make arbitrary configuration safe.
+- A deliberately configured plaintext DNS upstream exposes query names to the
+  path between the library and that upstream. An embedder that enables
+  trace-level `hickory-resolver` logging may also expose names outside the
+  library's own logging policy.
 
 ## 5. Audit plan
 
@@ -110,7 +122,9 @@ not implemented in this revision (QUIC, TUIC, Hysteria2).
    TCP/UoT/XUDP/WS/H2.
 4. Review the `rustls` configuration: verification, TLS 1.3 floor, ALPN, mTLS,
    platform verifier, and the loopback-only `insecure` path.
-5. Run `cargo audit` and the copyleft check; record the dependency tree and
+5. Review the DNS resolver: explicit upstreams, TLS trust, cache bounds,
+   deadline, fallback policy, and the absence of query names in logs.
+6. Run `cargo audit` and the copyleft check; record the dependency tree and
    provider version.
-6. Commission the external review; scope it to codecs, config, relay and
+7. Commission the external review; scope it to codecs, config, relay, DNS,
    cancellation paths, and dependency boundaries.

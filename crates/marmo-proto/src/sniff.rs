@@ -3,9 +3,9 @@
 //! The sniffer recognises a TLS `ClientHello` server name, an HTTP/1 `Host`
 //! header, and the HPACK-encoded `:authority` of the first HTTP/2 request. It
 //! is a pure decoder: callers feed it a bounded prefix and decide when to stop
-//! reading. Returning [`SniffError::NeedMore`] means the prefix is still a
-//! valid start of the protocol; `Ok(None)` means the input is not a recognised
-//! protocol or carries no domain.
+//! reading. Returning [`crate::sniff::SniffError::NeedMore`] means the prefix
+//! is still a valid start of the protocol; `Ok(None)` means the input is not a
+//! recognised protocol or carries no domain.
 //!
 //! The HTTP/2 path includes a bounded HPACK decoder (RFC 7541) so plaintext
 //! HTTP/2 can be sniffed without terminating the connection.

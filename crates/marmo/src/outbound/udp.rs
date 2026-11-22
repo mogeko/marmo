@@ -1,21 +1,17 @@
 //! Datagram outbounds: direct sockets and Shadowsocks 2022 framing.
 
-use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 
 use marmo_net::Endpoint;
 use tokio::net::UdpSocket;
 
-use crate::direct;
+use crate::direct::Dialer;
 use crate::outbound::mux::MuxDatagram;
 use crate::outbound::trojan::TrojanUdpClient;
 use crate::outbound::vless::{VlessUdpClient, VlessXudpClient};
 use crate::outbound::vmess::VmessUdpClient;
 use crate::shadowsocks::SsUdpClient;
-
-/// Bound on cached direct-UDP resolutions per association.
-const DIRECT_CACHE: usize = 64;
 
 /// An established datagram path to one outbound.
 pub(crate) enum UdpOutbound {
@@ -23,7 +19,7 @@ pub(crate) enum UdpOutbound {
     Direct {
         socket: UdpSocket,
         ipv4: bool,
-        cache: HashMap<Endpoint, SocketAddr>,
+        dialer: Dialer,
     },
     /// A Shadowsocks 2022 association with one server.
     Shadowsocks(SsUdpClient),
@@ -41,7 +37,7 @@ pub(crate) enum UdpOutbound {
 
 impl UdpOutbound {
     /// Binds a direct socket of the requested family.
-    pub(crate) async fn direct(ipv4: bool) -> io::Result<Self> {
+    pub(crate) async fn direct(dialer: Dialer, ipv4: bool) -> io::Result<Self> {
         let bind = if ipv4 {
             SocketAddr::from(([0, 0, 0, 0], 0))
         } else {
@@ -50,7 +46,7 @@ impl UdpOutbound {
         Ok(Self::Direct {
             socket: UdpSocket::bind(bind).await?,
             ipv4,
-            cache: HashMap::new(),
+            dialer,
         })
     }
 
@@ -60,19 +56,9 @@ impl UdpOutbound {
             Self::Direct {
                 socket,
                 ipv4,
-                cache,
+                dialer,
             } => {
-                let address = match cache.get(target) {
-                    Some(address) => *address,
-                    None => {
-                        let address = direct::resolve_udp(target, *ipv4).await?;
-                        if cache.len() >= DIRECT_CACHE {
-                            cache.clear();
-                        }
-                        cache.insert(target.clone(), address);
-                        address
-                    }
-                };
+                let address = dialer.resolve_udp(target, *ipv4).await?;
                 socket.send_to(payload, address).await?;
                 Ok(())
             }
