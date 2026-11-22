@@ -77,8 +77,8 @@ are independent enough to be taken in any order after their dependencies.
 | P2-13 | Fixture parity for all codecs | Planned | P1-5, P2-1..P2-4 | Corpus/unit vectors, differential interop records | 1 d |
 
 **Phase 2 gate:** every remaining item either complete or explicitly moved out
-of Phase 2 by an ADR. VMess landed under ADR-0025; the remaining items are
-scheduled above.
+of Phase 2 by an ADR. VMess landed under ADR-0025, DNS under ADR-0030; the
+remaining items are scheduled above.
 
 ## Phase 3 — QUIC, TUIC, Hysteria2, gRPC, XHTTP
 

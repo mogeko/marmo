@@ -878,6 +878,20 @@ mod tests {
     }
 
     #[test]
+    fn rejects_an_invalid_tls_server_name() {
+        let server = DnsServer {
+            protocol: DnsProtocol::Tls,
+            address: "1.1.1.1:853".into(),
+            server_name: Some("example.com:443".into()),
+            path: None,
+        };
+        assert!(matches!(
+            name_server(&server),
+            Err(DnsBuildError::Config(_))
+        ));
+    }
+
+    #[test]
     fn build_is_none_without_config_or_injection() {
         assert!(
             DnsRuntime::build(None, None, Metrics::new(None))

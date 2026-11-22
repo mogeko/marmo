@@ -435,7 +435,7 @@ fn direct_config(dns: &str) -> String {
 
 #[tokio::test]
 async fn tcp_dials_use_the_cache_and_expire() {
-    let dns = start_dns(DnsBehavior::Answer(Ipv4Addr::LOCALHOST, 1)).await;
+    let dns = start_dns(DnsBehavior::Answer(Ipv4Addr::LOCALHOST, 2)).await;
     let (echo, echo_task) = start_echo().await;
     let config = direct_config(&dns_config(dns.address));
     let (address, handle, serve) = start(&config).await;
@@ -456,7 +456,7 @@ async fn tcp_dials_use_the_cache_and_expire() {
     assert_eq!(&buffer, b"two");
     assert_eq!(dns.query_count(), first, "second dial should hit the cache");
 
-    tokio::time::sleep(Duration::from_millis(1200)).await;
+    tokio::time::sleep(Duration::from_millis(2200)).await;
     let mut client = TcpStream::connect(address).await.expect("socks");
     assert_eq!(socks5_connect(&mut client, &target).await, 0);
     client.write_all(b"three").await.expect("write");
