@@ -43,7 +43,7 @@ impl Dialer {
         let addresses = self.lookup(domain).await?;
 
         let mut last_error = None;
-        for address in addresses {
+        for address in addresses.iter().copied() {
             match TcpStream::connect(SocketAddr::new(address, endpoint.port())).await {
                 Ok(stream) => return Ok(stream),
                 Err(error) => last_error = Some(error),
@@ -64,7 +64,8 @@ impl Dialer {
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "endpoint has no host"))?;
         self.lookup(domain)
             .await?
-            .into_iter()
+            .iter()
+            .copied()
             .next()
             .map(|address| SocketAddr::new(address, endpoint.port()))
             .ok_or_else(|| io::Error::new(io::ErrorKind::AddrNotAvailable, "no addresses resolved"))
@@ -87,7 +88,7 @@ impl Dialer {
         let domain = endpoint
             .domain()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "endpoint has no host"))?;
-        for address in self.lookup(domain).await? {
+        for address in self.lookup(domain).await?.iter().copied() {
             if address.is_ipv4() == ipv4 {
                 return Ok(SocketAddr::new(address, endpoint.port()));
             }
@@ -98,14 +99,10 @@ impl Dialer {
         ))
     }
 
-    async fn lookup(&self, domain: &str) -> io::Result<Vec<IpAddr>> {
+    async fn lookup(&self, domain: &str) -> io::Result<Arc<[IpAddr]>> {
         #[cfg(feature = "dns")]
         if let Some(dns) = self.dns.as_ref() {
-            return dns
-                .resolve(domain)
-                .await
-                .map(|addresses| addresses.to_vec())
-                .map_err(DnsRuntime::io_resolve);
+            return dns.resolve(domain).await.map_err(DnsRuntime::io_resolve);
         }
 
         let addresses = tokio::net::lookup_host((domain, 0)).await?;

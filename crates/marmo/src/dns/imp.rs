@@ -1,5 +1,6 @@
 //! Implementation of the feature-gated DNS subsystem.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::io;
@@ -253,7 +254,7 @@ impl DnsRuntime {
 
     pub(crate) async fn resolve(&self, name: &str) -> Result<Arc<[IpAddr]>, DnsError> {
         let key = cache_key(name)?;
-        if let Some(value) = self.cache_get(&key) {
+        if let Some(value) = self.cache_get(key.as_ref()) {
             self.metrics.record(MetricEvent::DnsCacheHit);
             return cached_result(value);
         }
@@ -265,9 +266,12 @@ impl DnsRuntime {
             .map_err(|_| DnsError::Busy)?;
         self.metrics.record(MetricEvent::DnsQuery);
         let deadline = Instant::now() + self.policy.timeout;
-        let result = self.plan.resolve(&key, deadline, &self.metrics).await;
+        let result = self
+            .plan
+            .resolve(key.as_ref(), deadline, &self.metrics)
+            .await;
         drop(permit);
-        self.store(&key, result)
+        self.store(key.as_ref(), result)
     }
 
     fn store(
@@ -390,11 +394,16 @@ fn cached_result(value: Cached) -> Result<Arc<[IpAddr]>, DnsError> {
     }
 }
 
-fn cache_key(name: &str) -> Result<Box<str>, DnsError> {
+fn cache_key(name: &str) -> Result<Cow<'_, str>, DnsError> {
     let name = name.trim_end_matches('.');
-    DomainName::parse(name)
-        .map(|domain| Box::<str>::from(domain.as_str()))
-        .map_err(|_| DnsError::InvalidName)
+    if name.is_empty() || name.len() > DomainName::MAX_LEN {
+        return Err(DnsError::InvalidName);
+    }
+    if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        Ok(Cow::Owned(name.to_ascii_lowercase()))
+    } else {
+        Ok(Cow::Borrowed(name))
+    }
 }
 
 fn deduplicate(addresses: Vec<IpAddr>) -> Arc<[IpAddr]> {
