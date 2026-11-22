@@ -12,7 +12,7 @@ use zeroize::Zeroize as _;
 
 use crate::config::{
     ClientAuth, Config, ConfigError, Inbound, InboundProtocol, Limits as ConfigLimits, Outbound,
-    OutboundProtocol, Route, Rule, StreamNetwork, StreamTransport, Tls,
+    OutboundProtocol, Route, Rule, Sniffing, StreamNetwork, StreamTransport, Tls,
 };
 
 impl Config {
@@ -84,6 +84,8 @@ fn validate_inbounds(inbounds: &[Inbound]) -> Result<(), ConfigError> {
             ));
         }
 
+        validate_sniffing(inbound.sniffing.as_ref(), index)?;
+
         match inbound.protocol {
             InboundProtocol::Socks5 | InboundProtocol::Http => {
                 if inbound.method.is_some()
@@ -103,6 +105,36 @@ fn validate_inbounds(inbounds: &[Inbound]) -> Result<(), ConfigError> {
             InboundProtocol::Trojan => validate_trojan_inbound(inbound, index)?,
             InboundProtocol::Vless => validate_vless_inbound(inbound, index)?,
             InboundProtocol::Vmess => validate_vmess_inbound(inbound, index)?,
+        }
+    }
+    Ok(())
+}
+
+fn validate_sniffing(sniffing: Option<&Sniffing>, index: usize) -> Result<(), ConfigError> {
+    let Some(sniffing) = sniffing else {
+        return Ok(());
+    };
+    let Some(protocols) = sniffing.protocols.as_deref() else {
+        return Ok(());
+    };
+    if !sniffing.enabled {
+        return Err(fail(
+            format!("inbounds[{index}].sniffing.protocols"),
+            "requires enabled",
+        ));
+    }
+    if protocols.is_empty() {
+        return Err(fail(
+            format!("inbounds[{index}].sniffing.protocols"),
+            "must not be empty",
+        ));
+    }
+    for (protocol_index, protocol) in protocols.iter().enumerate() {
+        if protocols[..protocol_index].contains(protocol) {
+            return Err(fail(
+                format!("inbounds[{index}].sniffing.protocols[{protocol_index}]"),
+                "duplicate value",
+            ));
         }
     }
     Ok(())
@@ -1349,6 +1381,39 @@ mod tests {
             parse(r#"{"outbounds":[{"tag":"h","protocol":"http","server":"example.com:80"}]}"#)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn validates_sniffing_options() {
+        let all = r#"{"inbounds":[{
+            "tag":"s","protocol":"socks5","listen":"127.0.0.1:1080",
+            "sniffing":{"enabled":true}
+        }]}"#;
+        assert!(parse(all).is_ok());
+
+        let none = r#"{"inbounds":[{
+            "tag":"s","protocol":"socks5","listen":"127.0.0.1:1080",
+            "sniffing":{"enabled":false,"protocols":["tls"]}
+        }]}"#;
+        assert_path(error(none), "inbounds[0].sniffing.protocols");
+
+        let empty = r#"{"inbounds":[{
+            "tag":"s","protocol":"socks5","listen":"127.0.0.1:1080",
+            "sniffing":{"enabled":true,"protocols":[]}
+        }]}"#;
+        assert_path(error(empty), "inbounds[0].sniffing.protocols");
+
+        let duplicate = r#"{"inbounds":[{
+            "tag":"s","protocol":"socks5","listen":"127.0.0.1:1080",
+            "sniffing":{"enabled":true,"protocols":["tls","tls"]}
+        }]}"#;
+        assert_path(error(duplicate), "inbounds[0].sniffing.protocols[1]");
+
+        let unknown = r#"{"inbounds":[{
+            "tag":"s","protocol":"socks5","listen":"127.0.0.1:1080",
+            "sniffing":{"enabled":true,"unknown":true}
+        }]}"#;
+        assert_json_path(error(unknown), "inbounds[0].sniffing.unknown");
     }
 
     #[test]
