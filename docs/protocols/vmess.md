@@ -252,3 +252,6 @@ a bounded pool of up to four physical connections.
 - Synthetic request, chunk, response, and Mux corpus files live in
   `fuzz/corpus/vmess/`; the `vmess` target runs under `cargo +nightly fuzz
   run`.
+- Standalone example: `crates/marmo/examples/vmess.rs` runs a server over TCP,
+  TLS, WebSocket, or HTTP/2 and a SOCKS5 client with an optional body cipher or
+  `mux` pooling.

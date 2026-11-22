@@ -226,3 +226,6 @@ Planned scope when it is taken up:
   `docs/security/audit.md`.
 - Reference interop: TCP/WS/H2 and UDP/XUDP were checked locally against
   Xray-core and V2Ray; the harness is not committed.
+- Standalone example: `crates/marmo/examples/vless.rs` runs a TLS server over
+  TCP, WebSocket, or HTTP/2 and a SOCKS5 client with simple UoT, XUDP, or
+  `mux` pooling.
