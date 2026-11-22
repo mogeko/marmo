@@ -39,7 +39,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for target in ss2022_tcp ss2022_udp socks5 trojan vless xudp http; do
+          for target in ss2022_tcp ss2022_udp socks5 trojan vless vmess http; do
             echo "::group::Fuzzing ${target}"
             cargo +nightly fuzz run "${target}" -- -runs=1000 -max_len=4096 -timeout=25
             echo "::endgroup::"
