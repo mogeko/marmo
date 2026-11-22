@@ -39,14 +39,16 @@ environment first.
 
 ## Rules
 
-- Edition 2024, MSRV 1.87 in `Cargo.toml`. CI tests 1.87.0 and the current
+- Edition 2024, MSRV 1.88 in `Cargo.toml`. CI tests 1.88.0 and the current
   stable; raise the MSRV only with a commit message that names the dependency
   that forced it.
 - `marmo-proto` and `marmo` are `#![forbid(unsafe_code)]`. `marmo-transport`
   denies unsafe by default; any block needs a written justification and a
   safety comment.
-- No feature flag selects a backend or a transport implementation. Features
-  are limited to test/bench support.
+- No feature flag selects a backend or a transport implementation. The `dns`
+  feature is a capability gate for the optional DNS subsystem (ADR-0030); it is
+  off by default, and the default workspace suite runs without it. Other
+  features are limited to test/bench support.
 - Errors are `thiserror` enums, `#[non_exhaustive]`; `anyhow` stays in examples
   and tests. Config is schema version 2; TLS credentials are inline PEM
   (ADR-0023).

@@ -26,8 +26,10 @@ pre-1.0.
 - **Routing:** exact and suffix domains, IP CIDR, destination port, and network.
 - **Limits:** global connection cap plus handshake, idle, and half-close
   timeouts.
-- **Metrics:** connection, byte, timeout, UDP-session, and health-probe counters
-  with an optional `MetricsSink`.
+- **Metrics:** connection, byte, timeout, UDP-session, health-probe, and DNS
+  counters with an optional `MetricsSink`.
+- **DNS (`dns` feature, off by default):** a bounded TTL cache, UDP/TCP/DoT/DoH
+  upstreams, explicit fallback, and an injectable resolver.
 
 ## Example
 
@@ -93,6 +95,21 @@ let instance = marmo::Instance::builder(config)
 allocation-free, bounded, and panic-free. Process lookups add a bounded cache,
 a timeout, and an in-flight limit; unknown process identity fails open. Data
 may be hot-swapped inside the provider without rebuilding the instance.
+
+## DNS
+
+The `dns` feature adds an opt-in resolver. Either configure explicit upstreams
+in the `dns` block, or inject an embedder resolver; the library cache, deadline,
+in-flight limit, and address cap apply in both cases:
+
+```rust,ignore
+let instance = marmo::Instance::builder(config)
+    .dns_resolver(resolver) // Arc<dyn marmo::dns::DnsResolver>
+    .build()?;
+```
+
+Without the feature, a document containing a `dns` block is rejected with a
+validation error. Without a `dns` block, direct dials use the system resolver.
 
 ## Workspace
 

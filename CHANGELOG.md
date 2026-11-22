@@ -5,6 +5,14 @@ and behavior may change between minor releases.
 
 ## Unreleased
 
+- Added an opt-in DNS subsystem behind the non-default `dns` feature
+  (ADR-0030): bounded TTL cache, UDP/TCP/DoT/DoH upstreams, two-tier fallback,
+  a total lookup deadline, an in-flight limit, and a public `DnsResolver`
+  override. Direct TCP/UDP and proxy-server dials use it; routing-time IP
+  rules still see literal addresses only.
+- MSRV is now Rust 1.88, raised for `hickory-resolver` 0.26.3. The dependency
+  is optional and compiled only with `dns`.
+- DNS query/cache-hit/fallback/failure metrics and a redacted config `Debug`.
 - Injected domain and IP sets through `DomainSet`/`IpSet`, plus
   `domain_keyword`, `port_range`, `inbound`, `domain_set`, and `geoip`
   matchers; the library never reads rule-set files or requests data at runtime

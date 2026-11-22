@@ -21,8 +21,10 @@ proxy protocols, rule-based routing, and latency-aware outbound selection.
   network, and inbound tags; large domain/IP sets and process identity are
   supplied by the embedder through injected providers.
 - Limits: global connection cap plus handshake, idle, and half-close timeouts.
-- Metrics: connection, byte, timeout, UDP-session, and health-probe counters
-  with an optional `MetricsSink`.
+- Metrics: connection, byte, timeout, UDP-session, health-probe, and DNS
+  counters with an optional `MetricsSink`.
+- Optional DNS (`dns` feature): a bounded TTL cache, UDP/TCP/DoT/DoH upstreams,
+  explicit fallback, and an injectable `DnsResolver` override.
 - Strict JSON configuration, schema version 2. TLS credentials are inline PEM.
 
 ## Workspace
@@ -68,14 +70,33 @@ cargo run -p marmo --example vless -- client 127.0.0.1:1080 127.0.0.1:443 UUID t
 cargo run -p marmo --example vmess -- client 127.0.0.1:1080 127.0.0.1:8443 UUID tcp
 ```
 
+DNS is opt-in with the `dns` feature. A minimal DoH configuration:
+
+```json
+{
+  "dns": {
+    "servers": [
+      { "protocol": "https", "address": "1.1.1.1:443", "server_name": "cloudflare-dns.com" }
+    ],
+    "cache_capacity": 1024,
+    "timeout_ms": 5000
+  }
+}
+```
+
+Build with `cargo test -p marmo --features dns` or enable the feature in the
+embedding crate. Without a `dns` block, direct dials keep the system resolver.
+
 ## Development
 
-MSRV is Rust 1.87. The workspace uses edition 2024.
+MSRV is Rust 1.88. The workspace uses edition 2024. The `dns` feature is off by
+default; run the feature suite with `--all-features`.
 
 ```sh
 cargo test --workspace --locked
+cargo test --workspace --locked --all-features
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy --workspace --all-targets --locked --all-features -- -D warnings
 cargo +nightly fuzz build
 ```
 
