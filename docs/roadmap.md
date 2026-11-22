@@ -63,13 +63,13 @@ any order after their dependencies.
 | P2-5 | Selectors and health probes | Done | P1-6 | Five strategies, EWMA, TCP probes, unit tests |
 | P2-6 | Connection limits and deadlines | Done | P1-2 | Absolute handshake, shared idle, half-close tests |
 | P2-7 | VMess AEAD inbound/outbound: TCP, direct UDP, Mux.Cool | Done | P2-3, P2-4 | Vectors, loopback, Xray interop, fuzz |
+| P2-8 | Sniffing: TLS SNI, HTTP Host, HTTP/2 `:authority` | Done | P1-4, P2-1, P2-3 | Buffered replay, routing on sniffed domain, tests |
 | P2-14 | Client-side Mux.Cool pooling (VMess/VLESS) | Done | P2-1, P2-7 | Pool bounds, TCP/UDP/mixed, Xray interop |
 
 ### Remaining
 
 | ID | Item | Status | Depends on | Exit criteria | Estimate |
 | --- | --- | --- | --- | --- | --- |
-| P2-8 | Sniffing: TLS SNI, HTTP Host, HTTP/2 `:authority` | Planned | P1-4, P2-1, P2-3 | Buffered replay, routing on sniffed domain, tests | 2–3 d |
 | P2-9 | Compiled rule sets: GEOIP/GEOSITE, keyword, port ranges, inbound | Planned | P1-6, P2-8 | Versioned compiled format, bounded load, routing tests | 3–5 d |
 | P2-10 | Process rules (`sysinfo`, opt-in) | Planned | P1-6 | Fail-open "unknown", per-platform tests | included in P2-9 |
 | P2-11 | DNS cache + DoH/DoT resolver | Planned | P1-1 | TTL cache, bounded entries, DoH policy, fallback tests | 2–3 d |

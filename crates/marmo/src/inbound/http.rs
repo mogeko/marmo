@@ -13,44 +13,41 @@ use marmo_proto::http::{
     self, HEAD_MAX, HttpError, RequestHead, build_forward_head, find_head_end, parse_absolute,
 };
 use marmo_transport::BoxStream;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::deadline::Deadline;
 use crate::instance::Context;
 use crate::routing::{Action, Metadata};
+use crate::sniff::{self, Policy};
 
 /// Handles one accepted HTTP proxy connection.
 pub(crate) async fn handle(
-    mut client: TcpStream, context: Arc<Context>, inbound: Arc<str>, deadline: Deadline,
+    client: TcpStream, context: Arc<Context>, inbound: Arc<str>, sniffing: Option<Policy>,
+    deadline: Deadline,
 ) {
     let token = context.supervisor.token();
     let handshake = tokio::select! {
         _ = token.cancelled() => return,
-        result = deadline.run(prepare(&mut client, &context, &inbound)) => result,
+        result = deadline.run(prepare(client, &context, &inbound, sniffing, &deadline)) => result,
     };
-    let Ok(Ok(Some(remote))) = handshake else {
+    let Ok(Ok(Some((client, remote)))) = handshake else {
         return;
     };
 
-    context
-        .relay_streams(
-            Box::new(client) as BoxStream,
-            Box::new(remote) as BoxStream,
-            &token,
-        )
-        .await;
+    context.relay_streams(client, remote, &token).await;
 }
 
 async fn prepare(
-    client: &mut TcpStream, context: &Context, inbound: &str,
-) -> io::Result<Option<BoxStream>> {
-    let (buffer, head_len) = match read_head(client).await {
+    mut client: TcpStream, context: &Context, inbound: &str, sniffing: Option<Policy>,
+    deadline: &Deadline,
+) -> io::Result<Option<(BoxStream, BoxStream)>> {
+    let (buffer, head_len) = match read_head(&mut client).await {
         Ok(Some(head)) => head,
         Ok(None) => return Ok(None),
         Err(HeadError::Eof) => return Ok(None),
         Err(HeadError::TooLarge) => {
-            let _ = respond(client, "431 Request Header Fields Too Large").await;
+            let _ = respond(&mut client, "431 Request Header Fields Too Large").await;
             return Ok(None);
         }
         Err(HeadError::Io(error)) => return Err(error),
@@ -59,69 +56,113 @@ async fn prepare(
     let request = match http::parse_request(&buffer[..head_len]) {
         Ok(request) => request,
         Err(HttpError::TooManyHeaders | HttpError::TooLarge) => {
-            let _ = respond(client, "431 Request Header Fields Too Large").await;
+            let _ = respond(&mut client, "431 Request Header Fields Too Large").await;
             return Ok(None);
         }
         Err(HttpError::UnsupportedVersion) => {
-            let _ = respond(client, "505 HTTP Version Not Supported").await;
+            let _ = respond(&mut client, "505 HTTP Version Not Supported").await;
             return Ok(None);
         }
         Err(_) => {
-            let _ = respond(client, "400 Bad Request").await;
+            let _ = respond(&mut client, "400 Bad Request").await;
             return Ok(None);
         }
     };
 
-    let leftover = &buffer[head_len..];
+    let leftover = buffer[head_len..].to_vec();
     if request.method.eq_ignore_ascii_case("CONNECT") {
-        return connect_tunnel(client, context, inbound, request.target, leftover).await;
+        return connect_tunnel(
+            client,
+            context,
+            inbound,
+            request.target,
+            leftover,
+            sniffing,
+            deadline,
+        )
+        .await;
     }
     forward(client, context, inbound, &request, leftover).await
 }
 
 async fn connect_tunnel(
-    client: &mut TcpStream, context: &Context, inbound: &str, target_text: &str, leftover: &[u8],
-) -> io::Result<Option<BoxStream>> {
+    mut client: TcpStream, context: &Context, inbound: &str, target_text: &str, leftover: Vec<u8>,
+    sniffing: Option<Policy>, deadline: &Deadline,
+) -> io::Result<Option<(BoxStream, BoxStream)>> {
     let Ok(destination) = Endpoint::parse(target_text) else {
-        let _ = respond(client, "400 Bad Request").await;
+        let _ = respond(&mut client, "400 Bad Request").await;
         return Ok(None);
     };
-    let Some(action) = route(client, context, inbound, &destination).await? else {
+    let source: Endpoint = client.peer_addr()?.into();
+    let mut domain = destination.domain().map(str::to_owned);
+    let mut stream: BoxStream = Box::new(client);
+    let mut leftover = leftover;
+    let mut replied = false;
+
+    if let (Some(policy), None) = (sniffing, domain.as_deref()) {
+        if stream
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .await
+            .is_err()
+        {
+            return Ok(None);
+        }
+        replied = true;
+        let Ok(sniffed) = deadline
+            .run(sniff::sniff_stream(stream, leftover, policy))
+            .await
+        else {
+            return Ok(None);
+        };
+        domain = sniffed.domain;
+        stream = sniffed.stream;
+        leftover = Vec::new();
+    }
+
+    let action = route(context, inbound, source, &destination, domain.as_deref());
+    if matches!(action, Action::Reject(_)) {
+        if !replied {
+            let _ = respond(&mut stream, "403 Forbidden").await;
+        }
         return Ok(None);
-    };
+    }
     let mut remote = match context.connect(action, &destination).await {
         Ok(connected) => connected.stream,
         Err(_) => {
-            let _ = respond(client, "502 Bad Gateway").await;
+            if !replied {
+                let _ = respond(&mut stream, "502 Bad Gateway").await;
+            }
             return Ok(None);
         }
     };
 
-    if client
-        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        .await
-        .is_err()
-    {
-        return Ok(None);
+    if !replied {
+        if stream
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .await
+            .is_err()
+        {
+            return Ok(None);
+        }
+        if !leftover.is_empty() && remote.write_all(&leftover).await.is_err() {
+            return Ok(None);
+        }
     }
-    if !leftover.is_empty() {
-        remote.write_all(leftover).await?;
-    }
-    Ok(Some(remote))
+    Ok(Some((stream, remote)))
 }
 
 async fn forward(
-    client: &mut TcpStream, context: &Context, inbound: &str, request: &RequestHead<'_>,
-    leftover: &[u8],
-) -> io::Result<Option<BoxStream>> {
+    mut client: TcpStream, context: &Context, inbound: &str, request: &RequestHead<'_>,
+    leftover: Vec<u8>,
+) -> io::Result<Option<(BoxStream, BoxStream)>> {
     let target = match parse_absolute(request.target) {
         Ok(target) => target,
         Err(HttpError::UnsupportedScheme) => {
-            let _ = respond(client, "501 Not Implemented").await;
+            let _ = respond(&mut client, "501 Not Implemented").await;
             return Ok(None);
         }
         Err(_) => {
-            let _ = respond(client, "400 Bad Request").await;
+            let _ = respond(&mut client, "400 Bad Request").await;
             return Ok(None);
         }
     };
@@ -129,53 +170,54 @@ async fn forward(
     {
         Ok(head) => head,
         Err(HttpError::TooLarge) => {
-            let _ = respond(client, "431 Request Header Fields Too Large").await;
+            let _ = respond(&mut client, "431 Request Header Fields Too Large").await;
             return Ok(None);
         }
         Err(_) => {
-            let _ = respond(client, "400 Bad Request").await;
+            let _ = respond(&mut client, "400 Bad Request").await;
             return Ok(None);
         }
     };
 
-    let Some(action) = route(client, context, inbound, &target.endpoint).await? else {
+    let source = client.peer_addr()?.into();
+    let action = route(
+        context,
+        inbound,
+        source,
+        &target.endpoint,
+        target.endpoint.domain(),
+    );
+    if matches!(action, Action::Reject(_)) {
+        let _ = respond(&mut client, "403 Forbidden").await;
         return Ok(None);
-    };
+    }
     let mut remote = match context.connect(action, &target.endpoint).await {
         Ok(connected) => connected.stream,
         Err(_) => {
-            let _ = respond(client, "502 Bad Gateway").await;
+            let _ = respond(&mut client, "502 Bad Gateway").await;
             return Ok(None);
         }
     };
 
     remote.write_all(&head).await?;
     if !leftover.is_empty() {
-        remote.write_all(leftover).await?;
+        remote.write_all(&leftover).await?;
     }
-    Ok(Some(remote))
+    Ok(Some((Box::new(client) as BoxStream, remote)))
 }
 
-async fn route(
-    client: &mut TcpStream, context: &Context, inbound: &str, destination: &Endpoint,
-) -> io::Result<Option<Action>> {
-    let domain = destination.domain().map(str::to_owned);
-    let source = client.peer_addr()?.into();
+fn route(
+    context: &Context, inbound: &str, source: Endpoint, destination: &Endpoint,
+    domain: Option<&str>,
+) -> Action {
     let metadata = Metadata {
         network: Network::Tcp,
         source,
         destination: destination.clone(),
-        domain: domain.as_deref(),
+        domain,
         inbound: Some(inbound),
     };
-    let action = context.router.route(&metadata);
-    match action {
-        Action::Reject(_) => {
-            let _ = respond(client, "403 Forbidden").await;
-            Ok(None)
-        }
-        action => Ok(Some(action)),
-    }
+    context.router.route(&metadata)
 }
 
 enum HeadError {
@@ -207,7 +249,7 @@ async fn read_head(client: &mut TcpStream) -> Result<Option<(Vec<u8>, usize)>, H
     }
 }
 
-async fn respond(client: &mut TcpStream, status: &str) -> io::Result<()> {
+async fn respond<W: AsyncWrite + Unpin>(client: &mut W, status: &str) -> io::Result<()> {
     let response = format!("HTTP/1.1 {status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
     client.write_all(response.as_bytes()).await
 }

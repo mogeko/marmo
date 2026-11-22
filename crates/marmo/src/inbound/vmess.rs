@@ -19,6 +19,7 @@ use crate::deadline::{Deadline, wait_for_activity};
 use crate::instance::Context;
 use crate::outbound::udp::UdpOutbound;
 use crate::routing::{Action, Metadata};
+use crate::sniff::{self, Policy};
 use crate::vmess::{ChunkReader, ChunkStream, ChunkWriter, ReplayFilter, now_unix, random};
 
 /// Bounded queue between the chunk reader and the outbound reply task.
@@ -27,9 +28,11 @@ const UDP_QUEUE: usize = 16;
 const RESPONSE_MAX: usize = 64;
 
 /// Handles one accepted VMess connection.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle(
     client: TcpStream, context: Arc<Context>, inbound: Arc<str>, cmd_key: Arc<CmdKey>,
-    replay: Arc<Mutex<ReplayFilter>>, layers: Arc<[Arc<dyn Layer>]>, deadline: Deadline,
+    replay: Arc<Mutex<ReplayFilter>>, layers: Arc<[Arc<dyn Layer>]>, sniffing: Option<Policy>,
+    deadline: Deadline,
 ) {
     let token = context.supervisor.token();
     let source = client.peer_addr().ok().map(Endpoint::from);
@@ -52,7 +55,7 @@ pub(crate) async fn handle(
     match request.command {
         COMMAND_TCP => {
             connect_relay(
-                stream, request, leftover, &context, &inbound, source, token, deadline,
+                stream, request, leftover, &context, &inbound, source, token, deadline, sniffing,
             )
             .await;
         }
@@ -135,10 +138,32 @@ async fn prepare(
 
 #[allow(clippy::too_many_arguments)]
 async fn connect_relay(
-    mut stream: BoxStream, request: Request, leftover: Vec<u8>, context: &Context, inbound: &str,
-    source: Endpoint, token: CancellationToken, deadline: Deadline,
+    mut stream: BoxStream, request: Request, mut leftover: Vec<u8>, context: &Context,
+    inbound: &str, source: Endpoint, token: CancellationToken, deadline: Deadline,
+    sniffing: Option<Policy>,
 ) {
-    let Some(action) = route(context, inbound, source, &request.target, Network::Tcp) else {
+    let mut domain = request.target.domain().map(str::to_owned);
+    if let (Some(policy), None) = (sniffing, domain.as_deref()) {
+        let sniffed = tokio::select! {
+            _ = token.cancelled() => return,
+            result = deadline.run(sniff::sniff_stream(stream, leftover, policy)) => result,
+        };
+        let Ok(sniffed) = sniffed else {
+            return;
+        };
+        stream = sniffed.stream;
+        domain = sniffed.domain;
+        leftover = Vec::new();
+    }
+
+    let Some(action) = route(
+        context,
+        inbound,
+        source,
+        &request.target,
+        Network::Tcp,
+        domain.as_deref(),
+    ) else {
         return;
     };
     let connected = tokio::select! {
@@ -170,7 +195,14 @@ async fn handle_udp(
     inbound: Arc<str>, source: Endpoint, token: CancellationToken, deadline: Deadline,
 ) {
     let ipv4 = source.ip().is_none_or(|ip| ip.is_ipv4());
-    let Some(action) = route(&context, &inbound, source, &request.target, Network::Udp) else {
+    let Some(action) = route(
+        &context,
+        &inbound,
+        source,
+        &request.target,
+        Network::Udp,
+        request.target.domain(),
+    ) else {
         return;
     };
     let outbound = tokio::select! {
@@ -294,13 +326,13 @@ async fn reply_loop(
 
 fn route(
     context: &Context, inbound: &str, source: Endpoint, target: &Endpoint, network: Network,
+    domain: Option<&str>,
 ) -> Option<Action> {
-    let domain = target.domain().map(str::to_owned);
     let metadata = Metadata {
         network,
         source,
         destination: target.clone(),
-        domain: domain.as_deref(),
+        domain,
         inbound: Some(inbound),
     };
     Some(context.router.route(&metadata))

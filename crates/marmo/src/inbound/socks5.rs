@@ -10,7 +10,7 @@ use marmo_proto::socks5::{
     encode_method_selection, encode_reply, encode_udp, parse_udp,
 };
 use marmo_transport::BoxStream;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -19,6 +19,7 @@ use crate::deadline::Deadline;
 use crate::instance::Context;
 use crate::outbound::udp::UdpOutbound;
 use crate::routing::{Action, Metadata};
+use crate::sniff::{self, Policy};
 
 const ATYP_IPV4: u8 = 0x01;
 const ATYP_DOMAIN: u8 = 0x03;
@@ -28,7 +29,8 @@ const UDP_REPLY_BUFFER: usize = 65_535 + 262;
 
 /// Handles one accepted SOCKS5 connection.
 pub(crate) async fn handle(
-    mut client: TcpStream, context: Arc<Context>, inbound: Arc<str>, deadline: Deadline,
+    mut client: TcpStream, context: Arc<Context>, inbound: Arc<str>, sniffing: Option<Policy>,
+    deadline: Deadline,
 ) {
     let token = context.supervisor.token();
     let handshake = tokio::select! {
@@ -44,19 +46,20 @@ pub(crate) async fn handle(
             let connect = tokio::select! {
                 _ = token.cancelled() => return,
                 result = deadline.run(
-                    connect_target(&mut client, &context, &inbound, request.destination),
+                    connect_target(
+                        client,
+                        &context,
+                        &inbound,
+                        request.destination,
+                        sniffing,
+                        &deadline,
+                    ),
                 ) => result,
             };
-            let Ok(Ok(Some(remote))) = connect else {
+            let Ok(Ok(Some((client, remote)))) = connect else {
                 return;
             };
-            context
-                .relay_streams(
-                    Box::new(client) as BoxStream,
-                    Box::new(remote) as BoxStream,
-                    &token,
-                )
-                .await;
+            context.relay_streams(client, remote, &token).await;
         }
         Command::UdpAssociate => {
             udp_associate(client, context, inbound, token).await;
@@ -66,10 +69,32 @@ pub(crate) async fn handle(
 }
 
 async fn connect_target(
-    client: &mut TcpStream, context: &Context, inbound: &str, destination: Endpoint,
-) -> io::Result<Option<marmo_transport::BoxStream>> {
-    let domain = destination.domain().map(str::to_owned);
+    client: TcpStream, context: &Context, inbound: &str, destination: Endpoint,
+    sniffing: Option<Policy>, deadline: &Deadline,
+) -> io::Result<Option<(BoxStream, BoxStream)>> {
     let source = client.peer_addr()?.into();
+    let mut domain = destination.domain().map(str::to_owned);
+    let mut stream: BoxStream = Box::new(client);
+    let mut replied = false;
+
+    if let (Some(policy), None) = (sniffing, domain.as_deref()) {
+        if send_reply(&mut stream, ReplyStatus::Succeeded, None)
+            .await
+            .is_err()
+        {
+            return Ok(None);
+        }
+        replied = true;
+        let Ok(sniffed) = deadline
+            .run(sniff::sniff_stream(stream, Vec::new(), policy))
+            .await
+        else {
+            return Ok(None);
+        };
+        domain = sniffed.domain;
+        stream = sniffed.stream;
+    }
+
     let metadata = Metadata {
         network: Network::Tcp,
         source,
@@ -81,16 +106,19 @@ async fn connect_target(
 
     match context.connect(action, &destination).await {
         Ok(connected) => {
-            if send_reply(client, ReplyStatus::Succeeded, connected.bound)
-                .await
-                .is_err()
+            if !replied
+                && send_reply(&mut stream, ReplyStatus::Succeeded, connected.bound)
+                    .await
+                    .is_err()
             {
                 return Ok(None);
             }
-            Ok(Some(connected.stream))
+            Ok(Some((stream, connected.stream)))
         }
         Err(error) => {
-            let _ = send_reply(client, reply_status(&error), None).await;
+            if !replied {
+                let _ = send_reply(&mut stream, reply_status(&error), None).await;
+            }
             Ok(None)
         }
     }
@@ -184,8 +212,8 @@ async fn send_method(client: &mut TcpStream, method: u8) -> io::Result<()> {
     client.write_all(&buffer[..length]).await
 }
 
-async fn send_reply(
-    client: &mut TcpStream, status: ReplyStatus, bound: Option<SocketAddr>,
+async fn send_reply<W: AsyncWrite + Unpin>(
+    client: &mut W, status: ReplyStatus, bound: Option<SocketAddr>,
 ) -> io::Result<()> {
     let mut buffer = [0_u8; 22];
     let length = encode_reply(status, bound, &mut buffer).map_err(codec_error)?;

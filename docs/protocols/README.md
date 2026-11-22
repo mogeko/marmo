@@ -27,6 +27,7 @@ Rules:
 | File | Status |
 | --- | --- |
 | [shadowsocks.md](shadowsocks.md) | Live: SS2022 spec, key schedule, limits, interop |
+| [sniffing.md](sniffing.md) | Live: TLS SNI, HTTP Host, plaintext HTTP/2 authority, bounds |
 | [trojan.md](trojan.md) | Live: TLS framing, UDP, fallback, interop |
 | [vless.md](vless.md) | Live: TCP/UoT/XUDP/Mux.Cool framing, transport object, limits |
 | [vmess.md](vmess.md) | Live: AEAD schedule, chunks, UDP, Mux.Cool, interop |

@@ -142,6 +142,9 @@ pub struct Inbound {
     /// Trojan fallback endpoint for unauthenticated traffic.
     #[serde(default)]
     pub fallback: Option<String>,
+    /// Opt-in sniffing of the first stream bytes before routing.
+    #[serde(default)]
+    pub sniffing: Option<Sniffing>,
 }
 
 impl Drop for Inbound {
@@ -171,6 +174,32 @@ pub enum InboundProtocol {
     Vless,
     /// VMess AEAD.
     Vmess,
+}
+
+/// Opt-in sniffing of the first stream bytes before routing.
+///
+/// Sniffing fills the routing domain when the inbound protocol supplied only an
+/// IP destination. An inbound-provided domain always wins. The buffered bytes
+/// are replayed to the relay unchanged.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Sniffing {
+    /// Whether this inbound sniffs before routing.
+    pub enabled: bool,
+    /// Protocols to inspect; defaults to all supported protocols.
+    pub protocols: Option<Vec<SniffProtocol>>,
+}
+
+/// A stream protocol the sniffer recognises.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SniffProtocol {
+    /// TLS `ClientHello` server name.
+    Tls,
+    /// HTTP/1 request `Host` header.
+    Http,
+    /// HTTP/2 request `:authority` (plaintext HTTP/2).
+    Http2,
 }
 
 /// L7 stream transport carried between the protocol and TLS/TCP.
@@ -579,7 +608,8 @@ mod tests {
             "host": "example.com",
             "compression": true,
             "subprotocols": ["vless"]
-          }
+          },
+          "sniffing": { "enabled": true, "protocols": ["tls", "http2"] }
         }
       ],
       "outbounds": [
@@ -633,6 +663,12 @@ mod tests {
         assert_eq!(
             inbound.tls.as_ref().expect("tls").client_auth,
             ClientAuth::Required
+        );
+        let sniffing = inbound.sniffing.as_ref().expect("sniffing");
+        assert!(sniffing.enabled);
+        assert_eq!(
+            sniffing.protocols.as_deref(),
+            Some([SniffProtocol::Tls, SniffProtocol::Http2].as_slice())
         );
 
         let selector = &config.outbounds[1];

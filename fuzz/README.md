@@ -7,6 +7,7 @@ stays on stable.
 cargo +nightly fuzz run ss2022_tcp -- -runs=20000 -max_len=4096
 cargo +nightly fuzz run ss2022_udp -- -runs=20000 -max_len=4096
 cargo +nightly fuzz run socks5 -- -runs=20000 -max_len=4096
+cargo +nightly fuzz run sniff -- -runs=20000 -max_len=8192
 cargo +nightly fuzz run trojan -- -runs=20000 -max_len=4096
 cargo +nightly fuzz run vless -- -runs=20000 -max_len=4096
 cargo +nightly fuzz run http -- -runs=20000 -max_len=8192
@@ -28,6 +29,7 @@ because a `schedule` would only run from the repository default branch.
 | `ss2022_tcp` | client request (whole and fixed/variable), server response, length/payload chunks |
 | `ss2022_udp` | UDP packet in both directions, packet-id replay window |
 | `socks5` | greeting, request, UDP datagram |
+| `sniff` | TLS ClientHello SNI, HTTP Host, HTTP/2 preface and HEADERS HPACK |
 | `trojan` | authentication prefix, request headers, UDP frame headers |
 | `vless` | request headers, response header, UoT length, address parsing |
 

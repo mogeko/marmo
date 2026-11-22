@@ -80,12 +80,13 @@ Everything else is post-1.0 work (§19):
 | HTTP CONNECT outbound | gRPC and XHTTP transports |
 | Shadowsocks 2022 TCP/UDP | DNS cache, DoH/DoT |
 | Trojan inbound/outbound (TLS, TCP/UDP, fallback) | GEOIP/GEOSITE rule sets |
-| VLESS inbound/outbound (TCP/TLS/WS/H2, TCP/UoT/XUDP, Mux.Cool) | sniffer, process rules |
+| VLESS inbound/outbound (TCP/TLS/WS/H2, TCP/UoT/XUDP, Mux.Cool) | process rules |
 | VMess inbound/outbound (AEAD, TCP/UDP, Mux.Cool, TLS/WS/H2) | — |
 | TLS 1.3 client/server, ALPN, mTLS | `http_head` probes, jitter, backoff |
 | manual/RR/random/fallback/least-latency, TCP probes | root-level H2 pooling |
 | domain/suffix/CIDR/port/network rules | TUN, transparent proxying |
 | strict JSON config, limits, metrics | Windows-specific process matching |
+| TLS/HTTP/H2 sniffing with buffered replay | — |
 
 ## 5. Runtime model
 
@@ -325,12 +326,15 @@ small copy type. Rules are immutable after construction and live behind an
 
 ### 8.7 Resolver and sniffer
 
-The sniffer is post-1.0. The resolver interface (TTL cache, DoH/DoT
-policy) is post-1.0 too; current dials through the system resolver
-(`tokio::net::lookup_host`). The sniffer peeks at the first bytes of a stream
-and returns a domain (TLS SNI, HTTP `Host`, HTTP/2 `:authority`) plus a
-protocol. Sniffed bytes are buffered and replayed to the relay so no data is
-lost.
+The resolver interface (TTL cache, DoH/DoT policy) is post-1.0; current dials
+go through the system resolver (`tokio::net::lookup_host`). The sniffer is
+opt-in per inbound (`"sniffing": { "enabled": true, "protocols": [...] }`). It
+peeks at a bounded prefix of the stream and returns a domain from a TLS
+`ClientHello` server name, an HTTP/1 `Host` header, or the first plaintext
+HTTP/2 `:authority`. Sniffed bytes are buffered and replayed to the relay so no
+data is lost. An inbound-provided domain always wins; sniffing only fills the
+routing domain when the request carried an IP destination. TLS interception is
+not performed, so HTTP/2 inside TLS is identified by SNI only.
 
 ### 8.8 Codec
 
@@ -408,7 +412,9 @@ VLESS simple UoT binds one destination).
 - The resolver is used for outbound dials that need an IP and for rules that
   need one. `direct` uses the system resolver by default; DoH/DoT and a cache
   arrive in post-1.0.
-- Sniffing is opt-in and never replaces an inbound-provided domain.
+- Sniffing is opt-in per inbound and never replaces an inbound-provided
+  domain. It fills the routing domain from TLS SNI, HTTP/1 `Host`, or plaintext
+  HTTP/2 `:authority`; the peeked bytes are replayed unchanged.
 - Fake-IP is out of scope until a TUN inbound exists.
 
 ## 10. Routing model

@@ -17,6 +17,7 @@ mod mux;
 mod outbound;
 mod routing;
 mod shadowsocks;
+mod sniff;
 mod supervisor;
 mod trojan;
 mod validate;

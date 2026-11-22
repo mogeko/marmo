@@ -6,6 +6,7 @@ use crate::deadline::Deadline;
 use crate::instance::Context;
 use crate::routing::Metadata;
 use crate::shadowsocks::SsStream;
+use crate::sniff::{self, Policy};
 use marmo_net::{Endpoint, Network};
 use marmo_proto::shadowsocks::{Key, Method};
 use marmo_transport::BoxStream;
@@ -14,7 +15,7 @@ use tokio::net::TcpStream;
 /// Handles one accepted Shadowsocks 2022 connection.
 pub(crate) async fn handle(
     client: TcpStream, context: Arc<Context>, inbound: Arc<str>, method: Method, key: Arc<Key>,
-    deadline: Deadline,
+    sniffing: Option<Policy>, deadline: Deadline,
 ) {
     let token = context.supervisor.token();
     let source = match client.peer_addr() {
@@ -29,7 +30,20 @@ pub(crate) async fn handle(
         return;
     };
 
-    let domain = target.domain().map(str::to_owned);
+    let mut domain = target.domain().map(str::to_owned);
+    let mut stream: BoxStream = Box::new(stream);
+    if let (Some(policy), None) = (sniffing, domain.as_deref()) {
+        let sniffed = tokio::select! {
+            _ = token.cancelled() => return,
+            result = deadline.run(sniff::sniff_stream(stream, Vec::new(), policy)) => result,
+        };
+        let Ok(sniffed) = sniffed else {
+            return;
+        };
+        domain = sniffed.domain;
+        stream = sniffed.stream;
+    }
+
     let metadata = Metadata {
         network: Network::Tcp,
         source,
@@ -47,6 +61,6 @@ pub(crate) async fn handle(
     };
 
     context
-        .relay_streams(Box::new(stream) as BoxStream, connected.stream, &token)
+        .relay_streams(stream, connected.stream, &token)
         .await;
 }
