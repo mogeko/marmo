@@ -799,6 +799,8 @@ Module boundaries inside `marmo` are enforced by review, not by the compiler.
   is linked, ported, or distributed.
 - CI matrix: Linux x86_64, macOS arm64, Windows x86_64; `cargo fmt --check`,
   `clippy -D warnings`, `cargo test`, `cargo audit`, and the copyleft check.
+  A Linux docs job builds every feature with `RUSTDOCFLAGS="-D warnings"` so
+  broken intra-doc links and other rustdoc warnings fail CI.
 - Benchmarks (`criterion`) and `miri`/`loom` runs are opt-in and never part of
   the default test job.
 

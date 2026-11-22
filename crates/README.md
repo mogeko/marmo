@@ -24,18 +24,16 @@ URLs because crates.io renders only the package tarball.
 cargo test --workspace
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
 cargo audit
 cargo tree --workspace --format '{l}'   # license review
 ```
 
-CI runs the first three on Linux, macOS, and Windows. The copyleft check and
-`cargo audit` run in a separate `Dependencies` workflow, only when a manifest or
-`Cargo.lock` changes; Dependabot alerts cover advisories for unchanged
-dependencies. `cargo-fuzz` runs on nightly only. Pushing a `vX.Y.Z` tag runs the
-`Release` workflow, which publishes the four published crates through
-`crates-io-auth-action`; configure crates.io trusted publishing for
-`.github/workflows/release.yml`, the `publish` job, and the `release`
-environment first.
+CI runs the first three on Linux, macOS, and Windows, and the doc check on Linux.
+The copyleft check and `cargo audit` run in a separate `Dependencies` workflow,
+only when a manifest or `Cargo.lock` changes; Dependabot alerts cover advisories
+for unchanged dependencies. `cargo-fuzz` runs on nightly only. Pushing a `vX.Y.Z`
+tag runs the `Release` workflow.
 
 ## Rules
 

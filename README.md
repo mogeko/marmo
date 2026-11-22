@@ -97,12 +97,13 @@ cargo test --workspace --locked
 cargo test --workspace --locked --all-features
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
 cargo +nightly fuzz build
 ```
 
 Protocol tests are in `crates/*/tests/`, unit tests beside the code, and fuzz
-targets in [`fuzz/`](fuzz/). CI runs Linux, macOS, and Windows, the MSRV job,
-the dependency audit, and a bounded fuzz smoke.
+targets in [`fuzz/`](fuzz/). CI runs Linux, macOS, and Windows, the MSRV and
+docs jobs, the dependency audit, and a bounded fuzz smoke.
 
 See [docs/architecture.md](docs/architecture.md) for the design,
 [docs/roadmap.md](docs/roadmap.md) for the dependency-ordered phases, and
