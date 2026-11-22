@@ -167,7 +167,7 @@ depends only on upstream crates and the erased stream boundary.
   +-----+-----+     +-----+------+                    +------+-----+
         |                 |                                  |
         |           +-----v------+                           |
-        |           |    dns     | resolver                        |
+        |           |    dns     |                           |
         |           |  resolver  |                           |
         |           +-----+------+                           |
         |                 |                                  |
