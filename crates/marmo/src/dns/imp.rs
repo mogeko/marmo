@@ -258,12 +258,12 @@ impl DnsRuntime {
             return cached_result(value);
         }
 
-        self.metrics.record(MetricEvent::DnsQuery);
         let permit = self
             .inflight
             .clone()
             .try_acquire_owned()
             .map_err(|_| DnsError::Busy)?;
+        self.metrics.record(MetricEvent::DnsQuery);
         let deadline = Instant::now() + self.policy.timeout;
         let result = self.plan.resolve(&key, deadline, &self.metrics).await;
         drop(permit);
@@ -475,6 +475,8 @@ fn name_server(server: &DnsServer) -> Result<NameServerConfig, DnsBuildError> {
         .server_name
         .clone()
         .unwrap_or_else(|| address.ip().to_string());
+    rustls::pki_types::ServerName::try_from(server_name.clone())
+        .map_err(|_| DnsBuildError::Config(format!("invalid dns server name '{server_name}'")))?;
     let server_name = Arc::<str>::from(server_name);
     let mut config = match server.protocol {
         DnsProtocol::Udp => NameServerConfig::udp(address.ip()),
