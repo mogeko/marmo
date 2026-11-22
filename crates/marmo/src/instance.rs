@@ -40,6 +40,7 @@ use crate::metrics::{MetricEvent, Metrics, MetricsSink, MetricsSnapshot};
 use crate::outbound::{self, Outbound, http_connect, udp::UdpOutbound};
 use crate::routing::{Action, Router, RoutingError};
 use crate::shadowsocks::credentials;
+use crate::sniff::Policy;
 use crate::supervisor::Supervisor;
 use crate::vmess::ReplayFilter;
 
@@ -156,6 +157,7 @@ impl Instance {
                 listener,
                 local_addr,
                 udp,
+                sniffing: spec.sniffing,
             });
         }
 
@@ -394,6 +396,7 @@ impl InstanceBuilder {
                 tag: Arc::from(inbound.tag.as_str()),
                 config,
                 listen,
+                sniffing: Policy::from_config(inbound.sniffing.as_ref()),
             });
         }
 
@@ -994,6 +997,7 @@ struct InboundSpec {
     tag: Arc<str>,
     config: InboundConfig,
     listen: SocketAddr,
+    sniffing: Option<Policy>,
 }
 
 enum InboundConfig {
@@ -1391,6 +1395,7 @@ struct BoundInbound {
     listener: TcpListener,
     local_addr: SocketAddr,
     udp: Option<UdpSocket>,
+    sniffing: Option<Policy>,
 }
 
 async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Result<(), ServeError> {
@@ -1447,6 +1452,7 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                 context.metrics.record(MetricEvent::ConnectionAccepted);
                 let tag = Arc::clone(&inbound.tag);
                 let kind = inbound.kind.clone();
+                let sniffing = inbound.sniffing;
                 let task_context = Arc::clone(&context);
                 let deadline = Deadline::after(
                     context.limits.handshake_timeout,
@@ -1459,10 +1465,10 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                     let _guard = guard;
                     match kind {
                         InboundKind::Socks5 => {
-                            socks5::handle(stream, task_context, tag, deadline).await;
+                            socks5::handle(stream, task_context, tag, sniffing, deadline).await;
                         }
                         InboundKind::Http => {
-                            http::handle(stream, task_context, tag, deadline).await;
+                            http::handle(stream, task_context, tag, sniffing, deadline).await;
                         }
                         InboundKind::Shadowsocks { method, key } => {
                             inbound::shadowsocks::handle(
@@ -1471,6 +1477,7 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                                 tag,
                                 method,
                                 key,
+                                sniffing,
                                 deadline,
                             )
                             .await;
@@ -1487,6 +1494,7 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                                 tls,
                                 password,
                                 fallback,
+                                sniffing,
                                 deadline,
                             )
                             .await;
@@ -1498,6 +1506,7 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                                 tag,
                                 uuid,
                                 layers,
+                                sniffing,
                                 deadline,
                             )
                             .await;
@@ -1514,6 +1523,7 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                                 cmd_key,
                                 replay,
                                 layers,
+                                sniffing,
                                 deadline,
                             )
                             .await;

@@ -18,6 +18,7 @@ use crate::deadline::{Deadline, wait_for_activity};
 use crate::instance::Context;
 use crate::outbound::udp::UdpOutbound;
 use crate::routing::{Action, Metadata};
+use crate::sniff::{self, Policy};
 use crate::vless::{UotReader, write_udp_frame};
 
 /// Bounded queue between the frame reader and the outbound reply task.
@@ -28,7 +29,7 @@ const RESPONSE: [u8; 2] = [0, 0];
 /// Handles one accepted VLESS connection.
 pub(crate) async fn handle(
     client: TcpStream, context: Arc<Context>, inbound: Arc<str>, uuid: Arc<Uuid>,
-    layers: Arc<[Arc<dyn Layer>]>, deadline: Deadline,
+    layers: Arc<[Arc<dyn Layer>]>, sniffing: Option<Policy>, deadline: Deadline,
 ) {
     let token = context.supervisor.token();
     let source = client.peer_addr().ok().map(Endpoint::from);
@@ -52,7 +53,7 @@ pub(crate) async fn handle(
     match command {
         COMMAND_TCP => {
             connect_relay(
-                stream, &context, &inbound, source, target, leftover, token, deadline,
+                stream, &context, &inbound, source, target, leftover, token, deadline, sniffing,
             )
             .await;
         }
@@ -128,9 +129,30 @@ async fn prepare(
 #[allow(clippy::too_many_arguments)]
 async fn connect_relay(
     mut stream: BoxStream, context: &Context, inbound: &str, source: Endpoint, target: Endpoint,
-    leftover: Vec<u8>, token: CancellationToken, deadline: Deadline,
+    mut leftover: Vec<u8>, token: CancellationToken, deadline: Deadline, sniffing: Option<Policy>,
 ) {
-    let Some(action) = route(context, inbound, source, &target, Network::Tcp) else {
+    let mut domain = target.domain().map(str::to_owned);
+    if let (Some(policy), None) = (sniffing, domain.as_deref()) {
+        let sniffed = tokio::select! {
+            _ = token.cancelled() => return,
+            result = deadline.run(sniff::sniff_stream(stream, leftover, policy)) => result,
+        };
+        let Ok(sniffed) = sniffed else {
+            return;
+        };
+        stream = sniffed.stream;
+        domain = sniffed.domain;
+        leftover = Vec::new();
+    }
+
+    let Some(action) = route(
+        context,
+        inbound,
+        source,
+        &target,
+        Network::Tcp,
+        domain.as_deref(),
+    ) else {
         return;
     };
     let connected = tokio::select! {
@@ -156,7 +178,14 @@ async fn handle_udp(
     target: Endpoint, leftover: Vec<u8>, token: CancellationToken, deadline: Deadline,
 ) {
     let ipv4 = source.ip().is_none_or(|ip| ip.is_ipv4());
-    let Some(action) = route(&context, &inbound, source, &target, Network::Udp) else {
+    let Some(action) = route(
+        &context,
+        &inbound,
+        source,
+        &target,
+        Network::Udp,
+        target.domain(),
+    ) else {
         return;
     };
     let outbound = tokio::select! {
@@ -254,13 +283,13 @@ async fn reply_loop(
 
 fn route(
     context: &Context, inbound: &str, source: Endpoint, target: &Endpoint, network: Network,
+    domain: Option<&str>,
 ) -> Option<Action> {
-    let domain = target.domain().map(str::to_owned);
     let metadata = Metadata {
         network,
         source,
         destination: target.clone(),
-        domain: domain.as_deref(),
+        domain,
         inbound: Some(inbound),
     };
     Some(context.router.route(&metadata))
