@@ -128,6 +128,10 @@ pub(crate) struct VlessUdpClient {
     stream: BoxStream,
     frames: UotReader,
     target: Endpoint,
+    /// Whether the response header has been read; it is deferred until the
+    /// first reply so the first frame is not held back by the server's
+    /// response.
+    response_read: bool,
 }
 
 impl VlessUdpClient {
@@ -147,6 +151,10 @@ impl VlessUdpClient {
 
     /// Reads one UoT frame; replies always come from the association target.
     pub(crate) async fn recv_from(&mut self, buffer: &mut [u8]) -> io::Result<(usize, Endpoint)> {
+        if !self.response_read {
+            read_response_header(&mut self.stream).await?;
+            self.response_read = true;
+        }
         loop {
             let Some(payload) = self.frames.next(&mut self.stream).await? else {
                 return Err(io::Error::new(
@@ -175,11 +183,11 @@ pub(crate) async fn connect_udp(
 ) -> io::Result<VlessUdpClient> {
     let (mut stream, _bound) = open_stream(server, layers).await?;
     write_request(&mut stream, uuid, target, COMMAND_UDP).await?;
-    read_response_header(&mut stream).await?;
     Ok(VlessUdpClient {
         stream,
         frames: UotReader::new(&[])?,
         target: target.clone(),
+        response_read: false,
     })
 }
 
@@ -322,4 +330,59 @@ async fn write_request(
     header.zeroize();
     written?;
     Ok(length)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+    use tokio::time::{Duration, timeout};
+
+    const UUID: &str = "00112233-4455-6677-8899-aabbccddeeff";
+    const HEADER_LEN: usize = 1 + 16 + 1 + 1 + 2 + 1 + 4;
+
+    #[tokio::test]
+    async fn sends_the_first_uot_frame_before_reading_the_response() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let address = listener.local_addr().expect("addr");
+        let target = Endpoint::parse("127.0.0.1:9").expect("target");
+        let server_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut header = [0_u8; HEADER_LEN];
+            stream
+                .read_exact(&mut header)
+                .await
+                .expect("request header");
+            // Xray and V2Ray withhold the response header until the first
+            // body bytes arrive, so waiting here would deadlock.
+            let mut frame = [0_u8; 2 + 4];
+            stream.read_exact(&mut frame).await.expect("first frame");
+            assert_eq!(&frame[2..], b"ping");
+            stream.write_all(&[0, 0]).await.expect("response header");
+            stream
+                .write_all(&[0, 4, b'p', b'o', b'n', b'g'])
+                .await
+                .expect("reply");
+        });
+
+        let server = Endpoint::parse(&address.to_string()).expect("server");
+        let uuid = Uuid::parse(UUID).expect("uuid");
+        let mut client = timeout(
+            Duration::from_secs(2),
+            connect_udp(&server, &uuid, &target, &[]),
+        )
+        .await
+        .expect("connect must not wait for the response header")
+        .expect("connect");
+
+        client.send_to(&target, b"ping").await.expect("send");
+        let mut buffer = [0_u8; 8];
+        let (length, source) = timeout(Duration::from_secs(2), client.recv_from(&mut buffer))
+            .await
+            .expect("recv timeout")
+            .expect("recv");
+        assert_eq!(&buffer[..length], b"pong");
+        assert_eq!(source, target);
+        server_task.await.expect("server");
+    }
 }
