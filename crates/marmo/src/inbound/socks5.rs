@@ -101,8 +101,9 @@ async fn connect_target(
         destination: destination.clone(),
         domain: domain.as_deref(),
         inbound: Some(inbound),
+        process: None,
     };
-    let action = context.router.route(&metadata);
+    let action = context.route(metadata).await;
 
     match context.connect(action, &destination).await {
         Ok(connected) => {
@@ -362,8 +363,9 @@ async fn udp_associate(
                     destination: destination.clone(),
                     domain: destination.domain(),
                     inbound: Some(&inbound),
+                    process: None,
                 };
-                let action = context.router.route(&metadata);
+                let action = context.route(metadata).await;
                 if upstream_action != Some(action) {
                     if upstream.is_some() {
                         continue;

@@ -17,7 +17,9 @@ proxy protocols, rule-based routing, and latency-aware outbound selection.
   VLESS supports TCP, simple UoT, XUDP, and Mux.Cool; VMess supports TCP,
   direct UDP, and Mux.Cool. `mux: true` enables client-side pooling for both,
   over TCP, TLS, WebSocket, and HTTP/2.
-- Routing: exact and suffix domains, IP CIDR, destination port, and network.
+- Routing: exact/suffix/keyword domains, IP CIDR, port and port ranges,
+  network, and inbound tags; large domain/IP sets and process identity are
+  supplied by the embedder through injected providers.
 - Limits: global connection cap plus handshake, idle, and half-close timeouts.
 - Metrics: connection, byte, timeout, UDP-session, and health-probe counters
   with an optional `MetricsSink`.

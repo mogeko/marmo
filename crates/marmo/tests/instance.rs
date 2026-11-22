@@ -314,3 +314,61 @@ async fn selector_falls_back_after_a_dead_node() {
     dead_task.abort();
     echo_task.abort();
 }
+
+struct EmptyDomains;
+
+impl marmo::DomainSet for EmptyDomains {
+    fn contains(&self, _domain: &str) -> bool {
+        false
+    }
+}
+
+struct EmptyIps;
+
+impl marmo::IpSet for EmptyIps {
+    fn contains(&self, _address: std::net::IpAddr) -> bool {
+        false
+    }
+}
+
+const RULE_SETS: &str = r#"{
+  "outbounds": [{ "tag": "a", "protocol": "direct" }],
+  "route": {
+    "rules": [
+      { "domain_set": ["sites"], "outbound": "a" },
+      { "geoip": ["ips"], "outbound": "a" }
+    ],
+    "final": "direct"
+  }
+}"#;
+
+#[tokio::test]
+async fn builds_with_injected_rule_sets() {
+    let config = Config::from_json(RULE_SETS).expect("config");
+    match Instance::builder(config).build() {
+        Err(BuildError::Routing(marmo::RoutingError::UnknownDomainSet { path, tag })) => {
+            assert_eq!(path, "route.rules[0].domain_set[0]");
+            assert_eq!(tag, "sites");
+        }
+        Ok(_) => panic!("build unexpectedly succeeded"),
+        Err(other) => panic!("unexpected: {other:?}"),
+    }
+
+    let config = Config::from_json(RULE_SETS).expect("config");
+    let instance = Instance::builder(config)
+        .domain_set("sites", std::sync::Arc::new(EmptyDomains))
+        .ip_set("ips", std::sync::Arc::new(EmptyIps))
+        .build()
+        .expect("build");
+    drop(instance);
+}
+
+#[tokio::test]
+async fn rejects_duplicate_rule_set_tags() {
+    let config = Config::from_json(RULE_SETS).expect("config");
+    let result = Instance::builder(config)
+        .domain_set("sites", std::sync::Arc::new(EmptyDomains))
+        .domain_set("sites", std::sync::Arc::new(EmptyDomains))
+        .build();
+    assert!(matches!(result, Err(BuildError::RuleSet { .. })));
+}

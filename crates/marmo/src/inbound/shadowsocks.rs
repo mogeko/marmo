@@ -50,8 +50,9 @@ pub(crate) async fn handle(
         destination: target.clone(),
         domain: domain.as_deref(),
         inbound: Some(&inbound),
+        process: None,
     };
-    let action = context.router.route(&metadata);
+    let action = context.route(metadata).await;
     let connected = tokio::select! {
         _ = token.cancelled() => return,
         result = deadline.run(context.connect(action, &target)) => result,

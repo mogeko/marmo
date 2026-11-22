@@ -152,7 +152,9 @@ async fn connect_relay(
         &target,
         Network::Tcp,
         domain.as_deref(),
-    ) else {
+    )
+    .await
+    else {
         return;
     };
     let connected = tokio::select! {
@@ -185,7 +187,9 @@ async fn handle_udp(
         &target,
         Network::Udp,
         target.domain(),
-    ) else {
+    )
+    .await
+    else {
         return;
     };
     let outbound = tokio::select! {
@@ -281,7 +285,7 @@ async fn reply_loop(
     }
 }
 
-fn route(
+async fn route(
     context: &Context, inbound: &str, source: Endpoint, target: &Endpoint, network: Network,
     domain: Option<&str>,
 ) -> Option<Action> {
@@ -291,8 +295,9 @@ fn route(
         destination: target.clone(),
         domain,
         inbound: Some(inbound),
+        process: None,
     };
-    Some(context.router.route(&metadata))
+    Some(context.route(metadata).await)
 }
 
 async fn relay_streams(

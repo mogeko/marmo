@@ -97,8 +97,9 @@ pub(crate) async fn serve(
                     destination: destination.clone(),
                     domain: domain.as_deref(),
                     inbound: Some(inbound.as_ref()),
+                    process: None,
                 };
-                let action = context.router.route(&metadata);
+                let action = context.route(metadata).await;
                 if !context.udp_direct(action) {
                     continue;
                 }

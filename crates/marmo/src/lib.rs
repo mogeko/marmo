@@ -15,7 +15,9 @@ mod limits;
 mod metrics;
 mod mux;
 mod outbound;
+pub mod process;
 mod routing;
+pub mod ruleset;
 mod shadowsocks;
 mod sniff;
 mod supervisor;
@@ -24,7 +26,7 @@ mod validate;
 mod vless;
 mod vmess;
 
-pub use config::{Config, ConfigError};
+pub use config::{Config, ConfigError, Process};
 pub use instance::{
     BindError, BoundAddr, BoundInstance, BuildError, Instance, InstanceBuilder, InstanceHandle,
     ServeError,
@@ -32,4 +34,6 @@ pub use instance::{
 pub use limits::Limits;
 pub use marmo_net::{Cidr, Endpoint, Network};
 pub use metrics::{MetricEvent, MetricsSink, MetricsSnapshot};
+pub use process::{ProcessInfo, ProcessRequest, ProcessResolver};
 pub use routing::{Action, Metadata, OutboundId, RejectReason, Router, RoutingError};
+pub use ruleset::{DomainSet, IpSet, RuleSetError, RuleSets};

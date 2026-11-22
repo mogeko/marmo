@@ -38,7 +38,9 @@ use crate::inbound::{self, http, socks5};
 use crate::limits::Limits;
 use crate::metrics::{MetricEvent, Metrics, MetricsSink, MetricsSnapshot};
 use crate::outbound::{self, Outbound, http_connect, udp::UdpOutbound};
-use crate::routing::{Action, Router, RoutingError};
+use crate::process::{ProcessRequest, ProcessResolver, ProcessRuntime};
+use crate::routing::{Action, Metadata, Router, RoutingError};
+use crate::ruleset::{DomainSet, IpSet, RuleSets};
 use crate::shadowsocks::credentials;
 use crate::sniff::Policy;
 use crate::supervisor::Supervisor;
@@ -51,6 +53,7 @@ pub struct Instance {
     supervisor: Arc<Supervisor>,
     router: Arc<Router>,
     metrics: Arc<Metrics>,
+    process: Option<Arc<ProcessRuntime>>,
     outbounds: Vec<OutboundSpec>,
     inbounds: Vec<InboundSpec>,
 }
@@ -64,6 +67,9 @@ impl Instance {
             runtime: None,
             shutdown_grace: None,
             metrics: None,
+            domain_sets: Vec::new(),
+            ip_sets: Vec::new(),
+            process_resolver: None,
         }
     }
 
@@ -91,6 +97,7 @@ impl Instance {
             supervisor,
             router,
             metrics,
+            process,
             outbounds,
             inbounds,
         } = self;
@@ -167,6 +174,7 @@ impl Instance {
             supervisor,
             router,
             metrics,
+            process,
             outbounds: kinds,
             inbounds: bound,
         })
@@ -192,6 +200,9 @@ pub struct InstanceBuilder {
     runtime: Option<Handle>,
     shutdown_grace: Option<Duration>,
     metrics: Option<Arc<dyn MetricsSink>>,
+    domain_sets: Vec<(Arc<str>, Arc<dyn DomainSet>)>,
+    ip_sets: Vec<(Arc<str>, Arc<dyn IpSet>)>,
+    process_resolver: Option<Arc<dyn ProcessResolver>>,
 }
 
 impl InstanceBuilder {
@@ -217,6 +228,36 @@ impl InstanceBuilder {
         self
     }
 
+    /// Registers a domain set for rules that use `domain_set`.
+    ///
+    /// The set is supplied by the embedder; the library never loads or
+    /// reloads its data. Duplicate or empty tags fail at [`build`](Self::build).
+    #[must_use]
+    pub fn domain_set(mut self, tag: impl Into<Arc<str>>, set: Arc<dyn DomainSet>) -> Self {
+        self.domain_sets.push((tag.into(), set));
+        self
+    }
+
+    /// Registers an IP set for rules that use `geoip`.
+    ///
+    /// The set is supplied by the embedder; the library never loads or
+    /// reloads its data. Duplicate or empty tags fail at [`build`](Self::build).
+    #[must_use]
+    pub fn ip_set(mut self, tag: impl Into<Arc<str>>, set: Arc<dyn IpSet>) -> Self {
+        self.ip_sets.push((tag.into(), set));
+        self
+    }
+
+    /// Installs the resolver used by `process_name` and `process_path`.
+    ///
+    /// The resolver is embedder code and runs on a blocking thread. Without
+    /// it, a config that contains process matchers fails to build.
+    #[must_use]
+    pub fn process_resolver(mut self, resolver: Arc<dyn ProcessResolver>) -> Self {
+        self.process_resolver = Some(resolver);
+        self
+    }
+
     /// Validates config, compiles rules, and rejects unsupported protocols.
     pub fn build(self) -> Result<Instance, BuildError> {
         self.config.validate()?;
@@ -229,7 +270,29 @@ impl InstanceBuilder {
         if let Some(grace) = self.shutdown_grace {
             limits.shutdown_grace = grace;
         }
-        let router = Router::compile(&self.config)?;
+
+        let mut sets = RuleSets::new();
+        for (tag, set) in self.domain_sets {
+            sets.add_domain(&tag, set)
+                .map_err(|error| BuildError::RuleSet {
+                    tag: tag.to_string(),
+                    reason: error.to_string(),
+                })?;
+        }
+        for (tag, set) in self.ip_sets {
+            sets.add_ip(&tag, set)
+                .map_err(|error| BuildError::RuleSet {
+                    tag: tag.to_string(),
+                    reason: error.to_string(),
+                })?;
+        }
+        let router = Router::compile_with_sets(&self.config, &sets)?;
+        if router.needs_process() && self.process_resolver.is_none() {
+            return Err(BuildError::MissingProcessResolver);
+        }
+        let process = self
+            .process_resolver
+            .map(|resolver| Arc::new(ProcessRuntime::new(&self.config.process, resolver)));
 
         let mut inbounds = Vec::with_capacity(self.config.inbounds.len());
         for inbound in &self.config.inbounds {
@@ -673,6 +736,7 @@ impl InstanceBuilder {
             supervisor,
             router: Arc::new(router),
             metrics,
+            process,
             outbounds,
             inbounds,
         })
@@ -713,6 +777,7 @@ pub struct BoundInstance {
     supervisor: Arc<Supervisor>,
     router: Arc<Router>,
     metrics: Arc<Metrics>,
+    process: Option<Arc<ProcessRuntime>>,
     outbounds: Vec<Arc<dyn Outbound>>,
     inbounds: Vec<BoundInbound>,
 }
@@ -765,6 +830,7 @@ impl BoundInstance {
             supervisor: Arc::clone(&supervisor),
             router: self.router,
             metrics: self.metrics,
+            process: self.process,
             direct: Arc::new(crate::direct::DirectOutbound),
             outbounds: self.outbounds,
             limits,
@@ -881,12 +947,27 @@ pub(crate) struct Context {
     pub(crate) supervisor: Arc<Supervisor>,
     pub(crate) router: Arc<Router>,
     pub(crate) metrics: Arc<Metrics>,
+    pub(crate) process: Option<Arc<ProcessRuntime>>,
     pub(crate) direct: Arc<dyn Outbound>,
     pub(crate) outbounds: Vec<Arc<dyn Outbound>>,
     pub(crate) limits: Limits,
 }
 
 impl Context {
+    pub(crate) async fn route(&self, mut metadata: Metadata<'_>) -> Action {
+        if self.router.needs_process() && metadata.process.is_none() {
+            if let Some(process) = self.process.as_ref() {
+                let request = ProcessRequest {
+                    network: metadata.network,
+                    source: metadata.source.clone(),
+                    destination: metadata.destination.clone(),
+                };
+                metadata.process = process.lookup(&self.runtime, request).await;
+            }
+        }
+        self.router.route(&metadata)
+    }
+
     pub(crate) fn udp_direct(&self, action: Action) -> bool {
         match action {
             Action::Direct => self.direct.udp_direct(),
@@ -1556,6 +1637,17 @@ pub enum BuildError {
     /// The routing rules could not be compiled.
     #[error(transparent)]
     Routing(#[from] RoutingError),
+    /// The configuration has process matchers but no resolver was injected.
+    #[error("process rules require .process_resolver(...)")]
+    MissingProcessResolver,
+    /// A rule-set tag could not be registered.
+    #[error("rule set '{tag}' registration failed: {reason}")]
+    RuleSet {
+        /// The rejected tag.
+        tag: String,
+        /// Why registration failed.
+        reason: String,
+    },
     /// No tokio runtime was supplied and none is current.
     #[error("no tokio runtime; call .runtime(handle) or build inside a runtime")]
     NoRuntime,

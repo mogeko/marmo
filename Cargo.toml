@@ -12,6 +12,7 @@ repository = "https://github.com/mogeko/marmo"
 authors = ["Zheng Junyi"]
 
 [workspace.dependencies]
+aho-corasick = "1"
 marmo-net = { path = "crates/marmo-net", version = "=0.0.3" }
 marmo-proto = { path = "crates/marmo-proto", version = "=0.0.3" }
 marmo-transport = { path = "crates/marmo-transport", version = "=0.0.3" }

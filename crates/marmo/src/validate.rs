@@ -12,7 +12,8 @@ use zeroize::Zeroize as _;
 
 use crate::config::{
     ClientAuth, Config, ConfigError, Inbound, InboundProtocol, Limits as ConfigLimits, Outbound,
-    OutboundProtocol, Route, Rule, Sniffing, StreamNetwork, StreamTransport, Tls,
+    OutboundProtocol, Process as ConfigProcess, Route, Rule, Sniffing, StreamNetwork,
+    StreamTransport, Tls,
 };
 
 impl Config {
@@ -31,9 +32,10 @@ impl Config {
             return Err(fail("version", message));
         }
         validate_limits(&self.limits)?;
+        validate_process(&self.process)?;
         validate_inbounds(&self.inbounds)?;
         validate_outbounds(&self.outbounds)?;
-        validate_route(&self.route, &self.outbounds)?;
+        validate_route(&self.route, &self.outbounds, &self.inbounds)?;
         Ok(())
     }
 }
@@ -53,6 +55,19 @@ fn validate_limits(limits: &ConfigLimits) -> Result<(), ConfigError> {
     }
     if limits.downlink_only_s > 86_400 {
         return Err(fail("limits.downlink_only_s", "must be at most 86400"));
+    }
+    Ok(())
+}
+
+fn validate_process(process: &ConfigProcess) -> Result<(), ConfigError> {
+    if process.cache_ttl_s > 3600 {
+        return Err(fail("process.cache_ttl_s", "must be at most 3600"));
+    }
+    if !(1..=500).contains(&process.lookup_timeout_ms) {
+        return Err(fail("process.lookup_timeout_ms", "must be 1..500"));
+    }
+    if !(1..=1024).contains(&process.max_inflight) {
+        return Err(fail("process.max_inflight", "must be 1..1024"));
     }
     Ok(())
 }
@@ -879,7 +894,9 @@ fn validate_alpn(
     Ok(())
 }
 
-fn validate_route(route: &Route, outbounds: &[Outbound]) -> Result<(), ConfigError> {
+fn validate_route(
+    route: &Route, outbounds: &[Outbound], inbounds: &[Inbound],
+) -> Result<(), ConfigError> {
     if !is_valid_route_target(&route.final_outbound, outbounds) {
         return Err(fail(
             "route.final",
@@ -893,12 +910,12 @@ fn validate_route(route: &Route, outbounds: &[Outbound]) -> Result<(), ConfigErr
                 format!("unknown '{}'", rule.outbound),
             ));
         }
-        validate_rule(rule, index)?;
+        validate_rule(rule, index, inbounds)?;
     }
     Ok(())
 }
 
-fn validate_rule(rule: &Rule, index: usize) -> Result<(), ConfigError> {
+fn validate_rule(rule: &Rule, index: usize, inbounds: &[Inbound]) -> Result<(), ConfigError> {
     if let Some(domains) = rule.domain.as_deref() {
         for domain in domains {
             if domain.is_empty() {
@@ -916,6 +933,21 @@ fn validate_rule(rule: &Rule, index: usize) -> Result<(), ConfigError> {
             }
         }
     }
+    validate_rule_values(
+        rule.domain_keyword.as_deref(),
+        &format!("route.rules[{index}].domain_keyword"),
+        Some(128),
+    )?;
+    validate_rule_values(
+        rule.domain_set.as_deref(),
+        &format!("route.rules[{index}].domain_set"),
+        Some(128),
+    )?;
+    validate_rule_values(
+        rule.geoip.as_deref(),
+        &format!("route.rules[{index}].geoip"),
+        Some(128),
+    )?;
     if let Some(cidrs) = rule.ip_cidr.as_deref() {
         for cidr in cidrs {
             if Cidr::parse(cidr).is_err() {
@@ -931,6 +963,93 @@ fn validate_rule(rule: &Rule, index: usize) -> Result<(), ConfigError> {
             return Err(fail(
                 format!("route.rules[{index}].port"),
                 "must not be empty",
+            ));
+        }
+    }
+    validate_port_ranges(rule.port_range.as_deref(), index)?;
+    validate_rule_inbounds(rule.inbound.as_deref(), index, inbounds)?;
+    validate_rule_values(
+        rule.process_name.as_deref(),
+        &format!("route.rules[{index}].process_name"),
+        Some(255),
+    )?;
+    validate_rule_values(
+        rule.process_path.as_deref(),
+        &format!("route.rules[{index}].process_path"),
+        Some(4096),
+    )?;
+    Ok(())
+}
+
+fn validate_rule_values(
+    values: Option<&[String]>, path: &str, max_len: Option<usize>,
+) -> Result<(), ConfigError> {
+    let Some(values) = values else {
+        return Ok(());
+    };
+    if values.is_empty() {
+        return Err(fail(path, "must not be empty"));
+    }
+    for (index, value) in values.iter().enumerate() {
+        if value.is_empty() {
+            return Err(fail(format!("{path}[{index}]"), "empty value"));
+        }
+        if value.contains('\0') {
+            return Err(fail(format!("{path}[{index}]"), "must not contain NUL"));
+        }
+        if let Some(max_len) = max_len {
+            if value.len() > max_len {
+                return Err(fail(
+                    format!("{path}[{index}]"),
+                    format!("must be at most {max_len} bytes"),
+                ));
+            }
+        }
+        if values[..index].contains(value) {
+            return Err(fail(format!("{path}[{index}]"), "duplicate value"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_port_ranges(ranges: Option<&[[u16; 2]]>, rule_index: usize) -> Result<(), ConfigError> {
+    let Some(ranges) = ranges else {
+        return Ok(());
+    };
+    if ranges.is_empty() {
+        return Err(fail(
+            format!("route.rules[{rule_index}].port_range"),
+            "must not be empty",
+        ));
+    }
+    for (index, &[start, end]) in ranges.iter().enumerate() {
+        let path = format!("route.rules[{rule_index}].port_range[{index}]");
+        if start > end {
+            return Err(fail(path, "start must not exceed end"));
+        }
+        if ranges[..index].contains(&[start, end]) {
+            return Err(fail(path, "duplicate range"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_rule_inbounds(
+    tags: Option<&[String]>, rule_index: usize, inbounds: &[Inbound],
+) -> Result<(), ConfigError> {
+    let Some(tags) = tags else {
+        return Ok(());
+    };
+    validate_rule_values(
+        Some(tags),
+        &format!("route.rules[{rule_index}].inbound"),
+        None,
+    )?;
+    for (index, tag) in tags.iter().enumerate() {
+        if !inbounds.iter().any(|inbound| inbound.tag == *tag) {
+            return Err(fail(
+                format!("route.rules[{rule_index}].inbound[{index}]"),
+                format!("unknown inbound '{tag}'"),
             ));
         }
     }
@@ -1488,6 +1607,30 @@ mod tests {
     }
 
     #[test]
+    fn validates_process_bounds() {
+        assert_path(
+            error(r#"{"process":{"cache_ttl_s":3601}}"#),
+            "process.cache_ttl_s",
+        );
+        assert_path(
+            error(r#"{"process":{"lookup_timeout_ms":0}}"#),
+            "process.lookup_timeout_ms",
+        );
+        assert_path(
+            error(r#"{"process":{"max_inflight":1025}}"#),
+            "process.max_inflight",
+        );
+        assert_path(
+            error(r#"{"route":{"rules":[{"process_name":[""],"outbound":"direct"}]}}"#),
+            "route.rules[0].process_name[0]",
+        );
+        assert_path(
+            error(r#"{"route":{"rules":[{"process_path":["/a","/a"],"outbound":"direct"}]}}"#),
+            "route.rules[0].process_path[1]",
+        );
+    }
+
+    #[test]
     fn validates_route() {
         assert_path(error(r#"{"route":{"final":"missing"}}"#), "route.final");
         assert_path(
@@ -1506,5 +1649,35 @@ mod tests {
             error(r#"{"route":{"rules":[{"port":[],"outbound":"direct"}]}}"#),
             "route.rules[0].port",
         );
+        assert_path(
+            error(r#"{"route":{"rules":[{"domain_keyword":[""],"outbound":"direct"}]}}"#),
+            "route.rules[0].domain_keyword[0]",
+        );
+        assert_path(
+            error(r#"{"route":{"rules":[{"domain_set":[],"outbound":"direct"}]}}"#),
+            "route.rules[0].domain_set",
+        );
+        assert_path(
+            error(r#"{"route":{"rules":[{"geoip":["a","a"],"outbound":"direct"}]}}"#),
+            "route.rules[0].geoip[1]",
+        );
+        assert_path(
+            error(r#"{"route":{"rules":[{"port_range":[[9000,8000]],"outbound":"direct"}]}}"#),
+            "route.rules[0].port_range[0]",
+        );
+        assert_path(
+            error(r#"{"route":{"rules":[{"port_range":[],"outbound":"direct"}]}}"#),
+            "route.rules[0].port_range",
+        );
+        let unknown_inbound = r#"{
+          "inbounds":[{"tag":"socks","protocol":"socks5","listen":"127.0.0.1:1"}],
+          "route":{"rules":[{"inbound":["missing"],"outbound":"direct"}]}
+        }"#;
+        assert_path(error(unknown_inbound), "route.rules[0].inbound[0]");
+        let known_inbound = r#"{
+          "inbounds":[{"tag":"socks","protocol":"socks5","listen":"127.0.0.1:1"}],
+          "route":{"rules":[{"inbound":["socks"],"outbound":"direct"}]}
+        }"#;
+        assert!(parse(known_inbound).is_ok());
     }
 }

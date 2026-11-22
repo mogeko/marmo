@@ -28,7 +28,7 @@ ADR-0017 onward.
 | [0002](0002-scope-and-phasing.md) | Scope and delivery phases | Historical; carried over | Snell deferred; WireGuard abandoned |
 | [0003](0003-core-abstractions.md) | Core interfaces and dispatch | Historical; superseded by ADR-0017 | initial vtable interfaces |
 | [0004](0004-transport-composition.md) | Transport composition | Accepted; in-tree clause superseded | nested dialers |
-| [0005](0005-routing-engine.md) | Routing engine | Accepted | first-match rules |
+| [0005](0005-routing-engine.md) | Routing engine | Accepted; rule-set delivery superseded by ADR-0028 | first-match rules |
 | [0006](0006-outbound-selection.md) | Outbound selection | Accepted | five strategies; probes opt-in |
 | [0007](0007-tls-quic-dependencies.md) | TLS, QUIC, crypto dependencies | Historical; superseded by ADR-0018 | initial in-tree policy |
 | [0008](0008-api-and-config.md) | Public API, config, errors | Accepted; re-expressed in Rust | lifecycle facade; strict JSON |
@@ -51,6 +51,8 @@ ADR-0017 onward.
 | [0025](0025-vmess-aead.md) | VMess AEAD, UDP, and Mux.Cool | Accepted (2026-11-22) | AEAD inbound/outbound; Mux.Cool inbound |
 | [0026](0026-vless-mux.md) | VLESS inbound Mux.Cool | Accepted (2026-11-22) | shared Mux.Cool dispatcher |
 | [0027](0027-client-mux.md) | Client-side Mux.Cool outbound | Accepted (2026-11-22) | shared pool; `mux: true` |
+| [0028](0028-rule-sets.md) | Injected rule sets | Accepted (2026-11-22) | `DomainSet`/`IpSet`; no library format |
+| [0029](0029-process-identity.md) | Process identity injection | Accepted (2026-11-22) | injected resolver; no OS lookup in the library |
 
 ADR-0001, 0003, 0007, 0010, 0013, and 0014 are superseded. ADR-0009 is
 superseded only in its license half; its clean-room protocol rule remains in
