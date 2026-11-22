@@ -70,8 +70,8 @@ any order after their dependencies.
 
 | ID | Item | Status | Depends on | Exit criteria | Estimate |
 | --- | --- | --- | --- | --- | --- |
-| P2-9 | Compiled rule sets: GEOIP/GEOSITE, keyword, port ranges, inbound | Planned | P1-6, P2-8 | Versioned compiled format, bounded load, routing tests | 3–5 d |
-| P2-10 | Process rules (`sysinfo`, opt-in) | Planned | P1-6 | Fail-open "unknown", per-platform tests | included in P2-9 |
+| P2-9 | Injected domain/IP sets: GEOIP/GEOSITE, keyword, port ranges, inbound | Planned | P1-6, P2-8 | `DomainSet`/`IpSet` injection, bounded refs, hot-swappable data, routing tests | 1–2 d |
+| P2-10 | Process rules via injected resolver (`process_name`/`process_path`) | Planned | P1-6 | Resolver injection, bounded cache/timeout, fail-open, tests | 1–1.5 d |
 | P2-11 | DNS cache + DoH/DoT resolver | Planned | P1-1 | TTL cache, bounded entries, DoH policy, fallback tests | 2–3 d |
 | P2-12 | Root-level HTTP/2 multiplexing and pooling | Planned | P2-4 | Multiple streams per connection, pool bounds, tests | 1–2 d |
 | P2-13 | Fixture parity for all codecs | Planned | P1-5, P2-1..P2-4 | Corpus/unit vectors, differential interop records | 1 d |
@@ -176,7 +176,7 @@ criteria. They are tracked here so they do not disappear from the docs.
 | P5-7 | TLS resumption/0-RTT/ECH/OCSP/CRL | Deferred | depends on `rustls` capability |
 | P5-8 | Trojan-Go WebSocket/Mux/XTLS | Deferred | not part of standard Trojan |
 | P5-9 | WS early data/heartbeat; VLESS `flow`/XTLS Vision | Deferred | compatibility extensions |
-| P5-10 | Windows-specific process matching | Planned | with P2-10, best-effort |
+| P5-10 | Windows-specific process matching in the embedder resolver | Planned | with P2-10, best-effort |
 | P5-12 | VMess authenticated-length option | Deferred | only if a reference client enables Opt A |
 
 ## Release packaging order
