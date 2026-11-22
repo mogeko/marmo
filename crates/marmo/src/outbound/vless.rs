@@ -15,15 +15,16 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroize;
 
+use crate::direct::Dialer;
 use crate::mux::{MuxReader, MuxWriter};
 use crate::outbound::mux::{MuxDialer, MuxPool};
 use crate::vless::{ClientStream, UotReader, read_response_header, write_udp_frame};
 
 /// Dials `server` and opens a VLESS TCP stream to `target`.
 pub(crate) async fn connect(
-    server: &Endpoint, uuid: &Uuid, target: &Endpoint, layers: &[Arc<dyn Layer>],
+    dialer: &Dialer, server: &Endpoint, uuid: &Uuid, target: &Endpoint, layers: &[Arc<dyn Layer>],
 ) -> io::Result<(BoxStream, Option<std::net::SocketAddr>)> {
-    let (mut stream, bound) = open_stream(server, layers).await?;
+    let (mut stream, bound) = open_stream(dialer, server, layers).await?;
     write_request(&mut stream, uuid, target, COMMAND_TCP).await?;
     Ok((Box::new(ClientStream::new(stream)), bound))
 }
@@ -36,6 +37,7 @@ pub(crate) struct VlessOutbound {
     pub(crate) mux: bool,
     pub(crate) layers: Vec<Arc<dyn Layer>>,
     pub(crate) pool: OnceLock<Arc<MuxPool>>,
+    pub(crate) dialer: Dialer,
 }
 
 impl crate::outbound::Outbound for VlessOutbound {
@@ -53,7 +55,8 @@ impl crate::outbound::Outbound for VlessOutbound {
                 let stream = pool.open_tcp(target).await?;
                 return Ok(crate::outbound::Connected::with_bound(stream, None));
             }
-            let (stream, bound) = connect(&self.server, &self.uuid, target, &self.layers).await?;
+            let (stream, bound) =
+                connect(&self.dialer, &self.server, &self.uuid, target, &self.layers).await?;
             Ok(crate::outbound::Connected::with_bound(stream, bound))
         })
     }
@@ -75,10 +78,14 @@ impl crate::outbound::Outbound for VlessOutbound {
                 ))));
             }
             if self.xudp {
-                let client = connect_xudp(&self.server, &self.uuid, target, &self.layers).await?;
+                let client =
+                    connect_xudp(&self.dialer, &self.server, &self.uuid, target, &self.layers)
+                        .await?;
                 Ok(Some(crate::outbound::udp::UdpOutbound::VlessXudp(client)))
             } else {
-                let client = connect_udp(&self.server, &self.uuid, target, &self.layers).await?;
+                let client =
+                    connect_udp(&self.dialer, &self.server, &self.uuid, target, &self.layers)
+                        .await?;
                 Ok(Some(crate::outbound::udp::UdpOutbound::Vless(client)))
             }
         })
@@ -92,6 +99,7 @@ impl crate::outbound::Outbound for VlessOutbound {
             server: self.server.clone(),
             uuid: Arc::clone(&self.uuid),
             layers: self.layers.clone(),
+            dialer: self.dialer.clone(),
         });
         let pool = MuxPool::new(runtime.clone(), token.clone(), dialer);
         let supervisor = pool.supervisor();
@@ -104,12 +112,13 @@ struct VlessDialer {
     server: Endpoint,
     uuid: Arc<Uuid>,
     layers: Vec<Arc<dyn Layer>>,
+    dialer: Dialer,
 }
 
 impl MuxDialer for VlessDialer {
     fn dial(&self) -> BoxFuture<'_, io::Result<BoxStream>> {
         Box::pin(async move {
-            let (mut stream, _) = open_stream(&self.server, &self.layers).await?;
+            let (mut stream, _) = open_stream(&self.dialer, &self.server, &self.layers).await?;
             let mut header = [0_u8; 1 + 16 + 1 + 1];
             let length = encode_mux_request(&self.uuid, &mut header)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
@@ -179,9 +188,9 @@ impl VlessUdpClient {
 
 /// Opens a VLESS UDP association for `target`.
 pub(crate) async fn connect_udp(
-    server: &Endpoint, uuid: &Uuid, target: &Endpoint, layers: &[Arc<dyn Layer>],
+    dialer: &Dialer, server: &Endpoint, uuid: &Uuid, target: &Endpoint, layers: &[Arc<dyn Layer>],
 ) -> io::Result<VlessUdpClient> {
-    let (mut stream, _bound) = open_stream(server, layers).await?;
+    let (mut stream, _bound) = open_stream(dialer, server, layers).await?;
     write_request(&mut stream, uuid, target, COMMAND_UDP).await?;
     Ok(VlessUdpClient {
         stream,
@@ -290,9 +299,9 @@ impl VlessXudpClient {
 
 /// Opens a VLESS XUDP association for `target`.
 pub(crate) async fn connect_xudp(
-    server: &Endpoint, uuid: &Uuid, target: &Endpoint, layers: &[Arc<dyn Layer>],
+    dialer: &Dialer, server: &Endpoint, uuid: &Uuid, target: &Endpoint, layers: &[Arc<dyn Layer>],
 ) -> io::Result<VlessXudpClient> {
-    let (mut stream, _bound) = open_stream(server, layers).await?;
+    let (mut stream, _bound) = open_stream(dialer, server, layers).await?;
     let mut header = [0_u8; 1 + 16 + 1 + 1];
     let length = encode_mux_request(uuid, &mut header)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
@@ -309,9 +318,9 @@ pub(crate) async fn connect_xudp(
 }
 
 async fn open_stream(
-    server: &Endpoint, layers: &[Arc<dyn Layer>],
+    dialer: &Dialer, server: &Endpoint, layers: &[Arc<dyn Layer>],
 ) -> io::Result<(BoxStream, Option<std::net::SocketAddr>)> {
-    let inner = crate::direct::connect(server).await?;
+    let inner = dialer.connect(server).await?;
     let bound = inner.local_addr().ok();
     let mut stream: BoxStream = Box::new(inner);
     for layer in layers {
@@ -369,7 +378,7 @@ mod tests {
         let uuid = Uuid::parse(UUID).expect("uuid");
         let mut client = timeout(
             Duration::from_secs(2),
-            connect_udp(&server, &uuid, &target, &[]),
+            connect_udp(&Dialer::default(), &server, &uuid, &target, &[]),
         )
         .await
         .expect("connect must not wait for the response header")

@@ -9,6 +9,7 @@
 mod config;
 mod deadline;
 mod direct;
+pub mod dns;
 mod inbound;
 mod instance;
 mod limits;
@@ -26,7 +27,7 @@ mod validate;
 mod vless;
 mod vmess;
 
-pub use config::{Config, ConfigError, Process};
+pub use config::{Config, ConfigError, Dns, DnsProtocol, DnsServer, DnsTls, Process};
 pub use instance::{
     BindError, BoundAddr, BoundInstance, BuildError, Instance, InstanceBuilder, InstanceHandle,
     ServeError,

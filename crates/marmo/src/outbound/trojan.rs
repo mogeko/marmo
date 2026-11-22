@@ -12,13 +12,14 @@ use marmo_transport::tls::TlsClient;
 use tokio::io::AsyncWriteExt;
 use zeroize::Zeroize;
 
+use crate::direct::Dialer;
 use crate::trojan::{FrameReader, write_frame};
 
 /// Dials `server` over TLS and sends a CONNECT request for `target`.
 pub(crate) async fn connect(
-    server: &Endpoint, tls: &TlsClient, password: &PasswordHash, target: &Endpoint,
+    dialer: &Dialer, server: &Endpoint, tls: &TlsClient, password: &PasswordHash, target: &Endpoint,
 ) -> io::Result<(BoxStream, Option<std::net::SocketAddr>)> {
-    let inner = crate::direct::connect(server).await?;
+    let inner = dialer.connect(server).await?;
     let bound = inner.local_addr().ok();
     let mut stream = tls.connect(Box::new(inner)).await.map_err(tls_error)?;
 
@@ -36,6 +37,7 @@ pub(crate) struct TrojanOutbound {
     pub(crate) server: Endpoint,
     pub(crate) password: Arc<PasswordHash>,
     pub(crate) tls: Arc<TlsClient>,
+    pub(crate) dialer: Dialer,
 }
 
 impl crate::outbound::Outbound for TrojanOutbound {
@@ -43,7 +45,14 @@ impl crate::outbound::Outbound for TrojanOutbound {
         &'a self, target: &'a Endpoint,
     ) -> marmo_transport::BoxFuture<'a, io::Result<crate::outbound::Connected>> {
         Box::pin(async move {
-            let (stream, bound) = connect(&self.server, &self.tls, &self.password, target).await?;
+            let (stream, bound) = connect(
+                &self.dialer,
+                &self.server,
+                &self.tls,
+                &self.password,
+                target,
+            )
+            .await?;
             Ok(crate::outbound::Connected::with_bound(stream, bound))
         })
     }
@@ -52,7 +61,14 @@ impl crate::outbound::Outbound for TrojanOutbound {
         &'a self, target: &'a Endpoint, _ipv4: bool,
     ) -> marmo_transport::BoxFuture<'a, io::Result<Option<crate::outbound::udp::UdpOutbound>>> {
         Box::pin(async move {
-            let client = connect_udp(&self.server, &self.tls, &self.password, target).await?;
+            let client = connect_udp(
+                &self.dialer,
+                &self.server,
+                &self.tls,
+                &self.password,
+                target,
+            )
+            .await?;
             Ok(Some(crate::outbound::udp::UdpOutbound::Trojan(client)))
         })
     }
@@ -91,9 +107,9 @@ impl TrojanUdpClient {
 
 /// Dials `server` over TLS and opens a UDP association for `target`.
 pub(crate) async fn connect_udp(
-    server: &Endpoint, tls: &TlsClient, password: &PasswordHash, target: &Endpoint,
+    dialer: &Dialer, server: &Endpoint, tls: &TlsClient, password: &PasswordHash, target: &Endpoint,
 ) -> io::Result<TrojanUdpClient> {
-    let inner = crate::direct::connect(server).await?;
+    let inner = dialer.connect(server).await?;
     let mut stream = tls.connect(Box::new(inner)).await.map_err(tls_error)?;
     let mut header = [0_u8; REQUEST_HEADER_MAX];
     let length = encode_request_header(password, target, COMMAND_UDP_ASSOCIATE, &mut header)

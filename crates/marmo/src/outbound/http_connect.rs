@@ -10,14 +10,16 @@ use marmo_transport::BoxStream;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 
+use crate::direct::Dialer;
+
 /// Dials `server` and tunnels to `target` through HTTP CONNECT.
 ///
 /// Any bytes the proxy sends after its `200` response head are tunnel data and
 /// are replayed before the socket, so a target that speaks first still works.
 pub(crate) async fn connect(
-    server: &Endpoint, target: &Endpoint,
+    dialer: &Dialer, server: &Endpoint, target: &Endpoint,
 ) -> io::Result<(BoxStream, Option<std::net::SocketAddr>)> {
-    let mut stream = crate::direct::connect(server).await?;
+    let mut stream = dialer.connect(server).await?;
     let bound = stream.local_addr().ok();
     let request = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n");
     stream.write_all(request.as_bytes()).await?;
@@ -33,6 +35,7 @@ pub(crate) async fn connect(
 /// An HTTP CONNECT outbound node.
 pub(crate) struct HttpOutbound {
     pub(crate) server: Endpoint,
+    pub(crate) dialer: Dialer,
 }
 
 impl crate::outbound::Outbound for HttpOutbound {
@@ -40,7 +43,7 @@ impl crate::outbound::Outbound for HttpOutbound {
         &'a self, target: &'a Endpoint,
     ) -> marmo_transport::BoxFuture<'a, io::Result<crate::outbound::Connected>> {
         Box::pin(async move {
-            let (stream, bound) = connect(&self.server, target).await?;
+            let (stream, bound) = connect(&self.dialer, &self.server, target).await?;
             Ok(crate::outbound::Connected::with_bound(stream, bound))
         })
     }
@@ -155,7 +158,9 @@ mod tests {
 
         let server = Endpoint::from(address);
         let target = Endpoint::from_domain("example.com", 80).expect("target");
-        let (mut stream, _) = connect(&server, &target).await.expect("connect");
+        let (mut stream, _) = connect(&Dialer::default(), &server, &target)
+            .await
+            .expect("connect");
         let mut greeting = [0_u8; 5];
         stream.read_exact(&mut greeting).await.expect("greeting");
         assert_eq!(&greeting, b"hello");

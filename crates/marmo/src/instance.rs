@@ -34,6 +34,8 @@ use crate::config::{
     VmessSecurity,
 };
 use crate::deadline::Deadline;
+use crate::direct::Dialer;
+use crate::dns::DnsRuntime;
 use crate::inbound::{self, http, socks5};
 use crate::limits::Limits;
 use crate::metrics::{MetricEvent, Metrics, MetricsSink, MetricsSnapshot};
@@ -54,6 +56,7 @@ pub struct Instance {
     router: Arc<Router>,
     metrics: Arc<Metrics>,
     process: Option<Arc<ProcessRuntime>>,
+    dns: Option<Arc<DnsRuntime>>,
     outbounds: Vec<OutboundSpec>,
     inbounds: Vec<InboundSpec>,
 }
@@ -70,6 +73,8 @@ impl Instance {
             domain_sets: Vec::new(),
             ip_sets: Vec::new(),
             process_resolver: None,
+            #[cfg(feature = "dns")]
+            dns_resolver: None,
         }
     }
 
@@ -98,10 +103,12 @@ impl Instance {
             router,
             metrics,
             process,
+            dns,
             outbounds,
             inbounds,
         } = self;
 
+        let dialer = Dialer::new(dns);
         let mut specs: Vec<Option<OutboundSpec>> = outbounds.into_iter().map(Some).collect();
         let mut kinds: Vec<Option<Arc<dyn Outbound>>> = (0..specs.len()).map(|_| None).collect();
         let mut built = std::collections::HashMap::new();
@@ -114,7 +121,7 @@ impl Instance {
             }
             let tag = spec.tag.to_string();
             let spec = slot.take().expect("checked above");
-            let outbound = spec.build_node(&metrics)?;
+            let outbound = spec.build_node(&metrics, &dialer)?;
             built.insert(tag, Arc::clone(&outbound));
             kinds[index] = Some(outbound);
         }
@@ -175,6 +182,7 @@ impl Instance {
             router,
             metrics,
             process,
+            dialer,
             outbounds: kinds,
             inbounds: bound,
         })
@@ -203,6 +211,8 @@ pub struct InstanceBuilder {
     domain_sets: Vec<(Arc<str>, Arc<dyn DomainSet>)>,
     ip_sets: Vec<(Arc<str>, Arc<dyn IpSet>)>,
     process_resolver: Option<Arc<dyn ProcessResolver>>,
+    #[cfg(feature = "dns")]
+    dns_resolver: Option<Arc<dyn crate::dns::DnsResolver>>,
 }
 
 impl InstanceBuilder {
@@ -255,6 +265,19 @@ impl InstanceBuilder {
     #[must_use]
     pub fn process_resolver(mut self, resolver: Arc<dyn ProcessResolver>) -> Self {
         self.process_resolver = Some(resolver);
+        self
+    }
+
+    /// Installs an embedder DNS resolver.
+    ///
+    /// The resolver replaces the built-in hickory upstream. The library still
+    /// applies its cache, timeout, in-flight limit, deduplication, and address
+    /// cap. When this is set, `dns.servers`, `dns.fallback`, and `dns.tls` must
+    /// be absent; the `dns` block may still supply policy fields.
+    #[cfg(feature = "dns")]
+    #[must_use]
+    pub fn dns_resolver(mut self, resolver: Arc<dyn crate::dns::DnsResolver>) -> Self {
+        self.dns_resolver = Some(resolver);
         self
     }
 
@@ -730,6 +753,20 @@ impl InstanceBuilder {
 
         let supervisor = Arc::new(Supervisor::new(limits.max_connections));
         let metrics = Arc::new(Metrics::new(self.metrics));
+        #[cfg(feature = "dns")]
+        let dns = DnsRuntime::build(
+            self.config.dns.as_ref(),
+            self.dns_resolver,
+            (*metrics).clone(),
+        )
+        .map_err(|error| match error {
+            crate::dns::DnsBuildError::Conflict => BuildError::DnsResolverConflict,
+            other => BuildError::Dns {
+                reason: other.to_string(),
+            },
+        })?;
+        #[cfg(not(feature = "dns"))]
+        let dns = None;
         Ok(Instance {
             runtime,
             limits,
@@ -737,6 +774,7 @@ impl InstanceBuilder {
             router: Arc::new(router),
             metrics,
             process,
+            dns,
             outbounds,
             inbounds,
         })
@@ -778,6 +816,7 @@ pub struct BoundInstance {
     router: Arc<Router>,
     metrics: Arc<Metrics>,
     process: Option<Arc<ProcessRuntime>>,
+    dialer: Dialer,
     outbounds: Vec<Arc<dyn Outbound>>,
     inbounds: Vec<BoundInbound>,
 }
@@ -825,13 +864,15 @@ impl BoundInstance {
         let supervisor = Arc::clone(&self.supervisor);
         let runtime = self.runtime.clone();
         let limits = self.limits;
+        let dialer = self.dialer;
         let context = Arc::new(Context {
             runtime: runtime.clone(),
             supervisor: Arc::clone(&supervisor),
             router: self.router,
             metrics: self.metrics,
             process: self.process,
-            direct: Arc::new(crate::direct::DirectOutbound),
+            direct: Arc::new(crate::direct::DirectOutbound::new(dialer.clone())),
+            dialer,
             outbounds: self.outbounds,
             limits,
         });
@@ -949,6 +990,7 @@ pub(crate) struct Context {
     pub(crate) metrics: Arc<Metrics>,
     pub(crate) process: Option<Arc<ProcessRuntime>>,
     pub(crate) direct: Arc<dyn Outbound>,
+    pub(crate) dialer: Dialer,
     pub(crate) outbounds: Vec<Arc<dyn Outbound>>,
     pub(crate) limits: Limits,
 }
@@ -1244,11 +1286,16 @@ impl OutboundSpec {
         matches!(self.config, OutboundConfig::Selector { .. })
     }
 
-    fn build_node(self, metrics: &Arc<Metrics>) -> Result<Arc<dyn Outbound>, BindError> {
+    fn build_node(
+        self, metrics: &Arc<Metrics>, dialer: &Dialer,
+    ) -> Result<Arc<dyn Outbound>, BindError> {
         let Self { tag, config } = self;
         Ok(match config {
-            OutboundConfig::Direct => Arc::new(crate::direct::DirectOutbound),
-            OutboundConfig::Http { server } => Arc::new(http_connect::HttpOutbound { server }),
+            OutboundConfig::Direct => Arc::new(crate::direct::DirectOutbound::new(dialer.clone())),
+            OutboundConfig::Http { server } => Arc::new(http_connect::HttpOutbound {
+                server,
+                dialer: dialer.clone(),
+            }),
             OutboundConfig::Shadowsocks {
                 server,
                 method,
@@ -1257,6 +1304,7 @@ impl OutboundSpec {
                 server,
                 method,
                 key,
+                dialer: dialer.clone(),
             }),
             OutboundConfig::Trojan {
                 server,
@@ -1266,6 +1314,7 @@ impl OutboundSpec {
                 server,
                 password,
                 tls: build_tls_client(&tls, &tag, metrics)?,
+                dialer: dialer.clone(),
             }),
             OutboundConfig::Vless {
                 server,
@@ -1293,6 +1342,7 @@ impl OutboundSpec {
                     mux,
                     layers,
                     pool: OnceLock::new(),
+                    dialer: dialer.clone(),
                 })
             }
             OutboundConfig::Vmess {
@@ -1321,6 +1371,7 @@ impl OutboundSpec {
                     mux,
                     layers,
                     pool: OnceLock::new(),
+                    dialer: dialer.clone(),
                 })
             }
             OutboundConfig::Selector { .. } => {
@@ -1640,6 +1691,15 @@ pub enum BuildError {
     /// The configuration has process matchers but no resolver was injected.
     #[error("process rules require .process_resolver(...)")]
     MissingProcessResolver,
+    /// The DNS runtime could not be built.
+    #[error("invalid dns configuration: {reason}")]
+    Dns {
+        /// Why the resolver was rejected.
+        reason: String,
+    },
+    /// An injected DNS resolver conflicts with built-in server fields.
+    #[error("dns_resolver conflicts with dns.servers, dns.fallback, or dns.tls")]
+    DnsResolverConflict,
     /// A rule-set tag could not be registered.
     #[error("rule set '{tag}' registration failed: {reason}")]
     RuleSet {

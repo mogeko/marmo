@@ -7,13 +7,15 @@ use marmo_net::Endpoint;
 use marmo_proto::shadowsocks::{Key, Method};
 use tokio::net::TcpStream;
 
+use crate::direct::Dialer;
+
 use crate::shadowsocks::SsStream;
 
 /// Dials `server` and opens a Shadowsocks 2022 stream to `target`.
 pub(crate) async fn connect(
-    server: &Endpoint, method: Method, key: Arc<Key>, target: &Endpoint,
+    dialer: &Dialer, server: &Endpoint, method: Method, key: Arc<Key>, target: &Endpoint,
 ) -> io::Result<(SsStream<TcpStream>, Option<std::net::SocketAddr>)> {
-    let inner = crate::direct::connect(server).await?;
+    let inner = dialer.connect(server).await?;
     let bound = inner.local_addr().ok();
     let stream = SsStream::connect(inner, method, key, target).await?;
     Ok((stream, bound))
@@ -24,6 +26,7 @@ pub(crate) struct ShadowsocksOutbound {
     pub(crate) server: Endpoint,
     pub(crate) method: Method,
     pub(crate) key: Arc<Key>,
+    pub(crate) dialer: Dialer,
 }
 
 impl crate::outbound::Outbound for ShadowsocksOutbound {
@@ -31,8 +34,14 @@ impl crate::outbound::Outbound for ShadowsocksOutbound {
         &'a self, target: &'a Endpoint,
     ) -> marmo_transport::BoxFuture<'a, io::Result<crate::outbound::Connected>> {
         Box::pin(async move {
-            let (stream, bound) =
-                connect(&self.server, self.method, Arc::clone(&self.key), target).await?;
+            let (stream, bound) = connect(
+                &self.dialer,
+                &self.server,
+                self.method,
+                Arc::clone(&self.key),
+                target,
+            )
+            .await?;
             Ok(crate::outbound::Connected::with_bound(
                 Box::new(stream) as marmo_transport::BoxStream,
                 bound,
@@ -45,6 +54,7 @@ impl crate::outbound::Outbound for ShadowsocksOutbound {
     ) -> marmo_transport::BoxFuture<'a, io::Result<Option<crate::outbound::udp::UdpOutbound>>> {
         Box::pin(async move {
             let client = crate::shadowsocks::SsUdpClient::connect(
+                &self.dialer,
                 &self.server,
                 self.method,
                 Arc::clone(&self.key),

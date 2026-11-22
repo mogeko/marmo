@@ -16,6 +16,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroize;
 
+use crate::direct::Dialer;
 use crate::outbound::Connected;
 use crate::outbound::mux::{MuxDialer, MuxPool};
 use crate::vmess::{ChunkReader, ChunkStream, ChunkWriter, now_unix, random};
@@ -28,6 +29,7 @@ pub(crate) struct VmessOutbound {
     pub(crate) mux: bool,
     pub(crate) layers: Vec<Arc<dyn Layer>>,
     pub(crate) pool: OnceLock<Arc<MuxPool>>,
+    pub(crate) dialer: Dialer,
 }
 
 impl crate::outbound::Outbound for VmessOutbound {
@@ -43,7 +45,7 @@ impl crate::outbound::Outbound for VmessOutbound {
                 let stream = pool.open_tcp(target).await?;
                 return Ok(Connected::with_bound(stream, None));
             }
-            let (mut stream, bound) = open_stream(&self.server, &self.layers).await?;
+            let (mut stream, bound) = open_stream(&self.dialer, &self.server, &self.layers).await?;
             let request = write_request(
                 &mut stream,
                 &self.cmd_key,
@@ -75,7 +77,8 @@ impl crate::outbound::Outbound for VmessOutbound {
                     datagram,
                 ))));
             }
-            let (mut stream, _bound) = open_stream(&self.server, &self.layers).await?;
+            let (mut stream, _bound) =
+                open_stream(&self.dialer, &self.server, &self.layers).await?;
             let request = write_request(
                 &mut stream,
                 &self.cmd_key,
@@ -120,6 +123,7 @@ impl crate::outbound::Outbound for VmessOutbound {
             cmd_key: Arc::clone(&self.cmd_key),
             security: self.security,
             layers: self.layers.clone(),
+            dialer: self.dialer.clone(),
         });
         let pool = MuxPool::new(runtime.clone(), token.clone(), dialer);
         let supervisor = pool.supervisor();
@@ -133,12 +137,13 @@ struct VmessDialer {
     cmd_key: Arc<CmdKey>,
     security: Security,
     layers: Vec<Arc<dyn Layer>>,
+    dialer: Dialer,
 }
 
 impl MuxDialer for VmessDialer {
     fn dial(&self) -> BoxFuture<'_, io::Result<BoxStream>> {
         Box::pin(async move {
-            let (mut stream, _) = open_stream(&self.server, &self.layers).await?;
+            let (mut stream, _) = open_stream(&self.dialer, &self.server, &self.layers).await?;
             let target = Endpoint::from_domain(MUX_DOMAIN, MUX_PORT)
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "mux target"))?;
             let request = write_request(
@@ -204,9 +209,9 @@ impl VmessUdpClient {
 }
 
 async fn open_stream(
-    server: &Endpoint, layers: &[Arc<dyn Layer>],
+    dialer: &Dialer, server: &Endpoint, layers: &[Arc<dyn Layer>],
 ) -> io::Result<(BoxStream, Option<std::net::SocketAddr>)> {
-    let inner = crate::direct::connect(server).await?;
+    let inner = dialer.connect(server).await?;
     let bound = inner.local_addr().ok();
     let mut stream: BoxStream = Box::new(inner);
     for layer in layers {

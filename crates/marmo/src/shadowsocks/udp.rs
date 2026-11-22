@@ -11,6 +11,8 @@ use marmo_proto::shadowsocks::{
 };
 use tokio::net::UdpSocket;
 
+use crate::direct::Dialer;
+
 use super::{random_bytes, unix_now};
 
 /// Largest payload carried by one UDP packet.
@@ -37,9 +39,9 @@ pub(crate) struct SsUdpClient {
 impl SsUdpClient {
     /// Resolves the server and binds a client socket of the same family.
     pub(crate) async fn connect(
-        server: &Endpoint, method: Method, key: Arc<Key>,
+        dialer: &Dialer, server: &Endpoint, method: Method, key: Arc<Key>,
     ) -> io::Result<Self> {
-        let target = resolve_server(server).await?;
+        let target = dialer.resolve(server).await?;
         let bind = if target.is_ipv4() {
             SocketAddr::from(([0, 0, 0, 0], 0))
         } else {
@@ -127,19 +129,6 @@ impl SsUdpClient {
             "no valid shadowsocks datagram",
         ))
     }
-}
-
-async fn resolve_server(endpoint: &Endpoint) -> io::Result<SocketAddr> {
-    if let Some(address) = endpoint.to_socket_addr() {
-        return Ok(address);
-    }
-    let domain = endpoint
-        .domain()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "endpoint has no host"))?;
-    tokio::net::lookup_host((domain, endpoint.port()))
-        .await?
-        .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::AddrNotAvailable, "no addresses resolved"))
 }
 
 fn ss_error(error: SsError) -> io::Error {
