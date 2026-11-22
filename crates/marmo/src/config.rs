@@ -511,15 +511,30 @@ pub struct Rule {
     /// Domain suffix matches.
     #[serde(default)]
     pub domain_suffix: Option<Vec<String>>,
+    /// Domain keyword matches.
+    #[serde(default)]
+    pub domain_keyword: Option<Vec<String>>,
+    /// Domain set tags.
+    #[serde(default)]
+    pub domain_set: Option<Vec<String>>,
     /// CIDR matches.
     #[serde(default)]
     pub ip_cidr: Option<Vec<String>>,
+    /// IP set tags.
+    #[serde(default)]
+    pub geoip: Option<Vec<String>>,
     /// Destination port matches.
     #[serde(default)]
     pub port: Option<Vec<u16>>,
+    /// Destination port ranges as inclusive `[start, end]` pairs.
+    #[serde(default)]
+    pub port_range: Option<Vec<[u16; 2]>>,
     /// Transport network.
     #[serde(default)]
     pub network: Option<Network>,
+    /// Inbound tags.
+    #[serde(default)]
+    pub inbound: Option<Vec<String>>,
     /// Outbound tag selected on match.
     pub outbound: String,
 }

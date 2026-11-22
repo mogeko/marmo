@@ -38,7 +38,7 @@ impl DomainName {
                 return Err(EndpointError::InvalidHost);
             }
         }
-        Ok(Self(name.into()))
+        Ok(Self(name.to_ascii_lowercase().into_boxed_str()))
     }
 
     /// Returns the name as a string slice.
@@ -353,6 +353,10 @@ mod tests {
     fn validates_domains() {
         assert!(DomainName::parse("example.com").is_ok());
         assert!(DomainName::parse("例え.テスト").is_ok());
+        assert_eq!(
+            DomainName::parse("Example.COM").expect("domain").as_str(),
+            "example.com"
+        );
         assert_eq!(DomainName::parse(""), Err(EndpointError::EmptyHost));
         assert_eq!(DomainName::parse("a/b"), Err(EndpointError::InvalidHost));
         let long = "a".repeat(DomainName::MAX_LEN + 1);
