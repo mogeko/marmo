@@ -175,7 +175,7 @@ tests; no other matching semantics change.
   compiler tool are added.
 - Estimated 1-2 days for the traits, matchers, validation, and tests. P2-9's
   "versioned compiled format" exit criterion is delegated to the provider; the
-  roadmap wording must change when this ADR is accepted.
+  roadmap states the injected-set contract instead.
 
 ## Approval
 

@@ -1,7 +1,7 @@
 # Architecture
 
 Status: **Current Rust architecture.** Accepted decisions are ADR-0017 through
-ADR-0023. The library is the only implementation in this repository; there is
+ADR-0029. The library is the only implementation in this repository; there is
 no CLI, daemon, GUI, or application layer.
 
 ## 1. Purpose
@@ -63,8 +63,9 @@ handling, and configuration storage.
 - **Platforms**: Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows
   (x86_64) are CI targets from the first milestone. Other targets are
   best-effort.
-- **Bounded state**: every queue, session table, cache, buffer, and rule set
-  has an upper bound fixed at initialization.
+- **Bounded state**: every queue, session table, cache, buffer, and
+  library-owned index has an upper bound fixed at initialization; injected
+  provider data is bounded by the embedder contract.
 - **No global state**: no global allocator, logger, runtime, or process signal
   handler in the library.
 
@@ -79,13 +80,14 @@ Everything else is post-1.0 work (§19):
 | HTTP CONNECT + forward inbound | QUIC, TUIC, Hysteria2 |
 | HTTP CONNECT outbound | gRPC and XHTTP transports |
 | Shadowsocks 2022 TCP/UDP | DNS cache, DoH/DoT |
-| Trojan inbound/outbound (TLS, TCP/UDP, fallback) | GEOIP/GEOSITE rule sets |
-| VLESS inbound/outbound (TCP/TLS/WS/H2, TCP/UoT/XUDP, Mux.Cool) | process rules |
+| Trojan inbound/outbound (TLS, TCP/UDP, fallback) | — |
+| VLESS inbound/outbound (TCP/TLS/WS/H2, TCP/UoT/XUDP, Mux.Cool) | — |
 | VMess inbound/outbound (AEAD, TCP/UDP, Mux.Cool, TLS/WS/H2) | — |
 | TLS 1.3 client/server, ALPN, mTLS | `http_head` probes, jitter, backoff |
 | manual/RR/random/fallback/least-latency, TCP probes | root-level H2 pooling |
-| domain/suffix/CIDR/port/network rules | TUN, transparent proxying |
-| strict JSON config, limits, metrics | Windows-specific process matching |
+| domain/suffix/keyword/CIDR/port/range/inbound rules; injected domain/IP sets | TUN, transparent proxying |
+| process rules via an injected `ProcessResolver` | Windows-specific process matching |
+| strict JSON config, limits, metrics | — |
 | TLS/HTTP/H2 sniffing with buffered replay | — |
 
 ## 5. Runtime model
@@ -118,7 +120,9 @@ Rules:
   `select!` branch is either cancel-safe or is not dropped (ADR-0017).
 - **No filesystem I/O in the library.** TLS credentials arrive as inline PEM
   in the configuration and are parsed during `bind()`; the embedder reads
-  files or fetches secrets (ADR-0023).
+  files or fetches secrets (ADR-0023). Rule-set data and process identity are
+  injected as `DomainSet`/`IpSet` and `ProcessResolver` implementations; the
+  embedder owns storage, OS access, and reload (ADR-0028, ADR-0029).
 - **Config is immutable per instance.** Reload is post-1.0: it
   builds a new `CompiledConfig` and publishes it through `ArcSwap`, so the data
   plane never locks.
@@ -278,7 +282,7 @@ pub struct Metadata {
     pub destination: Endpoint,          // literal IP or unresolved domain + port
     pub domain: Option<Arc<str>>,       // inbound protocol or sniffer
     pub inbound: InboundId,             // compiled tag index
-    pub process: Option<ProcessInfo>,   // opt-in, later phase
+    pub process: Option<ProcessInfo>,   // injected resolver, opt-in
 }
 ```
 
@@ -426,20 +430,34 @@ Matchers in the current set:
 
 | Matcher | Notes |
 | --- | --- |
-| `domain` | exact match |
-| `domain_suffix` | suffix match, no regex |
+| `domain` | exact match, ASCII-case-insensitive |
+| `domain_suffix` | suffix match on label boundaries, no regex |
+| `domain_keyword` | compiled `aho-corasick` automaton, no regex |
+| `domain_set` | injected `DomainSet` by tag; provider defines exact/suffix/keyword semantics |
 | `ip_cidr` | sorted ranges + binary search |
+| `geoip` | injected `IpSet` by tag; sorted membership query |
 | `port` | destination port |
+| `port_range` | inclusive ranges, normalized and merged |
 | `network` | `tcp` / `udp` |
+| `inbound` | inbound tag |
+| `process_name` | exact executable name from an injected `ProcessResolver` |
+| `process_path` | exact executable path from an injected `ProcessResolver` |
 
-Post-current matchers: `domain_keyword`, `port_range`, `inbound`,
-`domain_set`/`geoip` (compiled rule sets), `process_name`/`process_path`, and
-`protocol` (sniffed). Compiled rule sets use a versioned binary format read
-memory-mapped at startup; no network access at runtime. Data licensing is
-tracked by the rule-set tool, not by this library.
+`domain_set` and `geoip` do not have a library-owned file format. The embedder
+registers an `Arc<dyn DomainSet>` or `Arc<dyn IpSet>` at build time; the data
+may live in a tree, a sorted array, a SQLite snapshot, or another store. The
+provider contract requires an in-memory, non-blocking, allocation-free,
+bounded, panic-free `contains`. Set data can be swapped inside the provider
+without rebuilding the instance; rule/config reload remains future work.
 
-Process matching is best-effort: Linux `/proc`, macOS `proc_pidpath`, Windows
-later. Failure returns "unknown" and never fails the connection.
+Process identity is best-effort and opt-in. The embedder injects a
+`ProcessResolver`; the library owns the `process_name`/`process_path` matchers,
+a bounded cache, a lookup timeout, and an in-flight limit. Unknown, timeout,
+resolver panic, and platform absence all return "unknown" and never fail the
+connection. Process matching is not a security boundary.
+
+Sniffed `protocol` matching remains deferred; it is not part of the current
+matcher set.
 
 ## 11. Outbound groups and selection
 
@@ -507,8 +525,8 @@ UDP by default and `mux: true` for client-side pooling (ADR-0027).
 | Reload (post-1.0) | `arc-swap` | lock-free config swap |
 | Sockets | `socket2` | keepalive, buffer sizes, `SO_REUSEADDR` |
 | IP/CIDR | `ipnet` | compiled ranges |
-| Domain sets (post-1.0) | `aho-corasick` | keyword/suffix sets |
-| Process info (post-1.0) | `sysinfo` | best-effort, opt-in |
+| Domain keywords | `aho-corasick` | inline `domain_keyword` automata |
+| Domain/IP sets and process identity | embedder-provided | `DomainSet`/`IpSet` and `ProcessResolver`; no library file or OS access |
 
 Rules:
 
@@ -775,11 +793,16 @@ Module boundaries inside `marmo` are enforced by review, not by the compiler.
   crate with `unsafe` or a build script.
 - Cancellation safety is a security property: a dropped protocol state machine
   must not leave a half-authenticated session reachable.
+- Injected `DomainSet`/`IpSet` and `ProcessResolver` implementations are
+  trusted embedder code. The library bounds tag count, cache size, lookup
+  timeout, and in-flight calls, but it cannot verify provider memory bounds,
+  checksums, or platform behavior. Process identity is not a security
+  boundary; process names and paths are never logged.
 
 ## 19. Roadmap
 
-The implementation is complete for the current release. The dependency-ordered
-work list is in [`roadmap.md`](roadmap.md); the summary is:
+The current release line is `0.0.3`. The dependency-ordered work list is in
+[`roadmap.md`](roadmap.md); the summary is:
 
 | Item | Enabled by |
 | --- | --- |
@@ -787,7 +810,8 @@ work list is in [`roadmap.md`](roadmap.md); the summary is:
 | DNS cache and DoH/DoT | `hickory-resolver` |
 | gRPC transport | `h2`/`tonic` |
 | XHTTP transport | `h2`, later `quinn` (`h3`) |
-| Rule sets, GEOIP/GEOSITE, process rules | `aho-corasick`, `sysinfo` |
+| Rule sets, GEOIP/GEOSITE | injected `DomainSet`/`IpSet` |
+| Process rules | injected `ProcessResolver` |
 | HTTP/2 root multiplexing and pooling | `h2` |
 | `http_head` health checks, jitter, backoff | `tokio::time` |
 
@@ -797,6 +821,7 @@ work list is in [`roadmap.md`](roadmap.md); the summary is:
 | --- | --- |
 | Cancellation-safety bugs in protocol state machines | drop-mid-await tests; `select!` review |
 | Dependency supply chain | pinned lockfile, `--locked`, copyleft check, `cargo-audit`, review new build scripts |
+| Injected provider contract violations | documented contract, fake-provider tests, per-provider audit; library bounds tags, cache, timeout, and in-flight calls |
 | C toolchain friction on Windows/macOS | one pinned provider, CI images documented; a platform that cannot build `aws-lc-rs` needs a new ADR, not a silent backend switch |
 | License-change consent | both copyright holders must agree; ADR-0020 records the decision |
 | Tokio lock-in | accepted in ADR-0017; codecs and policy remain runtime-free |
@@ -812,7 +837,7 @@ Open questions:
 
 ## 21. Decision index
 
-Current decisions are ADR-0017 through ADR-0027. Historical decisions from the
+Current decisions are ADR-0017 through ADR-0029. Historical decisions from the
 initial implementation are ADR-0001 through ADR-0016 and remain in
 [`docs/decisions/`](decisions/README.md); their bodies are unchanged.
 
@@ -829,3 +854,5 @@ initial implementation are ADR-0001 through ADR-0016 and remain in
 | [0025](decisions/0025-vmess-aead.md) | VMess AEAD, UDP, and Mux.Cool | Accepted |
 | [0026](decisions/0026-vless-mux.md) | VLESS inbound Mux.Cool | Accepted |
 | [0027](decisions/0027-client-mux.md) | Client-side Mux.Cool outbound | Accepted |
+| [0028](decisions/0028-rule-sets.md) | Injected rule sets | Accepted |
+| [0029](decisions/0029-process-identity.md) | Process identity injection | Accepted |

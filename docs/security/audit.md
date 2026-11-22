@@ -4,7 +4,8 @@
 - Scope: threat model, implemented controls, open obligations, and the plan
   before a production-readiness claim.
 - Related: ADR-0009 (clean-room), ADR-0018 (dependencies and crypto),
-  ADR-0020 (license).
+  ADR-0020 (license), ADR-0028 (injected rule sets), ADR-0029 (process
+  identity injection).
 
 ## 1. Threat model
 
@@ -64,6 +65,13 @@ not implemented in this revision (QUIC, TUIC, Hysteria2).
   4 MiB in-flight downlink budget. TCP downlink applies backpressure; UDP drops
   under queue pressure. Session ids are never reused, and all pool tasks are
   tracked and cancelled with the instance.
+- **Injected routing providers.** `DomainSet`, `IpSet`, and `ProcessResolver`
+  are trusted embedder code. The library bounds tag count, process-cache size,
+  lookup timeout, and in-flight resolver calls; provider data bounds and
+  storage integrity are outside the library. Process identity is best-effort,
+  is not a security boundary, and is never logged. A provider error is a
+  non-match, not a connection failure; a provider panic is a contract
+  violation.
 
 ## 3. Open obligations
 
@@ -76,6 +84,8 @@ not implemented in this revision (QUIC, TUIC, Hysteria2).
 | HTTP/1 | Keep the request/forward/CONNECT parser fuzzed and bounded as it evolves. |
 | Cancellation | Audit every `select!` branch and keep drop-mid-await tests for protocol state machines. |
 | Resource bounds | Re-check every queue, table, and cache on new features; no unbounded per-peer state. |
+| Injected providers | Audit each `DomainSet`/`IpSet`/`ProcessResolver` implementation for the declared contract: in-memory, non-blocking, allocation-free, bounded, and panic-free. |
+| Process identity | Treat process matching as policy convenience, not authorization; do not log names or paths. |
 | Secrets | Keep redaction and zeroization tests for every new credential-bearing type. |
 | Supply chain | Review new build scripts, proc macros, and `unsafe`; keep the lockfile and audit gate current. |
 

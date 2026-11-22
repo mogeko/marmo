@@ -76,6 +76,24 @@ cargo run -p marmo --example vless -- client 127.0.0.1:1080 127.0.0.1:443 UUID t
 cargo run -p marmo --example vmess -- client 127.0.0.1:1080 127.0.0.1:8443 UUID tcp
 ```
 
+## Routing data and process identity
+
+Large domain/IP sets and process identity are supplied by the embedder; the
+library never reads rule files or OS process tables:
+
+```rust,ignore
+let instance = marmo::Instance::builder(config)
+    .domain_set("geosite-cn", domain_set) // Arc<dyn marmo::DomainSet>
+    .ip_set("geoip-cn", ip_set)           // Arc<dyn marmo::IpSet>
+    .process_resolver(resolver)            // Arc<dyn marmo::ProcessResolver>
+    .build()?;
+```
+
+`DomainSet::contains` and `IpSet::contains` must be in-memory, non-blocking,
+allocation-free, bounded, and panic-free. Process lookups add a bounded cache,
+a timeout, and an in-flight limit; unknown process identity fails open. Data
+may be hot-swapped inside the provider without rebuilding the instance.
+
 ## Workspace
 
 | Crate | Role |

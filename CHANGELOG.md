@@ -5,6 +5,16 @@ and behavior may change between minor releases.
 
 ## Unreleased
 
+- Injected domain and IP sets through `DomainSet`/`IpSet`, plus
+  `domain_keyword`, `port_range`, `inbound`, `domain_set`, and `geoip`
+  matchers; the library never reads rule-set files or requests data at runtime
+  (ADR-0028).
+- Injected process identity through `ProcessResolver`, `process_name` and
+  `process_path` matchers, a bounded cache, lookup timeout, in-flight limit,
+  and fail-open unknown handling (ADR-0029).
+- Domain names are canonicalized to ASCII lowercase at parse time; routing
+  comparisons are case-insensitive.
+- `aho-corasick` is a new `marmo` dependency for inline keyword matching.
 - VMess AEAD inbound and outbound: TCP, direct UDP, inbound Mux.Cool
   termination, AES-128-GCM and ChaCha20-Poly1305, bounded auth-ID replay
   filter, and TLS/WebSocket/HTTP2 transports (ADR-0025).

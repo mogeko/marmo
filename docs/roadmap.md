@@ -48,9 +48,9 @@ ADR-0018: the Rust tree uses `quinn` rather than writing a QUIC stack.
 
 ## Phase 2 — full protocol/transport set and routing depth
 
-**Status: in progress.** Core protocol transports, TLS, selectors, health, and
-limits are complete. The remaining items are independent enough to be taken in
-any order after their dependencies.
+**Status: in progress.** Core protocol transports, TLS, selectors, health,
+limits, rule sets, and process identity are complete. The remaining items are
+independent enough to be taken in any order after their dependencies.
 
 ### Completed
 
@@ -65,13 +65,13 @@ any order after their dependencies.
 | P2-7 | VMess AEAD inbound/outbound: TCP, direct UDP, Mux.Cool | Done | P2-3, P2-4 | Vectors, loopback, Xray interop, fuzz |
 | P2-8 | Sniffing: TLS SNI, HTTP Host, HTTP/2 `:authority` | Done | P1-4, P2-1, P2-3 | Buffered replay, routing on sniffed domain, tests |
 | P2-14 | Client-side Mux.Cool pooling (VMess/VLESS) | Done | P2-1, P2-7 | Pool bounds, TCP/UDP/mixed, Xray interop |
+| P2-9 | Injected domain/IP sets: GEOIP/GEOSITE, keyword, port ranges, inbound | Done | P1-6, P2-8 | `DomainSet`/`IpSet` injection, bounded refs, hot-swappable data, routing tests (ADR-0028) |
+| P2-10 | Process rules via injected resolver (`process_name`/`process_path`) | Done | P1-6 | Resolver injection, bounded cache/timeout, fail-open, tests (ADR-0029) |
 
 ### Remaining
 
 | ID | Item | Status | Depends on | Exit criteria | Estimate |
 | --- | --- | --- | --- | --- | --- |
-| P2-9 | Injected domain/IP sets: GEOIP/GEOSITE, keyword, port ranges, inbound | Planned | P1-6, P2-8 | `DomainSet`/`IpSet` injection, bounded refs, hot-swappable data, routing tests | 1–2 d |
-| P2-10 | Process rules via injected resolver (`process_name`/`process_path`) | Planned | P1-6 | Resolver injection, bounded cache/timeout, fail-open, tests | 1–1.5 d |
 | P2-11 | DNS cache + DoH/DoT resolver | Planned | P1-1 | TTL cache, bounded entries, DoH policy, fallback tests | 2–3 d |
 | P2-12 | Root-level HTTP/2 multiplexing and pooling | Planned | P2-4 | Multiple streams per connection, pool bounds, tests | 1–2 d |
 | P2-13 | Fixture parity for all codecs | Planned | P1-5, P2-1..P2-4 | Corpus/unit vectors, differential interop records | 1 d |
@@ -151,8 +151,8 @@ P1 core (net, config, relay, limits)
 
 ## Critical path
 
-1. Close Phase 2: P2-8 sniffing, P2-9/P2-10 rule sets and process rules,
-   P2-11 DNS, P2-12 H2 pooling.
+1. Close Phase 2: P2-11 DNS and P2-12 H2 pooling. P2-8, P2-9, P2-10, and
+   P2-14 are done.
 2. Settle P3-1 datagram/endpoint boundary.
 3. Build P3-2 QUIC, then P3-3 TUIC and P3-4 Hysteria2.
 4. P3-5 gRPC and P3-6 XHTTP can run in parallel once H2 is stable; XHTTP `h3`

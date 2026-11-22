@@ -28,7 +28,7 @@ ADR-0017 onward.
 | [0002](0002-scope-and-phasing.md) | Scope and delivery phases | Historical; carried over | Snell deferred; WireGuard abandoned |
 | [0003](0003-core-abstractions.md) | Core interfaces and dispatch | Historical; superseded by ADR-0017 | initial vtable interfaces |
 | [0004](0004-transport-composition.md) | Transport composition | Accepted; in-tree clause superseded | nested dialers |
-| [0005](0005-routing-engine.md) | Routing engine | Accepted | first-match rules |
+| [0005](0005-routing-engine.md) | Routing engine | Accepted; rule-set delivery superseded by ADR-0028 | first-match rules |
 | [0006](0006-outbound-selection.md) | Outbound selection | Accepted | five strategies; probes opt-in |
 | [0007](0007-tls-quic-dependencies.md) | TLS, QUIC, crypto dependencies | Historical; superseded by ADR-0018 | initial in-tree policy |
 | [0008](0008-api-and-config.md) | Public API, config, errors | Accepted; re-expressed in Rust | lifecycle facade; strict JSON |
