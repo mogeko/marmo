@@ -722,3 +722,33 @@ fn builds_with_an_explicit_runtime_handle() {
         .build()
         .expect("build outside the runtime");
 }
+
+#[test]
+fn invalid_trust_anchors_fail_the_build() {
+    let config = r#"{
+          "dns": {
+            "servers": [{
+              "protocol": "tls",
+              "address": "127.0.0.1:9",
+              "server_name": "localhost"
+            }],
+            "tls": { "ca": "not a certificate" }
+          }
+        }"#;
+    let config = Config::from_json(config).expect("config");
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let result = Instance::builder(config)
+        .runtime(runtime.handle().clone())
+        .build();
+    assert!(matches!(result, Err(marmo::BuildError::Dns { .. })));
+}
+
+#[test]
+fn empty_servers_without_an_injected_resolver_fail_the_build() {
+    let config = Config::from_json(r#"{"dns":{}}"#).expect("config");
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let result = Instance::builder(config)
+        .runtime(runtime.handle().clone())
+        .build();
+    assert!(matches!(result, Err(marmo::BuildError::Dns { .. })));
+}
