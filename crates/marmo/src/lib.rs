@@ -27,7 +27,9 @@ mod validate;
 mod vless;
 mod vmess;
 
-pub use config::{Config, ConfigError, Dns, DnsProtocol, DnsServer, DnsTls, Process};
+pub use config::{
+    Config, ConfigError, Dns, DnsProtocol, DnsServer, DnsTls, MAX_CONFIG_BYTES, Process,
+};
 pub use instance::{
     BindError, BoundAddr, BoundInstance, BuildError, Instance, InstanceBuilder, InstanceHandle,
     ServeError,
