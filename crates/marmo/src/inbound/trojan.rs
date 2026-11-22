@@ -277,11 +277,10 @@ async fn reply_loop(
                         _ => continue,
                     }
                 }
-                if let Some((_, connection)) = outbound.as_mut() {
-                    if connection.send_to(&target, &payload).await.is_err() {
+                if let Some((_, connection)) = outbound.as_mut()
+                    && connection.send_to(&target, &payload).await.is_err() {
                         break;
                     }
-                }
             }
             received = async {
                 match outbound.as_mut() {

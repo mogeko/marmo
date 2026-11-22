@@ -459,10 +459,10 @@ pub fn decode_udp_packet<'a>(
         }
         let mut id = [0_u8; 8];
         id.copy_from_slice(&plaintext[offset..offset + 8]);
-        if let Some(expected) = expected_client_session {
-            if id != expected {
-                return Err(SsError::ProtocolViolation);
-            }
+        if let Some(expected) = expected_client_session
+            && id != expected
+        {
+            return Err(SsError::ProtocolViolation);
         }
         client_session_id = Some(id);
         offset += 8;

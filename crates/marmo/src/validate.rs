@@ -490,23 +490,24 @@ fn validate_inbound_transport(
     })?;
     match transport.network {
         StreamNetwork::H2 => {
-            if let Some(alpn) = tls.alpn.as_deref() {
-                if !contains(alpn, "h2") {
-                    return Err(fail(
-                        format!("inbounds[{index}].tls.alpn"),
-                        "must contain 'h2' for the h2 transport",
-                    ));
-                }
+            if let Some(alpn) = tls.alpn.as_deref()
+                && !contains(alpn, "h2")
+            {
+                return Err(fail(
+                    format!("inbounds[{index}].tls.alpn"),
+                    "must contain 'h2' for the h2 transport",
+                ));
             }
         }
         StreamNetwork::Ws => {
-            if let Some(alpn) = tls.alpn.as_deref() {
-                if !alpn.is_empty() && !contains(alpn, "http/1.1") {
-                    return Err(fail(
-                        format!("inbounds[{index}].tls.alpn"),
-                        "must contain 'http/1.1' for the ws transport",
-                    ));
-                }
+            if let Some(alpn) = tls.alpn.as_deref()
+                && !alpn.is_empty()
+                && !contains(alpn, "http/1.1")
+            {
+                return Err(fail(
+                    format!("inbounds[{index}].tls.alpn"),
+                    "must contain 'http/1.1' for the ws transport",
+                ));
             }
         }
         StreamNetwork::Tcp => {}
@@ -832,13 +833,13 @@ fn validate_vmess(outbound: &Outbound, index: usize) -> Result<(), ConfigError> 
 }
 
 fn validate_outbound_tls(tls: &Tls, server: &Endpoint, index: usize) -> Result<(), ConfigError> {
-    if let Some(sni) = tls.sni.as_deref() {
-        if sni.is_empty() {
-            return Err(fail(
-                format!("outbounds[{index}].tls.sni"),
-                "must not be empty",
-            ));
-        }
+    if let Some(sni) = tls.sni.as_deref()
+        && sni.is_empty()
+    {
+        return Err(fail(
+            format!("outbounds[{index}].tls.sni"),
+            "must not be empty",
+        ));
     }
     if !tls.insecure && tls.sni.is_none() && server.is_ip() {
         return Err(fail(
@@ -866,21 +867,21 @@ fn validate_outbound_tls(tls: &Tls, server: &Endpoint, index: usize) -> Result<(
             "requires client_private_key and vice versa",
         ));
     }
-    if let Some(value) = tls.client_certificate.as_deref() {
-        if !valid_pem(value) {
-            return Err(fail(
-                format!("outbounds[{index}].tls.client_certificate"),
-                "must be inline PEM (ADR-0023); file paths are not accepted",
-            ));
-        }
+    if let Some(value) = tls.client_certificate.as_deref()
+        && !valid_pem(value)
+    {
+        return Err(fail(
+            format!("outbounds[{index}].tls.client_certificate"),
+            "must be inline PEM (ADR-0023); file paths are not accepted",
+        ));
     }
-    if let Some(value) = tls.client_private_key.as_deref() {
-        if !valid_pem(value) {
-            return Err(fail(
-                format!("outbounds[{index}].tls.client_private_key"),
-                "must be inline PEM (ADR-0023); file paths are not accepted",
-            ));
-        }
+    if let Some(value) = tls.client_private_key.as_deref()
+        && !valid_pem(value)
+    {
+        return Err(fail(
+            format!("outbounds[{index}].tls.client_private_key"),
+            "must be inline PEM (ADR-0023); file paths are not accepted",
+        ));
     }
     validate_alpn(
         tls.alpn.as_deref(),
@@ -898,15 +899,15 @@ fn validate_outbound_transport(outbound: &Outbound, index: usize) -> Result<(), 
 
     match transport.network {
         StreamNetwork::Ws => {
-            if let Some(tls) = outbound.tls.as_ref() {
-                if let Some(alpn) = tls.alpn.as_deref() {
-                    if !alpn.is_empty() && !contains(alpn, "http/1.1") {
-                        return Err(fail(
-                            format!("outbounds[{index}].tls.alpn"),
-                            "must contain 'http/1.1' for the ws transport",
-                        ));
-                    }
-                }
+            if let Some(tls) = outbound.tls.as_ref()
+                && let Some(alpn) = tls.alpn.as_deref()
+                && !alpn.is_empty()
+                && !contains(alpn, "http/1.1")
+            {
+                return Err(fail(
+                    format!("outbounds[{index}].tls.alpn"),
+                    "must contain 'http/1.1' for the ws transport",
+                ));
             }
         }
         StreamNetwork::H2 => {
@@ -916,21 +917,21 @@ fn validate_outbound_transport(outbound: &Outbound, index: usize) -> Result<(), 
                     "required for the h2 transport",
                 )
             })?;
-            if let Some(alpn) = tls.alpn.as_deref() {
-                if !contains(alpn, "h2") {
-                    return Err(fail(
-                        format!("outbounds[{index}].tls.alpn"),
-                        "must contain 'h2' for the h2 transport",
-                    ));
-                }
+            if let Some(alpn) = tls.alpn.as_deref()
+                && !contains(alpn, "h2")
+            {
+                return Err(fail(
+                    format!("outbounds[{index}].tls.alpn"),
+                    "must contain 'h2' for the h2 transport",
+                ));
             }
-            if let Some(required) = tls.required_alpn.as_deref() {
-                if required != "h2" {
-                    return Err(fail(
-                        format!("outbounds[{index}].tls.required_alpn"),
-                        "must be 'h2' for the h2 transport",
-                    ));
-                }
+            if let Some(required) = tls.required_alpn.as_deref()
+                && required != "h2"
+            {
+                return Err(fail(
+                    format!("outbounds[{index}].tls.required_alpn"),
+                    "must be 'h2' for the h2 transport",
+                ));
             }
         }
         StreamNetwork::Tcp => {}
@@ -959,10 +960,10 @@ fn validate_transport_shape(transport: &StreamTransport, base: &str) -> Result<(
                     format!("invalid path '{}'", transport.path),
                 ));
             }
-            if let Some(host) = transport.host.as_deref() {
-                if !valid_host(host) {
-                    return Err(fail(format!("{base}.host"), "invalid host"));
-                }
+            if let Some(host) = transport.host.as_deref()
+                && !valid_host(host)
+            {
+                return Err(fail(format!("{base}.host"), "invalid host"));
             }
             if transport.network == StreamNetwork::H2 {
                 if transport.compression || transport.subprotocols.is_some() {
@@ -1023,10 +1024,10 @@ fn validate_alpn(
             }
         }
     }
-    if let Some(needed) = required {
-        if !list.iter().any(|protocol| protocol == needed) {
-            return Err(fail(format!("{base}.required_alpn"), "not present in alpn"));
-        }
+    if let Some(needed) = required
+        && !list.iter().any(|protocol| protocol == needed)
+    {
+        return Err(fail(format!("{base}.required_alpn"), "not present in alpn"));
     }
     Ok(())
 }
@@ -1095,13 +1096,13 @@ fn validate_rule(rule: &Rule, index: usize, inbounds: &[Inbound]) -> Result<(), 
             }
         }
     }
-    if let Some(ports) = rule.port.as_deref() {
-        if ports.is_empty() {
-            return Err(fail(
-                format!("route.rules[{index}].port"),
-                "must not be empty",
-            ));
-        }
+    if let Some(ports) = rule.port.as_deref()
+        && ports.is_empty()
+    {
+        return Err(fail(
+            format!("route.rules[{index}].port"),
+            "must not be empty",
+        ));
     }
     validate_port_ranges(rule.port_range.as_deref(), index)?;
     validate_rule_inbounds(rule.inbound.as_deref(), index, inbounds)?;
@@ -1134,13 +1135,13 @@ fn validate_rule_values(
         if value.contains('\0') {
             return Err(fail(format!("{path}[{index}]"), "must not contain NUL"));
         }
-        if let Some(max_len) = max_len {
-            if value.len() > max_len {
-                return Err(fail(
-                    format!("{path}[{index}]"),
-                    format!("must be at most {max_len} bytes"),
-                ));
-            }
+        if let Some(max_len) = max_len
+            && value.len() > max_len
+        {
+            return Err(fail(
+                format!("{path}[{index}]"),
+                format!("must be at most {max_len} bytes"),
+            ));
         }
         if values[..index].contains(value) {
             return Err(fail(format!("{path}[{index}]"), "duplicate value"));

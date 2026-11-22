@@ -119,15 +119,14 @@ impl WsClient {
             }
         };
         let selected = verified.protocol.map(str::to_owned);
-        if let Some(selected) = selected.as_deref() {
-            if !self
+        if let Some(selected) = selected.as_deref()
+            && !self
                 .options
                 .subprotocols
                 .iter()
                 .any(|protocol| protocol == selected)
-            {
-                return Err(WsError::Subprotocol(selected.to_owned()));
-            }
+        {
+            return Err(WsError::Subprotocol(selected.to_owned()));
         }
         let compression = verified.extensions.deflate().is_some();
         let mut conn = handshake.connection(&verified);

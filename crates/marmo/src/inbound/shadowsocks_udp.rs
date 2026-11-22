@@ -59,11 +59,9 @@ pub(crate) async fn serve(
                 if sessions
                     .get(&client_session)
                     .is_some_and(|session| session.task.is_finished())
-                {
-                    if let Some(session) = sessions.remove(&client_session) {
+                    && let Some(session) = sessions.remove(&client_session) {
                         session.task.abort();
                     }
-                }
                 if !sessions.contains_key(&client_session) {
                     reap_sessions(&mut sessions, context.limits.idle_timeout);
                     if sessions.len() >= MAX_SESSIONS {

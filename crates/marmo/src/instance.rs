@@ -997,15 +997,16 @@ pub(crate) struct Context {
 
 impl Context {
     pub(crate) async fn route(&self, mut metadata: Metadata<'_>) -> Action {
-        if self.router.needs_process() && metadata.process.is_none() {
-            if let Some(process) = self.process.as_ref() {
-                let request = ProcessRequest {
-                    network: metadata.network,
-                    source: metadata.source.clone(),
-                    destination: metadata.destination.clone(),
-                };
-                metadata.process = process.lookup(&self.runtime, request).await;
-            }
+        if self.router.needs_process()
+            && metadata.process.is_none()
+            && let Some(process) = self.process.as_ref()
+        {
+            let request = ProcessRequest {
+                network: metadata.network,
+                source: metadata.source.clone(),
+                destination: metadata.destination.clone(),
+            };
+            metadata.process = process.lookup(&self.runtime, request).await;
         }
         self.router.route(&metadata)
     }
@@ -1537,16 +1538,16 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
     let mut fatal = None;
     let runtime = context.runtime.clone();
 
-    if let Some(socket) = inbound.udp.take() {
-        if let InboundKind::Shadowsocks { method, key } = &inbound.kind {
-            let udp_context = Arc::clone(&context);
-            let tag = Arc::clone(&inbound.tag);
-            let (method, key) = (*method, Arc::clone(key));
-            let _ = connections.spawn_on(
-                inbound::shadowsocks_udp::serve(socket, udp_context, tag, method, key),
-                &runtime,
-            );
-        }
+    if let Some(socket) = inbound.udp.take()
+        && let InboundKind::Shadowsocks { method, key } = &inbound.kind
+    {
+        let udp_context = Arc::clone(&context);
+        let tag = Arc::clone(&inbound.tag);
+        let (method, key) = (*method, Arc::clone(key));
+        let _ = connections.spawn_on(
+            inbound::shadowsocks_udp::serve(socket, udp_context, tag, method, key),
+            &runtime,
+        );
     }
 
     loop {

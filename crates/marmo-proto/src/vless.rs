@@ -62,8 +62,10 @@ impl Uuid {
         let mut uuid = [0_u8; UUID_LEN];
         match bytes.len() {
             32 => {
-                for (index, pair) in bytes.chunks_exact(2).enumerate() {
-                    uuid[index] = (hex_value(pair[0])? << 4) | hex_value(pair[1])?;
+                for index in 0..UUID_LEN {
+                    let high = bytes[index * 2];
+                    let low = bytes[index * 2 + 1];
+                    uuid[index] = (hex_value(high)? << 4) | hex_value(low)?;
                 }
             }
             36 => {
