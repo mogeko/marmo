@@ -14,6 +14,9 @@ pub mod mux;
 /// Shadowsocks 2022 primitives and UDP packets.
 pub mod shadowsocks;
 
+/// First-byte protocol sniffers: TLS SNI, HTTP Host, and HTTP/2 `:authority`.
+pub mod sniff;
+
 /// SOCKS5 wire codec (RFC 1928).
 pub mod socks5;
 

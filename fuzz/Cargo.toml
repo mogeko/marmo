@@ -43,6 +43,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "sniff"
+path = "fuzz_targets/sniff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "trojan"
 path = "fuzz_targets/trojan.rs"
 test = false
