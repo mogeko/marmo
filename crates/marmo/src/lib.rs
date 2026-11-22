@@ -15,7 +15,7 @@ mod limits;
 mod metrics;
 mod mux;
 mod outbound;
-mod process;
+pub mod process;
 mod routing;
 pub mod ruleset;
 mod shadowsocks;

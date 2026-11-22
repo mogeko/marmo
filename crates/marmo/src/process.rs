@@ -335,6 +335,48 @@ mod tests {
         assert_eq!(resolver.calls.load(Ordering::SeqCst), 2);
     }
 
+    #[test]
+    fn expired_entries_are_removed() {
+        let runtime = ProcessRuntime::new(&config(5, 8, 50), FakeResolver::new(Some("curl")));
+        let key = Key {
+            network: Network::Tcp,
+            address: "127.0.0.1".parse().expect("ip"),
+            port: 1000,
+        };
+        {
+            let mut cache = runtime.cache.lock().expect("cache lock");
+            cache.entries.insert(
+                key,
+                Entry {
+                    info: Some(ProcessInfo::new(Some(Arc::from("curl")), None)),
+                    expires: Instant::now() - Duration::from_millis(1),
+                },
+            );
+            cache.order.push_back(key);
+        }
+        assert!(runtime.cache_get(key).is_none());
+        assert!(
+            !runtime
+                .cache
+                .lock()
+                .expect("cache lock")
+                .entries
+                .contains_key(&key)
+        );
+    }
+
+    #[tokio::test]
+    async fn evicts_the_oldest_entry_at_capacity() {
+        let resolver = FakeResolver::new(Some("curl"));
+        let runtime = ProcessRuntime::new(&config(5, 1, 50), resolver.clone());
+        let handle = Handle::current();
+
+        assert!(runtime.lookup(&handle, request(1000)).await.is_some());
+        assert!(runtime.lookup(&handle, request(1001)).await.is_some());
+        assert!(runtime.lookup(&handle, request(1000)).await.is_some());
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 3);
+    }
+
     #[tokio::test]
     async fn different_sources_are_separate_entries() {
         let resolver = FakeResolver::new(Some("curl"));

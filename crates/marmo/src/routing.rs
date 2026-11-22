@@ -498,6 +498,7 @@ pub enum RoutingError {
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, RwLock};
 
     use super::*;
@@ -852,6 +853,33 @@ mod tests {
         fn contains(&self, domain: &str) -> bool {
             *self.0.read().expect("set lock") == domain
         }
+    }
+
+    struct CountingDomainSet(AtomicUsize);
+
+    impl DomainSet for CountingDomainSet {
+        fn contains(&self, _domain: &str) -> bool {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            true
+        }
+    }
+
+    #[test]
+    fn unreferenced_sets_are_not_queried() {
+        let config = Config::from_json(
+            r#"{
+              "outbounds": [{ "tag": "a", "protocol": "direct" }],
+              "route": { "final": "direct" }
+            }"#,
+        )
+        .expect("config");
+        let set = Arc::new(CountingDomainSet(AtomicUsize::new(0)));
+        let mut sets = RuleSets::new();
+        sets.add_domain("unused", set.clone()).expect("domain set");
+        let router = Router::compile_with_sets(&config, &sets).expect("router");
+        let metadata = metadata(None, domain("example.com", 443), Network::Tcp);
+        assert_eq!(router.route(&metadata), Action::Direct);
+        assert_eq!(set.0.load(Ordering::SeqCst), 0);
     }
 
     #[test]
