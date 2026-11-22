@@ -709,3 +709,16 @@ async fn injected_resolver_conflicts_with_builtin_servers() {
         Err(marmo::BuildError::DnsResolverConflict)
     ));
 }
+
+#[test]
+fn builds_with_an_explicit_runtime_handle() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    // Building a resolver must not perform I/O, so an unbound address is fine.
+    let dns: SocketAddr = "127.0.0.1:9".parse().expect("address");
+    let config = direct_config(&dns_config(dns));
+    let config = Config::from_json(&config).expect("config");
+    Instance::builder(config)
+        .runtime(runtime.handle().clone())
+        .build()
+        .expect("build outside the runtime");
+}
