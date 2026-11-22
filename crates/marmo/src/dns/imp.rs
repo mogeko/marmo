@@ -480,20 +480,13 @@ fn name_server(server: &DnsServer) -> Result<NameServerConfig, DnsBuildError> {
         .address
         .parse::<SocketAddr>()
         .map_err(|_| DnsBuildError::Config(format!("invalid dns address '{}'", server.address)))?;
-    let server_name = server
-        .server_name
-        .clone()
-        .unwrap_or_else(|| address.ip().to_string());
-    rustls::pki_types::ServerName::try_from(server_name.clone())
-        .map_err(|_| DnsBuildError::Config(format!("invalid dns server name '{server_name}'")))?;
-    let server_name = Arc::<str>::from(server_name);
     let mut config = match server.protocol {
         DnsProtocol::Udp => NameServerConfig::udp(address.ip()),
         DnsProtocol::Tcp => NameServerConfig::tcp(address.ip()),
-        DnsProtocol::Tls => NameServerConfig::tls(address.ip(), server_name),
+        DnsProtocol::Tls => NameServerConfig::tls(address.ip(), tls_server_name(server, address)?),
         DnsProtocol::Https => NameServerConfig::https(
             address.ip(),
-            server_name,
+            tls_server_name(server, address)?,
             server.path.as_deref().map(Arc::<str>::from),
         ),
     };
@@ -502,6 +495,16 @@ fn name_server(server: &DnsServer) -> Result<NameServerConfig, DnsBuildError> {
         connection.port = address.port();
     }
     Ok(config)
+}
+
+fn tls_server_name(server: &DnsServer, address: SocketAddr) -> Result<Arc<str>, DnsBuildError> {
+    let name = server
+        .server_name
+        .clone()
+        .unwrap_or_else(|| address.ip().to_string());
+    rustls::pki_types::ServerName::try_from(name.clone())
+        .map_err(|_| DnsBuildError::Config(format!("invalid dns server name '{name}'")))?;
+    Ok(Arc::from(name))
 }
 
 fn build_tls(tls: Option<&crate::config::DnsTls>) -> Result<rustls::ClientConfig, DnsBuildError> {
