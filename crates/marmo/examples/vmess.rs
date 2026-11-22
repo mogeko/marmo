@@ -1,0 +1,107 @@
+//! VMess AEAD over TCP, TLS, WebSocket, or HTTP/2.
+//!
+//! Server:
+//! ```sh
+//! cargo run -p marmo --example vmess -- server 0.0.0.0:443 UUID \
+//!   [tcp|tls|ws|h2] [path] [cert.pem key.pem]
+//! ```
+//! Client (SOCKS5 front):
+//! ```sh
+//! cargo run -p marmo --example vmess -- client 127.0.0.1:1080 proxy.example:443 \
+//!   UUID [tcp|tls|ws|h2] [path] [aes-128-gcm|chacha20-poly1305] [mux] [insecure]
+//! ```
+//! `tcp` is plain TCP without TLS; `tls` is TCP under TLS; `ws` and `h2`
+//! require TLS and take the given path. `mux` enables client-side Mux.Cool
+//! pooling. `-` skips an optional argument. `insecure` skips certificate
+//! verification and is accepted only for a loopback test server; it is the
+//! default when the server is loopback.
+
+#[path = "common/mod.rs"]
+mod common;
+
+use std::error::Error;
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let mode = common::required(1, "mode (server|client)")?;
+    match mode.as_str() {
+        "server" => {
+            let listen = common::required(2, "listen")?;
+            let uuid = common::required(3, "uuid")?;
+            let network = common::arg(4).unwrap_or_else(|| "tcp".into());
+            let path = common::arg(5).unwrap_or_else(|| "/".into());
+            let transport = transport_json(&network, &path)?;
+            let tls = match network.as_str() {
+                "tcp" => String::new(),
+                "tls" | "ws" | "h2" => {
+                    let certificate = common::read(&common::required(6, "certificate path")?)?;
+                    let private_key = common::read(&common::required(7, "private key path")?)?;
+                    format!(
+                        r#", "tls": {{ "certificate": {}, "private_key": {} }}"#,
+                        common::json_string(&certificate),
+                        common::json_string(&private_key)
+                    )
+                }
+                other => return Err(format!("unknown transport '{other}'").into()),
+            };
+            let json = format!(
+                r#"{{ "inbounds": [ {{ "tag": "vmess", "protocol": "vmess", "listen": "{listen}",
+                                       "uuid": "{uuid}"{tls},
+                                       "transport": {transport} }} ],
+                      "outbounds": [ {{ "tag": "direct", "protocol": "direct" }} ],
+                      "route": {{ "final": "direct" }} }}"#
+            );
+            common::serve(json).await
+        }
+        "client" => {
+            let listen = common::required(2, "front listen")?;
+            let server = common::required(3, "server endpoint")?;
+            let uuid = common::required(4, "uuid")?;
+            let network = common::arg(5).unwrap_or_else(|| "tcp".into());
+            let path = common::arg(6).unwrap_or_else(|| "/".into());
+            let security = security_name(common::arg(7).as_deref())?;
+            let mux = common::arg(8).as_deref() == Some("mux");
+            let insecure =
+                common::arg(9).as_deref() == Some("insecure") || common::is_loopback(&server);
+            let transport = transport_json(&network, &path)?;
+            let tls = match network.as_str() {
+                "tcp" => String::new(),
+                "tls" | "ws" | "h2" => format!(r#", "tls": {{ "insecure": {insecure} }}"#),
+                other => return Err(format!("unknown transport '{other}'").into()),
+            };
+            let json = format!(
+                r#"{{ "inbounds": [ {{ "tag": "socks", "protocol": "socks5", "listen": "{listen}" }} ],
+                      "outbounds": [ {{ "tag": "vmess", "protocol": "vmess", "server": "{server}",
+                                        "uuid": "{uuid}", "security": "{security}",
+                                        "mux": {mux}{tls}, "transport": {transport} }} ],
+                      "route": {{ "final": "vmess" }} }}"#
+            );
+            common::serve(json).await
+        }
+        other => Err(format!("unknown mode '{other}'").into()),
+    }
+}
+
+fn transport_json(network: &str, path: &str) -> Result<String, Box<dyn Error>> {
+    Ok(match network {
+        "tcp" | "tls" => r#"{ "network": "tcp" }"#.into(),
+        "ws" => format!(
+            r#"{{ "network": "ws", "path": {}, "compression": true }}"#,
+            common::json_string(path)
+        ),
+        "h2" => format!(
+            r#"{{ "network": "h2", "path": {} }}"#,
+            common::json_string(path)
+        ),
+        other => return Err(format!("unknown transport '{other}'").into()),
+    })
+}
+
+fn security_name(argument: Option<&str>) -> Result<&'static str, Box<dyn Error>> {
+    match argument {
+        None | Some("-" | "") => Ok("aes-128-gcm"),
+        Some("aes-128-gcm") => Ok("aes-128-gcm"),
+        Some("chacha20-poly1305") => Ok("chacha20-poly1305"),
+        Some(other) => Err(format!("unknown security '{other}'").into()),
+    }
+}

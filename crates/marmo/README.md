@@ -73,6 +73,7 @@ Runnable examples live in
 ```sh
 cargo run -p marmo --example socks5 -- 127.0.0.1:1080
 cargo run -p marmo --example vless -- client 127.0.0.1:1080 127.0.0.1:443 UUID tcp /
+cargo run -p marmo --example vmess -- client 127.0.0.1:1080 127.0.0.1:8443 UUID tcp
 ```
 
 ## Workspace
