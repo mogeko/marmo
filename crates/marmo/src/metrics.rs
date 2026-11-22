@@ -76,10 +76,6 @@ pub enum MetricEvent<'a> {
         /// Whether the probe connected.
         ok: bool,
     },
-    /// A DNS lookup missed the cache and started an upstream query.
-    DnsQuery,
-    /// A DNS lookup was served from the library cache.
-    DnsCacheHit,
     /// A DNS lookup moved to the fallback tier.
     DnsFallback,
     /// A DNS lookup failed.
@@ -177,12 +173,6 @@ impl Metrics {
                     self.inner.health_failures.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            MetricEvent::DnsQuery => {
-                self.inner.dns_queries.fetch_add(1, Ordering::Relaxed);
-            }
-            MetricEvent::DnsCacheHit => {
-                self.inner.dns_cache_hits.fetch_add(1, Ordering::Relaxed);
-            }
             MetricEvent::DnsFallback => {
                 self.inner.dns_fallbacks.fetch_add(1, Ordering::Relaxed);
             }
@@ -193,6 +183,18 @@ impl Metrics {
         if let Some(sink) = self.inner.sink.as_ref() {
             sink.record(&event);
         }
+    }
+
+    /// Counts an upstream DNS query without emitting a sink event.
+    #[cfg(feature = "dns")]
+    pub(crate) fn dns_query(&self) {
+        self.inner.dns_queries.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Counts a DNS cache hit without emitting a sink event.
+    #[cfg(feature = "dns")]
+    pub(crate) fn dns_cache_hit(&self) {
+        self.inner.dns_cache_hits.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn snapshot(&self) -> MetricsSnapshot {
@@ -231,6 +233,25 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "dns")]
+    #[test]
+    fn dns_queries_and_hits_do_not_reach_the_sink() {
+        let sink = Arc::new(Counter(AtomicU64::new(0)));
+        let metrics = Metrics::new(Some(sink.clone()));
+        metrics.dns_query();
+        metrics.dns_query();
+        metrics.dns_cache_hit();
+        metrics.record(MetricEvent::DnsFallback);
+        metrics.record(MetricEvent::DnsFailure);
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.dns_queries, 2);
+        assert_eq!(snapshot.dns_cache_hits, 1);
+        assert_eq!(snapshot.dns_fallbacks, 1);
+        assert_eq!(snapshot.dns_failures, 1);
+        assert_eq!(sink.0.load(Ordering::Relaxed), 2);
+    }
+
     #[test]
     fn snapshot_tracks_events_and_calls_the_sink() {
         let sink = Arc::new(Counter(AtomicU64::new(0)));
@@ -251,9 +272,6 @@ mod tests {
             latency: Duration::from_millis(3),
             ok: false,
         });
-        metrics.record(MetricEvent::DnsQuery);
-        metrics.record(MetricEvent::DnsQuery);
-        metrics.record(MetricEvent::DnsCacheHit);
         metrics.record(MetricEvent::DnsFallback);
         metrics.record(MetricEvent::DnsFailure);
 
@@ -268,10 +286,8 @@ mod tests {
         assert_eq!(snapshot.udp_sessions_opened, 1);
         assert_eq!(snapshot.health_probes, 1);
         assert_eq!(snapshot.health_failures, 1);
-        assert_eq!(snapshot.dns_queries, 2);
-        assert_eq!(snapshot.dns_cache_hits, 1);
         assert_eq!(snapshot.dns_fallbacks, 1);
         assert_eq!(snapshot.dns_failures, 1);
-        assert_eq!(sink.0.load(Ordering::Relaxed), 14);
+        assert_eq!(sink.0.load(Ordering::Relaxed), 11);
     }
 }

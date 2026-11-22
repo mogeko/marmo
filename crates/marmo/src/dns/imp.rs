@@ -255,7 +255,7 @@ impl DnsRuntime {
     pub(crate) async fn resolve(&self, name: &str) -> Result<Arc<[IpAddr]>, DnsError> {
         let key = cache_key(name)?;
         if let Some(value) = self.cache_get(key.as_ref()) {
-            self.metrics.record(MetricEvent::DnsCacheHit);
+            self.metrics.dns_cache_hit();
             return cached_result(value);
         }
 
@@ -264,7 +264,7 @@ impl DnsRuntime {
             .clone()
             .try_acquire_owned()
             .map_err(|_| DnsError::Busy)?;
-        self.metrics.record(MetricEvent::DnsQuery);
+        self.metrics.dns_query();
         let deadline = Instant::now() + self.policy.timeout;
         let result = self
             .plan
