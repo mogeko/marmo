@@ -716,8 +716,9 @@ Errors:
 
 - `ConfigError` renders the JSON path (`inbounds[0].port`) via
   `serde_path_to_error`; it is the only error a config typo produces.
-- `BuildError` covers `NoRuntime`, unresolved outbound/tag references, and
-  selector-graph invariants. No I/O happens here.
+- `BuildError` covers `NoRuntime`, unresolved outbound/tag references,
+  selector-graph invariants, DNS construction, and a DNS resolver/server
+  conflict. No I/O happens here.
 - `BindError` carries the inbound tag, the resolved address, and the
   `io::Error`. A partial bind rolls back every listener already bound.
 - `ServeError` is fatal listener failure or a drain failure; normal shutdown
