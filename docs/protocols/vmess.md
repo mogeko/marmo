@@ -17,6 +17,9 @@ resolved against a local Xray 26.11.9 peer and is marked "observed" below.
   UDP by default and `mux: true` for client-side pooling (ADR-0027).
 - Transports: TCP, TLS 1.3, WebSocket, and HTTP/2 through the ADR-0016
   `transport` object. The inbound requires TLS for ws/h2; plain TCP is allowed.
+  One HTTP/2 connection carries many VMess streams: the inbound serves every
+  accepted stream, and the outbound pools up to four connections with 16
+  streams each (ADR-0031).
 - One UUID per listener, matching the VLESS inbound. No multi-user, alterId,
   dynamic-port, or legacy-header options are exposed.
 - A bounded replay filter keyed by the encrypted auth ID (120 s, 4,096 entries
@@ -193,8 +196,13 @@ on Keep; replies carry the source address.
 - Legacy MD5/CFB, body None/Zero, and the authenticated-length option are not
   implemented.
 - Client-side Mux.Cool pooling is opt-in with `mux: true`; the pool reuses up
-  to four physical connections and 128 sessions per connection. Without it the
-  outbound opens one physical connection per stream or UDP association.
+  to four physical connections and 128 sessions per connection. Over HTTP/2
+  each mux physical connection is one pooled HTTP/2 stream; over TCP/WS the
+  outbound otherwise opens one connection per stream or UDP association.
+- HTTP/2 outbound pooling is fixed at four connections, 16 streams per
+  connection, and 64 streams in flight. There is no idle-close timer; a
+  connection error fails every stream on that connection, and the next dial
+  replaces it.
 - One UUID per listener. No multi-user, alterId, dynamic port, or request
   addons.
 - A body direction is closed after 65,536 chunks (about 1 GiB at the maximum
@@ -245,6 +253,10 @@ a bounded pool of up to four physical connections.
 - Loopback: TCP, TLS, WebSocket, and HTTP/2 through `Instance`; AES-128-GCM and
   ChaCha20-Poly1305; direct UDP; Mux TCP and UDP sessions; replay and bad-UUID
   rejection.
+- Integration: four VMess streams on one HTTP/2 connection; the inbound reports
+  one accepted TCP connection and four accepted streams.
+- Integration: four SOCKS5 clients through a VMess HTTP/2 outbound share one
+  accepted TCP connection at the HTTP/2 peer.
 - Reference interop with Xray 26.11.9: marmo outbound to Xray over TCP and
   WebSocket (TCP and UDP), with and without `mux: true`; Xray to marmo inbound
   over TCP (TCP and UDP), with mux disabled and enabled. The mux-enabled client

@@ -39,7 +39,7 @@ ADR-0017 onward.
 | [0013](0013-http2-package.md) | HTTP/2 transport package | Historical; superseded by ADR-0019 | initial H2 package |
 | [0014](0014-websocket-package.md) | WebSocket transport package | Historical; superseded by ADR-0019 | initial WS package |
 | [0015](0015-connection-limits-and-timeouts.md) | Connection limits and timeouts | Accepted | global limits and deadlines |
-| [0016](0016-protocol-transport-wiring.md) | Protocol transport wiring | Accepted; H2 method superseded by ADR-0022 | VLESS transport object |
+| [0016](0016-protocol-transport-wiring.md) | Protocol transport wiring | Accepted; H2 method superseded by ADR-0022; H2 one-stream clause superseded by ADR-0031 | VLESS transport object |
 | [0017](0017-language-and-runtime.md) | Language, runtime, and interface model | Accepted | Rust + tokio |
 | [0018](0018-dependencies-and-crypto.md) | Dependencies and crypto backend | Accepted; amended | `rustls` + `aws-lc-rs` |
 | [0019](0019-workspace-and-packaging.md) | Workspace layout and packaging | Accepted; fifth crate superseded by ADR-0024 | four published crates |

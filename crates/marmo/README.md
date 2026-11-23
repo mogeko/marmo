@@ -22,12 +22,13 @@ pre-1.0.
 - **Transports:** TCP, TLS 1.3 (`rustls`), WebSocket (`ws-net`), and HTTP/2
   (`h2`). VLESS supports TCP, simple UoT, XUDP, and Mux.Cool; VMess supports
   TCP, direct UDP, and Mux.Cool. `mux: true` enables client-side pooling for
-  both, over TCP, TLS, WebSocket, and HTTP/2.
+  both, over TCP, TLS, WebSocket, and HTTP/2. HTTP/2 connections also carry
+  many streams per connection and are pooled for both protocols (ADR-0031).
 - **Routing:** exact and suffix domains, IP CIDR, destination port, and network.
 - **Limits:** global connection cap plus handshake, idle, and half-close
   timeouts.
-- **Metrics:** connection, byte, timeout, UDP-session, health-probe, and DNS
-  counters with an optional `MetricsSink`.
+- **Metrics:** connection, HTTP/2 stream, byte, timeout, UDP-session,
+  health-probe, and DNS counters with an optional `MetricsSink`.
 - **DNS (`dns` feature, off by default):** a bounded TTL cache, UDP/TCP/DoT/DoH
   upstreams, explicit fallback, and an injectable resolver.
 
@@ -118,7 +119,7 @@ validation error. Without a `dns` block, direct dials use the system resolver.
 | `marmo` | This crate: public facade |
 | [`marmo-proto`](https://crates.io/crates/marmo-proto) | Wire codecs; no I/O, no tokio |
 | [`marmo-net`](https://crates.io/crates/marmo-net) | Endpoints, CIDR, and network types |
-| [`marmo-transport`](https://crates.io/crates/marmo-transport) | Streams, TLS/WS/H2 layers, relay |
+| [`marmo-transport`](https://crates.io/crates/marmo-transport) | Streams, HTTP/2 connection adapters, relay |
 
 ## License
 
