@@ -84,7 +84,7 @@ Everything else is post-1.0 work (§19):
 | VLESS inbound/outbound (TCP/TLS/WS/H2, TCP/UoT/XUDP, Mux.Cool) | — |
 | VMess inbound/outbound (AEAD, TCP/UDP, Mux.Cool, TLS/WS/H2) | — |
 | TLS 1.3 client/server, ALPN, mTLS | `http_head` probes, jitter, backoff |
-| manual/RR/random/fallback/least-latency, TCP probes | root-level H2 pooling |
+| manual/RR/random/fallback/least-latency, TCP probes, root-level H2 pooling | — |
 | domain/suffix/keyword/CIDR/port/range/inbound rules; injected domain/IP sets | TUN, transparent proxying |
 | process rules via an injected `ProcessResolver` | Windows-specific process matching |
 | strict JSON config, limits, metrics | — |
@@ -196,7 +196,7 @@ depends only on upstream crates and the erased stream boundary.
 | `marmo` | yes | public facade, `Instance`, config, routing, inbounds, outbounds, metrics |
 | `marmo-proto` | yes | HTTP/1, SOCKS5, SS2022, Trojan, VLESS, VMess, Mux.Cool codecs; no I/O, no tokio |
 | `marmo-net` | yes | `Endpoint`, CIDR, `Network` |
-| `marmo-transport` | yes | stream traits, TLS/WS/H2 layers, relay |
+| `marmo-transport` | yes | stream traits, TLS/WS layers, HTTP/2 connection adapters, relay |
 
 Four crates. `inbound`, `outbound`, `routing`, and `config` stay inside
 `marmo` because `Instance` wires all of them and splitting would only add
@@ -244,14 +244,20 @@ policy decision, not a silent block inside the socket.
 
 ### 8.3 Transport composition
 
-Composition keeps ADR-0004's model: a protocol dialer wraps transport layers,
-which wrap a base connect.
+Composition keeps ADR-0004's model for stream layers: a protocol dialer wraps
+transport layers, which wrap a base connect.
 
 ```
-Outbound -> protocol -> [quic | tls | ws | h2 | tcp] -> base connect
+Outbound -> protocol -> [tls | ws | tcp] -> base connect
 ```
 
-`Dialer` and `Transport` are builders, not per-operation vtables. A transport
+HTTP/2 is the exception. It is a root connection manager, not a `Layer`
+(ADR-0031): the outbound `H2Pool` owns a small set of TCP + TLS connections and
+opens streams on them, while the inbound accepts every stream on one accepted
+connection. A future QUIC adapter follows the same root-connection shape with
+its own endpoint and connection factories.
+
+`Dialer` and `Transport` are builders, not per-operation vtables. A stream
 layer implements `Layer` once; the stack is composed at startup and the hot
 path only sees the resulting `BoxStream`.
 
@@ -378,6 +384,12 @@ panics, and never allocates based on an unvalidated length.
 `limits.max_connections` is enforced by `try_acquire_owned` before the
 handshake, so an overloaded instance rejects instead of queueing. Idle and
 half-close deadlines are per-connection timers, not a shared scan.
+
+An HTTP/2 inbound still counts one accepted TCP connection against
+`max_connections`, but each stream is a separate logical connection: it takes a
+stream permit from a second budget, gets its own handshake deadline, and runs
+the same protocol handler and relay as a plain TCP connection. A rejected
+stream is reset without closing the shared connection (ADR-0031).
 
 ### 9.2 UDP
 
@@ -514,14 +526,16 @@ and interop suite. `Future` means it is not part of the current release.
 VLESS supports TCP, simple UoT, and XUDP over TCP, TLS, WebSocket, and HTTP/2,
 with the strict `transport` object of ADR-0016. Its inbound terminates full
 Mux.Cool for TCP and UDP sessions (ADR-0026); `mux: true` pools outbound TCP
-and UDP sessions over up to four physical connections (ADR-0027). `Instance`
-serves one VLESS stream per HTTP/2 connection; root-level multiplexing/pooling
-is future work.
+and UDP sessions over up to four physical connections (ADR-0027). The inbound
+serves every stream on one HTTP/2 connection under a separate stream budget;
+the outbound `H2Pool` keeps up to four connections with 16 streams each and 64
+streams in flight, so `mux: true` nests over pooled HTTP/2 streams (ADR-0031).
 gRPC is future work built on `h2`/`tonic`. XHTTP is future work for current
 Xray compatibility (roadmap P3-6); it needs an ADR and `h3` depends on the QUIC
 adapter. VMess implements the AEAD header only; legacy CFB is not planned. Its
 inbound terminates Mux.Cool for TCP and UDP sessions; the outbound uses direct
-UDP by default and `mux: true` for client-side pooling (ADR-0027).
+UDP by default and `mux: true` for client-side pooling (ADR-0027). VMess uses
+the same inbound stream budget and outbound HTTP/2 pool as VLESS (ADR-0031).
 
 ## 13. Dependencies and transports
 
@@ -740,7 +754,9 @@ are the runtime-chosen traits, and `tower` compatibility is not promised.
   rejected explicitly rather than parsed as DER.
 - Global `limits` (`max_connections`, `handshake_timeout_s`,
   `idle_timeout_s`, `uplink_only_s`, `downlink_only_s`) are validated in
-  `build()`. UDP session caps remain per-inbound fixed bounds.
+  `build()`. UDP session caps remain per-inbound fixed bounds. HTTP/2 streams
+  use a separate in-memory budget of the same size as `max_connections`
+  (ADR-0031); the pool's 4/16/64 bounds are fixed, not configurable.
 - A top-level `dns` object is optional. It is accepted only when the `dns`
   Cargo feature is enabled; without it the same document fails validation with
   a clear feature error. Upstream addresses are literal IP endpoints, and the
@@ -767,7 +783,7 @@ crates/
     examples/              runnable examples
   marmo-proto/             codecs, no I/O
   marmo-net/               endpoints, CIDR, network
-  marmo-transport/         stream traits, Layer adapters, relay
+  marmo-transport/         stream traits, Layer adapters, H2 adapters, relay
 fuzz/                      cargo-fuzz crate and corpus
 docs/
   architecture.md          this file
@@ -791,6 +807,9 @@ Module boundaries inside `marmo` are enforced by review, not by the compiler.
   DoT, and DoH fixtures; they never contact a public resolver.
 - Protocol tests use synthetic vectors and the fuzz corpus in `fuzz/corpus/`;
   no fixture is a capture of real traffic.
+- HTTP/2 multiplexing is covered at three levels: transport connection tests,
+  inbound stream-budget tests, and integration tests that open several proxied
+  connections and assert one accepted TCP connection at the HTTP/2 peer.
 - `proptest` covers parsers and config validation; `cargo-fuzz` covers every
   decoder and the framing glue we own (nightly only). Malformed input returns
   a typed error, never panics. The DNS wire decoder is hickory's, so the
@@ -808,10 +827,10 @@ Module boundaries inside `marmo` are enforced by review, not by the compiler.
 
 - `tracing` spans per connection (`inbound`, `outbound`, `network`, hashed
   SNI) and per UDP session; default level is `info`.
-- Counters: accepted/active/rejected/failed connections, bytes per direction,
-  UDP sessions, rule hits, health-check latency/failures, dropped datagrams,
-  and DNS queries/cache hits/fallbacks/failures. DNS query names are never
-  recorded.
+- Counters: accepted/active/rejected/failed connections, HTTP/2 stream
+  accepted/active/rejected/closed, bytes per direction, UDP sessions, rule
+  hits, health-check latency/failures, dropped datagrams, and DNS
+  queries/cache hits/fallbacks/failures. DNS query names are never recorded.
 - Optional `MetricsSink` for embedders; no Prometheus dependency in the core.
 - Secrets and payloads are never recorded as span fields; redaction is a
   review checklist item, not a best-effort filter.
@@ -853,7 +872,6 @@ The current release line is `0.0.3`. The dependency-ordered work list is in
 | XHTTP transport | `h2`, later `quinn` (`h3`) |
 | Rule sets, GEOIP/GEOSITE | injected `DomainSet`/`IpSet` |
 | Process rules | injected `ProcessResolver` |
-| HTTP/2 root multiplexing and pooling | `h2` |
 | `http_head` health checks, jitter, backoff | `tokio::time` |
 
 ## 20. Risks and open questions

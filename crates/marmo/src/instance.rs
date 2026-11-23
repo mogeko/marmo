@@ -16,7 +16,7 @@ use marmo_proto::shadowsocks::{Key, Method};
 use marmo_proto::trojan::PasswordHash;
 use marmo_proto::vless::Uuid;
 use marmo_proto::vmess::{CmdKey, Security as VmessCipher};
-use marmo_transport::h2::{H2Client, H2ClientOptions, H2ServerOptions};
+use marmo_transport::h2::{H2ClientOptions, H2ServerOptions};
 use marmo_transport::tls::{TlsClient, TlsClientOptions, TlsServer, TlsServerOptions};
 use marmo_transport::ws::{WsClient, WsClientOptions, WsServer, WsServerOptions};
 use marmo_transport::{
@@ -879,9 +879,9 @@ impl BoundInstance {
         let token = supervisor.token();
         let mut background = BackgroundTasks::default();
         for outbound in &context.outbounds {
-            if let Some(task) = outbound.start(&context.runtime, &token) {
-                background.0.push(task);
-            }
+            background
+                .0
+                .extend(outbound.start(&context.runtime, &token));
             if let Some(task) = outbound.start_health(&context.runtime, &token) {
                 background.0.push(task);
             }
@@ -1331,15 +1331,14 @@ impl OutboundSpec {
                 if let Some(options) = ws {
                     layers.push(Arc::new(WsClient::new(options)));
                 }
-                if let Some(options) = h2 {
-                    layers.push(Arc::new(H2Client::new(options)));
-                }
                 Arc::new(outbound::vless::VlessOutbound {
                     server,
                     uuid,
                     xudp,
                     mux,
                     layers,
+                    h2,
+                    h2_pool: OnceLock::new(),
                     pool: OnceLock::new(),
                     dialer: dialer.clone(),
                 })
@@ -1360,15 +1359,14 @@ impl OutboundSpec {
                 if let Some(options) = ws {
                     layers.push(Arc::new(WsClient::new(options)));
                 }
-                if let Some(options) = h2 {
-                    layers.push(Arc::new(H2Client::new(options)));
-                }
                 Arc::new(outbound::vmess::VmessOutbound {
                     server,
                     cmd_key,
                     security,
                     mux,
                     layers,
+                    h2,
+                    h2_pool: OnceLock::new(),
                     pool: OnceLock::new(),
                     dialer: dialer.clone(),
                 })

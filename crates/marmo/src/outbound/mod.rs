@@ -11,10 +11,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::outbound::udp::UdpOutbound;
 
+pub(crate) mod h2;
 pub(crate) mod http_connect;
 pub(crate) mod mux;
 pub(crate) mod selector;
 pub(crate) mod shadowsocks;
+pub(crate) mod stream_pool;
 pub(crate) mod trojan;
 pub(crate) mod udp;
 pub(crate) mod vless;
@@ -56,10 +58,10 @@ pub(crate) trait Outbound: Send + Sync {
         self.is_direct()
     }
 
-    /// Starts optional background work owned by the instance, such as a mux
-    /// pool. Called once before the accept loops start.
-    fn start(&self, _runtime: &Handle, _token: &CancellationToken) -> Option<JoinHandle<()>> {
-        None
+    /// Starts optional background work owned by the instance, such as a mux or
+    /// HTTP/2 pool. Called once before the accept loops start.
+    fn start(&self, _runtime: &Handle, _token: &CancellationToken) -> Vec<JoinHandle<()>> {
+        Vec::new()
     }
 
     /// Starts an optional health-probe task owned by the instance.

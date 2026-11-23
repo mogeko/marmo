@@ -1,8 +1,8 @@
-//! Transport traits, adapters, and the bidirectional relay.
+//! Stream layers, HTTP/2 connection adapters, and the bidirectional relay.
 //!
 //! The `AsyncStream` bound and the relay contract are specified in
-//! `docs/architecture.md` §8.2 and §9.1. This crate owns the relay and the
-//! adapters; TLS, HTTP/2, and WebSocket come from upstream crates.
+//! `docs/architecture.md` §8.2 and §9.1. TLS, HTTP/2, and WebSocket come from
+//! upstream crates; this crate owns the relay and the adapter boundaries.
 #![deny(unsafe_code)]
 
 pub mod h2;
@@ -71,9 +71,6 @@ pub enum LayerError {
     /// WebSocket setup or the handshake failed.
     #[error(transparent)]
     Ws(#[from] WsError),
-    /// HTTP/2 setup or the handshake failed.
-    #[error(transparent)]
-    H2(#[from] H2Error),
 }
 
 impl Layer for TlsClient {
@@ -120,23 +117,5 @@ impl Layer for WsServer {
                 .map(|connection| connection.stream)
                 .map_err(LayerError::Ws)
         })
-    }
-}
-
-// Temporary one-shot adapters. ADR-0031 moves `Instance` to the connection
-// API; the `Layer` impls are removed once both directions are wired.
-impl Layer for H2Client {
-    fn wrap<'a>(&'a self, inner: BoxStream) -> BoxFuture<'a, Result<BoxStream, LayerError>> {
-        Box::pin(async move { self.connect(inner).await.map_err(LayerError::H2) })
-    }
-}
-
-impl Layer for H2Server {
-    fn wrap<'a>(&'a self, _inner: BoxStream) -> BoxFuture<'a, Result<BoxStream, LayerError>> {
-        Box::pin(async { Err(LayerError::Unsupported) })
-    }
-
-    fn accept<'a>(&'a self, inner: BoxStream) -> BoxFuture<'a, Result<BoxStream, LayerError>> {
-        Box::pin(async move { self.accept(inner).await.map_err(LayerError::H2) })
     }
 }

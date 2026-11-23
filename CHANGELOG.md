@@ -34,6 +34,15 @@ and behavior may change between minor releases.
   keep-alive, and idle close (ADR-0027).
 - Removed the duplicate `xudp` codecs and fuzz target; the `xudp: true` mode
   now uses the shared Mux.Cool codec (ADR-0027).
+- Root-level HTTP/2 multiplexing and pooling (ADR-0031): VLESS and VMess
+  inbounds serve every stream on one connection under a separate stream budget,
+  and their outbounds reuse up to four connections with 16 streams each and 64
+  streams in flight. New `h2_streams_*` metrics cover accepted, active,
+  rejected, and closed streams.
+- `marmo-transport` no longer implements `Layer` for `H2Client` and
+  `H2Server`; `Instance` uses `H2ClientConnection` and `H2ServerConnection`
+  instead. The one-shot `connect`/`accept` methods remain, and `LayerError::H2`
+  is removed.
 
 ## 0.0.3 - 2026-11-21
 
@@ -99,9 +108,8 @@ and behavior may change between minor releases.
 ## Known limitations
 
 - QUIC/TUIC/Hysteria2, gRPC/XHTTP, DNS cache/DoH, sniffing, rule sets,
-  process rules, HTTP/2 root multiplexing/pooling, `http_head` health checks,
-  jitter, and exponential backoff are not implemented.
+  process rules, `http_head` health checks, jitter, and exponential backoff are
+  not implemented.
 - The VMess authenticated-length option is not implemented; legacy VMess CFB
   is not planned. Client-side Mux.Cool pooling is available with `mux: true`.
-- `Instance` serves one VLESS stream per HTTP/2 connection.
 - The library is not production-ready and has not had an external audit.

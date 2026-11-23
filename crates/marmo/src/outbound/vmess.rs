@@ -9,6 +9,7 @@ use marmo_proto::vmess::{
     MUX_PORT, REQUEST_HEADER_MAX, Request, RequestProgress, RequestSecrets, RequestSpec, Security,
     encode_request, request_progress, response_keys,
 };
+use marmo_transport::h2::{H2ClientConnection, H2ClientOptions};
 use marmo_transport::{BoxFuture, BoxStream, Layer};
 use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::runtime::Handle;
@@ -18,7 +19,9 @@ use zeroize::Zeroize;
 
 use crate::direct::Dialer;
 use crate::outbound::Connected;
+use crate::outbound::h2::{H2Dialer, H2Pool, pool_config};
 use crate::outbound::mux::{MuxDialer, MuxPool};
+use crate::outbound::stream_pool::StreamDialer;
 use crate::vmess::{ChunkReader, ChunkStream, ChunkWriter, now_unix, random};
 
 /// A VMess outbound node.
@@ -28,6 +31,8 @@ pub(crate) struct VmessOutbound {
     pub(crate) security: Security,
     pub(crate) mux: bool,
     pub(crate) layers: Vec<Arc<dyn Layer>>,
+    pub(crate) h2: Option<H2ClientOptions>,
+    pub(crate) h2_pool: OnceLock<Arc<H2Pool>>,
     pub(crate) pool: OnceLock<Arc<MuxPool>>,
     pub(crate) dialer: Dialer,
 }
@@ -45,7 +50,7 @@ impl crate::outbound::Outbound for VmessOutbound {
                 let stream = pool.open_tcp(target).await?;
                 return Ok(Connected::with_bound(stream, None));
             }
-            let (mut stream, bound) = open_stream(&self.dialer, &self.server, &self.layers).await?;
+            let (mut stream, bound) = self.open_base().await?;
             let request = write_request(
                 &mut stream,
                 &self.cmd_key,
@@ -77,8 +82,7 @@ impl crate::outbound::Outbound for VmessOutbound {
                     datagram,
                 ))));
             }
-            let (mut stream, _bound) =
-                open_stream(&self.dialer, &self.server, &self.layers).await?;
+            let (mut stream, _bound) = self.open_base().await?;
             let request = write_request(
                 &mut stream,
                 &self.cmd_key,
@@ -114,21 +118,54 @@ impl crate::outbound::Outbound for VmessOutbound {
         })
     }
 
-    fn start(&self, runtime: &Handle, token: &CancellationToken) -> Option<JoinHandle<()>> {
-        if !self.mux || self.pool.get().is_some() {
-            return None;
+    fn start(&self, runtime: &Handle, token: &CancellationToken) -> Vec<JoinHandle<()>> {
+        let mut tasks = Vec::new();
+        if let Some(options) = self.h2.as_ref()
+            && self.h2_pool.get().is_none()
+        {
+            let dialer: Arc<dyn StreamDialer<H2ClientConnection>> = Arc::new(H2Dialer {
+                server: self.server.clone(),
+                options: options.clone(),
+                layers: self.layers.clone(),
+                dialer: self.dialer.clone(),
+            });
+            let pool = H2Pool::new(runtime.clone(), token.clone(), dialer, pool_config());
+            tasks.push(pool.supervisor());
+            let _ = self.h2_pool.set(pool);
         }
-        let dialer: Arc<dyn MuxDialer> = Arc::new(VmessDialer {
-            server: self.server.clone(),
-            cmd_key: Arc::clone(&self.cmd_key),
-            security: self.security,
-            layers: self.layers.clone(),
-            dialer: self.dialer.clone(),
-        });
-        let pool = MuxPool::new(runtime.clone(), token.clone(), dialer);
-        let supervisor = pool.supervisor();
-        let _ = self.pool.set(pool);
-        Some(supervisor)
+        if self.mux && self.pool.get().is_none() {
+            let dialer: Arc<dyn MuxDialer> = Arc::new(VmessDialer {
+                server: self.server.clone(),
+                cmd_key: Arc::clone(&self.cmd_key),
+                security: self.security,
+                layers: self.layers.clone(),
+                h2: self.h2.is_some(),
+                h2_pool: self.h2_pool.get().cloned(),
+                dialer: self.dialer.clone(),
+            });
+            let pool = MuxPool::new(runtime.clone(), token.clone(), dialer);
+            tasks.push(pool.supervisor());
+            let _ = self.pool.set(pool);
+        }
+        tasks
+    }
+}
+
+impl VmessOutbound {
+    fn h2_pool(&self) -> io::Result<Option<&Arc<H2Pool>>> {
+        if self.h2.is_none() {
+            return Ok(None);
+        }
+        self.h2_pool.get().map(Some).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotConnected,
+                "VMess HTTP/2 pool is not started",
+            )
+        })
+    }
+
+    async fn open_base(&self) -> io::Result<(BoxStream, Option<std::net::SocketAddr>)> {
+        dial_base(&self.dialer, &self.server, &self.layers, self.h2_pool()?).await
     }
 }
 
@@ -137,13 +174,21 @@ struct VmessDialer {
     cmd_key: Arc<CmdKey>,
     security: Security,
     layers: Vec<Arc<dyn Layer>>,
+    h2: bool,
+    h2_pool: Option<Arc<H2Pool>>,
     dialer: Dialer,
 }
 
 impl MuxDialer for VmessDialer {
     fn dial(&self) -> BoxFuture<'_, io::Result<BoxStream>> {
         Box::pin(async move {
-            let (mut stream, _) = open_stream(&self.dialer, &self.server, &self.layers).await?;
+            let h2_pool = if self.h2 {
+                Some(self.h2_pool.as_ref().ok_or_else(not_started)?)
+            } else {
+                None
+            };
+            let (mut stream, _) =
+                dial_base(&self.dialer, &self.server, &self.layers, h2_pool).await?;
             let target = Endpoint::from_domain(MUX_DOMAIN, MUX_PORT)
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "mux target"))?;
             let request = write_request(
@@ -206,6 +251,22 @@ impl VmessUdpClient {
             return Ok((payload.len(), self.target.clone()));
         }
     }
+}
+
+fn not_started() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::NotConnected,
+        "VMess HTTP/2 pool is not started",
+    )
+}
+
+async fn dial_base(
+    dialer: &Dialer, server: &Endpoint, layers: &[Arc<dyn Layer>], h2_pool: Option<&Arc<H2Pool>>,
+) -> io::Result<(BoxStream, Option<std::net::SocketAddr>)> {
+    if let Some(pool) = h2_pool {
+        return Ok((pool.open().await?, None));
+    }
+    open_stream(dialer, server, layers).await
 }
 
 async fn open_stream(

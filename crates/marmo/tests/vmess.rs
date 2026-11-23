@@ -795,3 +795,54 @@ async fn serves_multiple_vmess_streams_on_one_http2_connection() {
     stop(proxy_handle, proxy_task).await;
     echo_task.abort();
 }
+
+#[tokio::test]
+async fn pools_vmess_http2_connections() {
+    let (echo, echo_task) = echo_server().await;
+    let proxy = format!(
+        r#"{{
+          "limits": {{ "handshake_timeout_s": 5, "idle_timeout_s": 10 }},
+          "inbounds": [ {} ],
+          "outbounds": [ {{ "tag": "direct", "protocol": "direct" }} ],
+          "route": {{ "final": "direct" }}
+        }}"#,
+        vmess_inbound(true, "h2")
+    );
+    let (proxy_address, proxy_handle, proxy_task) = start(&proxy).await;
+
+    let front = format!(
+        r#"{{
+          "limits": {{ "handshake_timeout_s": 5, "idle_timeout_s": 10 }},
+          "inbounds": [
+            {{ "tag": "socks", "protocol": "socks5", "listen": "127.0.0.1:0" }}
+          ],
+          "outbounds": [ {} ],
+          "route": {{ "final": "vm" }}
+        }}"#,
+        vmess_outbound(proxy_address, true, "h2")
+    );
+    let (front_address, front_handle, front_task) = start(&front).await;
+
+    let mut clients = Vec::new();
+    for _ in 0..4 {
+        let mut client = TcpStream::connect(front_address).await.expect("connect");
+        socks5_connect(&mut client, echo).await;
+        clients.push(client);
+    }
+
+    for (index, client) in clients.iter_mut().enumerate() {
+        let payload = format!("pooled-{index}");
+        client.write_all(payload.as_bytes()).await.expect("write");
+        let mut echoed = vec![0_u8; payload.len()];
+        client.read_exact(&mut echoed).await.expect("read");
+        assert_eq!(echoed, payload.as_bytes());
+    }
+
+    let metrics = proxy_handle.metrics();
+    assert_eq!(metrics.connections_accepted, 1);
+    assert!(metrics.h2_streams_accepted >= 4);
+
+    stop(front_handle, front_task).await;
+    stop(proxy_handle, proxy_task).await;
+    echo_task.abort();
+}

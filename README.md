@@ -16,13 +16,14 @@ proxy protocols, rule-based routing, and latency-aware outbound selection.
 - Transports: TCP, TLS 1.3 (`rustls`), WebSocket (`ws-net`), and HTTP/2 (`h2`).
   VLESS supports TCP, simple UoT, XUDP, and Mux.Cool; VMess supports TCP,
   direct UDP, and Mux.Cool. `mux: true` enables client-side pooling for both,
-  over TCP, TLS, WebSocket, and HTTP/2.
+  over TCP, TLS, WebSocket, and HTTP/2. HTTP/2 connections are pooled and
+  carry many streams per connection (ADR-0031).
 - Routing: exact/suffix/keyword domains, IP CIDR, port and port ranges,
   network, and inbound tags; large domain/IP sets and process identity are
   supplied by the embedder through injected providers.
 - Limits: global connection cap plus handshake, idle, and half-close timeouts.
-- Metrics: connection, byte, timeout, UDP-session, health-probe, and DNS
-  counters with an optional `MetricsSink`.
+- Metrics: connection, HTTP/2 stream, byte, timeout, UDP-session,
+  health-probe, and DNS counters with an optional `MetricsSink`.
 - Optional DNS (`dns` feature): a bounded TTL cache, UDP/TCP/DoT/DoH upstreams,
   explicit fallback, and an injectable `DnsResolver` override.
 - Strict JSON configuration, schema version 2. TLS credentials are inline PEM.
@@ -34,7 +35,7 @@ proxy protocols, rule-based routing, and latency-aware outbound selection.
 | `marmo`           | Public facade: `Instance`, config, routing, inbounds, outbounds, metrics |
 | `marmo-proto`     | HTTP/1, SOCKS5, SS2022, Trojan, VLESS, VMess, Mux; no I/O          |
 | `marmo-net`       | `Endpoint`, CIDR, and `Network`                                          |
-| `marmo-transport` | Stream traits, TLS/WS/H2 layers, and the relay                           |
+| `marmo-transport` | Stream layers, HTTP/2 connection adapters, and the relay                  |
 
 ## Example
 

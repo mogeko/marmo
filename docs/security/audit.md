@@ -40,7 +40,11 @@ not implemented in this revision (QUIC, TUIC, Hysteria2).
   owned by a `JoinSet` or explicitly aborted. A dropped handshake does not leave
   an authenticated session reachable.
 - **Limits.** `max_connections`, handshake deadline, idle deadline, and
-  half-close grace are enforced by the instance (ADR-0015).
+  half-close grace are enforced by the instance (ADR-0015). Multiplexed HTTP/2
+  adds fixed bounds: one connection serves at most 16 streams, the outbound
+  pool holds four connections and 64 streams in flight, and inbound streams
+  have a separate `max_connections` budget so a single TCP connection cannot
+  bypass the connection cap without bound (ADR-0031).
 - **Secrets.** Passwords, UUIDs, certificates, and keys are redacted in
   `Debug` and zeroized on drop. UUID and password comparisons are constant
   time. No payload, credential, or SNI is logged.

@@ -20,7 +20,9 @@ uses `rustls` for both TLS roles, `ws-net` for WebSocket, and `h2` for HTTP/2
   HTTP/2 uses a `PUT` stream with `:authority` from `host` and `:path` from
   `path`, and requires ALPN `h2` (defaulted when `tls.alpn` is absent). The
   client sends no `content-type`; the server accepts `PUT` and `POST` and
-  ignores the header (ADR-0022).
+  ignores the header (ADR-0022). One HTTP/2 connection carries many VLESS
+  streams in both directions (ADR-0031): the inbound serves every accepted
+  stream, and the outbound pools up to four connections with 16 streams each.
 - Inbound UUID authentication uses a constant-time comparison, then routes and
   connects to the selected outbound. The empty response header is sent only
   after the outbound connection is established.
@@ -158,11 +160,15 @@ with `mux`.
   `flow`/XTLS Vision.
 - WebSocket/HTTP/2 are configured only through the VLESS `transport` object;
   there are no arbitrary WS headers, early-data (`?ed=`), heartbeat, h2c, or
-  HTTP/2 WebSocket options. `Instance` serves one VLESS stream per H2
-  connection even though the package supports multiple streams; root-level
-  HTTP/2 multiplexing/pooling is a follow-up. gRPC is not implemented.
-- Without `mux: true` the outbound keeps one stream per connection and one
-  association per UDP target; `xudp` is the single-target UDP subset.
+  HTTP/2 WebSocket options. gRPC is not implemented.
+- HTTP/2 outbound pooling is fixed at four connections, 16 streams per
+  connection, and 64 streams in flight. There is no idle-close timer; a
+  connection error fails every stream on that connection, and the next dial
+  replaces it. Connection-level flow control can still cause head-of-line
+  stalls across streams.
+- Without `mux: true` the outbound still reuses HTTP/2 connections; over
+  TCP/WS it keeps one stream per connection and one association per UDP
+  target. `xudp` is the single-target UDP subset.
 - No custom CA file or pinning is exposed by the root config; verification uses
   the platform bundle. `tls.insecure` is restricted to loopback test servers.
 - TLS state, including read/write keys and `KeyUpdate`, is owned by `rustls`.
@@ -210,6 +216,14 @@ Planned scope when it is taken up:
   echo.
 - Integration: raw VLESS Mux connection carrying a TCP session and a UDP
   session on one physical stream, with End frames.
+- Integration: four VLESS streams on one HTTP/2 connection; the inbound reports
+  one accepted TCP connection and four accepted streams.
+- Integration: the HTTP/2 stream budget rejects a second stream when
+  `max_connections` is one, without closing the TCP connection.
+- Integration: four SOCKS5 clients through a VLESS HTTP/2 outbound share one
+  accepted TCP connection at the HTTP/2 peer.
+- Integration: `mux: true` over HTTP/2 keeps one accepted TCP connection while
+  the mux pool opens its physical streams.
 - Reference interop: an Xray 26.11.9 client with mux enabled against the VLESS
   inbound (TCP and UDP, TLS with a pinned test certificate), and the VLESS
   outbound with `mux: true` against an Xray VLESS inbound (TCP and UDP).
