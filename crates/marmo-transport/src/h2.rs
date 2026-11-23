@@ -7,10 +7,12 @@
 //! [`H2Server::accept`] remain one-shot wrappers for standalone callers and
 //! tests.
 //!
-//! Pooling policy (connection and stream counts, admission, deadlines) lives in
-//! `marmo`; this crate owns framing, HPACK, flow control, and per-stream
-//! bridging. Dropping one stream resets only that stream. Dropping a connection
-//! object closes the connection and fails every stream on it.
+//! Pooling policy (connection and stream counts, admission, and the
+//! per-connection handshake deadline of ADR-0015) lives in `marmo`; the HTTP/2
+//! adapter starts no timers of its own. This crate owns framing, HPACK, flow
+//! control, per-stream bridging, and the relay's idle/half-close timers.
+//! Dropping one stream resets only that stream. Dropping a connection object
+//! closes the connection and fails every stream on it.
 
 use std::io;
 use std::pin::Pin;
