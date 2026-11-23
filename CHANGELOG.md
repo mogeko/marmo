@@ -43,6 +43,11 @@ and behavior may change between minor releases.
   `H2Server`; `Instance` uses `H2ClientConnection` and `H2ServerConnection`
   instead. The one-shot `connect`/`accept` methods remain, and `LayerError::H2`
   is removed.
+- Fixture parity for every codec: golden wire images under
+  `crates/marmo-proto/tests/fixtures/`, a dedicated Mux.Cool fuzz target,
+  corpus provenance in `fuzz/corpus/README.md`, HTTP/SOCKS5 protocol notes, and
+  a differential interop matrix in `docs/protocols/interop.md`. Phase 2 is
+  complete; P2-13 is closed.
 
 ## 0.0.3 - 2026-11-21
 

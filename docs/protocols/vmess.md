@@ -261,9 +261,10 @@ a bounded pool of up to four physical connections.
   WebSocket (TCP and UDP), with and without `mux: true`; Xray to marmo inbound
   over TCP (TCP and UDP), with mux disabled and enabled. The mux-enabled client
   exercised XUDP session `0`.
-- Synthetic request, chunk, response, and Mux corpus files live in
-  `fuzz/corpus/vmess/`; the `vmess` target runs under `cargo +nightly fuzz
-  run`.
+- Golden VMess request/response/chunk fixtures live in
+  `crates/marmo-proto/tests/fixtures/vmess/`; synthetic corpus files live in
+  `fuzz/corpus/vmess/`. The `vmess` target runs under `cargo +nightly fuzz run`.
+  Differential results are in [`interop.md`](interop.md).
 - Standalone example: `crates/marmo/examples/vmess.rs` runs a server over TCP,
   TLS, WebSocket, or HTTP/2 and a SOCKS5 client with an optional body cipher or
   `mux` pooling.
