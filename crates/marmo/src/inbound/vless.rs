@@ -8,7 +8,8 @@ use marmo_proto::vless::{
     COMMAND_MUX, COMMAND_TCP, COMMAND_UDP, MAX_UDP_PAYLOAD, REQUEST_HEADER_MAX, RequestProgress,
     Uuid, is_mux_target, request_progress,
 };
-use marmo_transport::{BoxStream, Layer};
+use marmo_transport::h2::H2ServerOptions;
+use marmo_transport::{BoxFuture, BoxStream, Layer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::{Notify, mpsc};
@@ -32,54 +33,70 @@ pub(crate) async fn handle(
     layers: Arc<[Arc<dyn Layer>]>, sniffing: Option<Policy>, deadline: Deadline,
 ) {
     let token = context.supervisor.token();
-    let source = client.peer_addr().ok().map(Endpoint::from);
+    let Some(source) = client.peer_addr().ok().map(Endpoint::from) else {
+        return;
+    };
     let prepared = tokio::select! {
         _ = token.cancelled() => return,
         result = deadline.run(prepare(client, &layers, &uuid)) => result,
     };
-    let (
-        Ok(Ok(Prepared::Request {
-            stream,
-            command,
-            target,
-            leftover,
-        })),
-        Some(source),
-    ) = (prepared, source)
-    else {
+    let Ok(Ok(prepared)) = prepared else {
         return;
     };
-
-    match command {
-        COMMAND_TCP => {
-            connect_relay(
-                stream, &context, &inbound, source, target, leftover, token, deadline, sniffing,
-            )
-            .await;
-        }
-        COMMAND_UDP => {
-            handle_udp(
-                stream, context, inbound, source, target, leftover, token, deadline,
-            )
-            .await;
-        }
-        COMMAND_MUX => {
-            if !is_mux_target(&target) {
-                return;
-            }
-            handle_mux(stream, leftover, context, inbound, source, token).await;
-        }
-        _ => {}
-    }
+    serve_prepared(
+        prepared, source, context, inbound, sniffing, deadline, token,
+    )
+    .await;
 }
 
-enum Prepared {
-    Request {
-        stream: BoxStream,
-        command: u8,
-        target: Endpoint,
-        leftover: Vec<u8>,
-    },
+/// Handles one stream accepted from a VLESS HTTP/2 connection.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_stream(
+    stream: BoxStream, source: Endpoint, context: Arc<Context>, inbound: Arc<str>, uuid: Arc<Uuid>,
+    sniffing: Option<Policy>, deadline: Deadline, token: CancellationToken,
+) {
+    let prepared = tokio::select! {
+        _ = token.cancelled() => return,
+        result = deadline.run(prepare_stream(stream, &uuid)) => result,
+    };
+    let Ok(Ok(prepared)) = prepared else {
+        return;
+    };
+    serve_prepared(
+        prepared, source, context, inbound, sniffing, deadline, token,
+    )
+    .await;
+}
+
+/// Serves every stream on one VLESS HTTP/2 connection.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn serve_h2(
+    client: TcpStream, context: Arc<Context>, inbound: Arc<str>, uuid: Arc<Uuid>,
+    layers: Arc<[Arc<dyn Layer>]>, options: H2ServerOptions, sniffing: Option<Policy>,
+    deadline: Deadline,
+) {
+    let handler_context = Arc::clone(&context);
+    let handler: Arc<super::h2::StreamHandler> =
+        Arc::new(move |stream, source, deadline, token| {
+            let context = Arc::clone(&handler_context);
+            let inbound = Arc::clone(&inbound);
+            let uuid = Arc::clone(&uuid);
+            let future: BoxFuture<'static, ()> = Box::pin(async move {
+                handle_stream(
+                    stream, source, context, inbound, uuid, sniffing, deadline, token,
+                )
+                .await;
+            });
+            future
+        });
+    super::h2::serve(client, layers, options, context, deadline, handler).await;
+}
+
+struct Prepared {
+    stream: BoxStream,
+    command: u8,
+    target: Endpoint,
+    leftover: Vec<u8>,
 }
 
 async fn prepare(
@@ -89,6 +106,10 @@ async fn prepare(
     for layer in layers {
         stream = layer.accept(stream).await.map_err(io::Error::other)?;
     }
+    prepare_stream(stream, uuid).await
+}
+
+async fn prepare_stream(mut stream: BoxStream, uuid: &Uuid) -> io::Result<Prepared> {
     let mut buffer = [0_u8; REQUEST_HEADER_MAX];
     let mut filled = 0;
     loop {
@@ -100,7 +121,7 @@ async fn prepare(
                         "invalid VLESS UUID",
                     ));
                 }
-                return Ok(Prepared::Request {
+                return Ok(Prepared {
                     stream,
                     command: request.command,
                     target: request.target,
@@ -123,6 +144,39 @@ async fn prepare(
             ));
         }
         filled += read;
+    }
+}
+
+async fn serve_prepared(
+    prepared: Prepared, source: Endpoint, context: Arc<Context>, inbound: Arc<str>,
+    sniffing: Option<Policy>, deadline: Deadline, token: CancellationToken,
+) {
+    let Prepared {
+        stream,
+        command,
+        target,
+        leftover,
+    } = prepared;
+    match command {
+        COMMAND_TCP => {
+            connect_relay(
+                stream, &context, &inbound, source, target, leftover, token, deadline, sniffing,
+            )
+            .await;
+        }
+        COMMAND_UDP => {
+            handle_udp(
+                stream, context, inbound, source, target, leftover, token, deadline,
+            )
+            .await;
+        }
+        COMMAND_MUX => {
+            if !is_mux_target(&target) {
+                return;
+            }
+            handle_mux(stream, leftover, context, inbound, source, token).await;
+        }
+        _ => {}
     }
 }
 

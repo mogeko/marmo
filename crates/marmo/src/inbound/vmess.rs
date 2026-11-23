@@ -9,7 +9,8 @@ use marmo_proto::vmess::{
     COMMAND_MUX, COMMAND_TCP, COMMAND_UDP, ChunkDecoder, ChunkEncoder, CmdKey, REQUEST_HEADER_MAX,
     Request, RequestProgress, encode_response, is_mux_target, request_progress, response_keys,
 };
-use marmo_transport::{BoxStream, Layer};
+use marmo_transport::h2::H2ServerOptions;
+use marmo_transport::{BoxFuture, BoxStream, Layer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::{Notify, mpsc};
@@ -35,44 +36,65 @@ pub(crate) async fn handle(
     deadline: Deadline,
 ) {
     let token = context.supervisor.token();
-    let source = client.peer_addr().ok().map(Endpoint::from);
+    let Some(source) = client.peer_addr().ok().map(Endpoint::from) else {
+        return;
+    };
     let prepared = tokio::select! {
         _ = token.cancelled() => return,
         result = deadline.run(prepare(client, &layers, &cmd_key, &replay)) => result,
     };
-    let (
-        Ok(Ok(Prepared {
-            stream,
-            request,
-            leftover,
-        })),
-        Some(source),
-    ) = (prepared, source)
-    else {
+    let Ok(Ok(prepared)) = prepared else {
         return;
     };
+    serve_prepared(
+        prepared, source, context, inbound, sniffing, deadline, token,
+    )
+    .await;
+}
 
-    match request.command {
-        COMMAND_TCP => {
-            connect_relay(
-                stream, request, leftover, &context, &inbound, source, token, deadline, sniffing,
-            )
-            .await;
-        }
-        COMMAND_UDP => {
-            handle_udp(
-                stream, request, leftover, context, inbound, source, token, deadline,
-            )
-            .await;
-        }
-        COMMAND_MUX => {
-            if !is_mux_target(&request.target) {
-                return;
-            }
-            handle_mux(stream, request, leftover, context, inbound, source, token).await;
-        }
-        _ => {}
-    }
+/// Handles one stream accepted from a VMess HTTP/2 connection.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_stream(
+    stream: BoxStream, source: Endpoint, context: Arc<Context>, inbound: Arc<str>,
+    cmd_key: Arc<CmdKey>, replay: Arc<Mutex<ReplayFilter>>, sniffing: Option<Policy>,
+    deadline: Deadline, token: CancellationToken,
+) {
+    let prepared = tokio::select! {
+        _ = token.cancelled() => return,
+        result = deadline.run(prepare_stream(stream, &cmd_key, &replay)) => result,
+    };
+    let Ok(Ok(prepared)) = prepared else {
+        return;
+    };
+    serve_prepared(
+        prepared, source, context, inbound, sniffing, deadline, token,
+    )
+    .await;
+}
+
+/// Serves every stream on one VMess HTTP/2 connection.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn serve_h2(
+    client: TcpStream, context: Arc<Context>, inbound: Arc<str>, cmd_key: Arc<CmdKey>,
+    replay: Arc<Mutex<ReplayFilter>>, layers: Arc<[Arc<dyn Layer>]>, options: H2ServerOptions,
+    sniffing: Option<Policy>, deadline: Deadline,
+) {
+    let handler_context = Arc::clone(&context);
+    let handler: Arc<super::h2::StreamHandler> =
+        Arc::new(move |stream, source, deadline, token| {
+            let context = Arc::clone(&handler_context);
+            let inbound = Arc::clone(&inbound);
+            let cmd_key = Arc::clone(&cmd_key);
+            let replay = Arc::clone(&replay);
+            let future: BoxFuture<'static, ()> = Box::pin(async move {
+                handle_stream(
+                    stream, source, context, inbound, cmd_key, replay, sniffing, deadline, token,
+                )
+                .await;
+            });
+            future
+        });
+    super::h2::serve(client, layers, options, context, deadline, handler).await;
 }
 
 struct Prepared {
@@ -88,6 +110,12 @@ async fn prepare(
     for layer in layers {
         stream = layer.accept(stream).await.map_err(io::Error::other)?;
     }
+    prepare_stream(stream, cmd_key, replay).await
+}
+
+async fn prepare_stream(
+    mut stream: BoxStream, cmd_key: &CmdKey, replay: &Mutex<ReplayFilter>,
+) -> io::Result<Prepared> {
     let mut buffer = [0_u8; REQUEST_HEADER_MAX];
     let mut filled = 0;
     let now = now_unix();
@@ -133,6 +161,38 @@ async fn prepare(
             ));
         }
         filled += read;
+    }
+}
+
+async fn serve_prepared(
+    prepared: Prepared, source: Endpoint, context: Arc<Context>, inbound: Arc<str>,
+    sniffing: Option<Policy>, deadline: Deadline, token: CancellationToken,
+) {
+    let Prepared {
+        stream,
+        request,
+        leftover,
+    } = prepared;
+    match request.command {
+        COMMAND_TCP => {
+            connect_relay(
+                stream, request, leftover, &context, &inbound, source, token, deadline, sniffing,
+            )
+            .await;
+        }
+        COMMAND_UDP => {
+            handle_udp(
+                stream, request, leftover, context, inbound, source, token, deadline,
+            )
+            .await;
+        }
+        COMMAND_MUX => {
+            if !is_mux_target(&request.target) {
+                return;
+            }
+            handle_mux(stream, request, leftover, context, inbound, source, token).await;
+        }
+        _ => {}
     }
 }
 

@@ -16,7 +16,10 @@ use marmo_proto::vmess::{
     RequestSecrets, RequestSpec, ResponseProgress, Security, encode_request, request_progress,
     response_keys, response_progress,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use marmo_transport::Layer;
+use marmo_transport::h2::{H2Client, H2ClientOptions};
+use marmo_transport::tls::{TlsClient, TlsClientOptions};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -368,7 +371,10 @@ struct ResponseReader {
 }
 
 impl ResponseReader {
-    async fn read(&mut self, stream: &mut TcpStream, request: &Request) -> Vec<u8> {
+    async fn read<S>(&mut self, stream: &mut S, request: &Request) -> Vec<u8>
+    where
+        S: AsyncRead + Unpin,
+    {
         loop {
             match response_progress(&self.buffer, request) {
                 ResponseProgress::Complete { consumed } => {
@@ -393,7 +399,10 @@ struct ChunkReader {
 }
 
 impl ChunkReader {
-    async fn next(&mut self, stream: &mut TcpStream, decoder: &mut ChunkDecoder) -> Vec<u8> {
+    async fn next<S>(&mut self, stream: &mut S, decoder: &mut ChunkDecoder) -> Vec<u8>
+    where
+        S: AsyncRead + Unpin,
+    {
         loop {
             match decoder.progress(&self.buffer) {
                 Ok(ChunkProgress::Complete { consumed, data }) => {
@@ -413,15 +422,23 @@ impl ChunkReader {
     }
 }
 
-struct VmessClient {
-    stream: TcpStream,
+struct VmessClient<S> {
+    stream: S,
     encoder: ChunkEncoder,
     decoder: ChunkDecoder,
     chunks: ChunkReader,
 }
 
-impl VmessClient {
-    async fn connect(server: SocketAddr, target: &Endpoint, command: u8) -> Self {
+impl<S> VmessClient<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    async fn connect(server: SocketAddr, target: &Endpoint, command: u8) -> VmessClient<TcpStream> {
+        let stream = TcpStream::connect(server).await.expect("connect");
+        VmessClient::from_stream(stream, target, command).await
+    }
+
+    async fn from_stream(mut stream: S, target: &Endpoint, command: u8) -> Self {
         let uuid = Uuid::parse(UUID).expect("uuid");
         let key = CmdKey::derive(&uuid);
         let now = SystemTime::now()
@@ -454,7 +471,6 @@ impl VmessClient {
             &mut header,
         )
         .expect("encode");
-        let mut stream = TcpStream::connect(server).await.expect("connect");
         stream.write_all(&header[..length]).await.expect("header");
         let RequestProgress::Complete(request) = request_progress(&header[..length], &key, now)
         else {
@@ -566,7 +582,8 @@ async fn terminates_mux_tcp_and_udp_sessions() {
     let (proxy_address, proxy_handle, proxy_task) = start(&proxy).await;
 
     let mux_target = Endpoint::from_domain("v1.mux.cool", 0).expect("mux target");
-    let mut client = VmessClient::connect(proxy_address, &mux_target, COMMAND_MUX).await;
+    let mut client =
+        VmessClient::<TcpStream>::connect(proxy_address, &mux_target, COMMAND_MUX).await;
     let mut mux = Vec::new();
 
     // TCP session: New carries the payload, the echo reply comes back as Keep.
@@ -713,6 +730,68 @@ async fn rejects_a_replayed_auth_id() {
     let read = timeout(Duration::from_secs(2), replay.read(&mut buffer)).await;
     assert!(matches!(read, Ok(Ok(0)) | Ok(Err(_))));
 
+    stop(proxy_handle, proxy_task).await;
+    echo_task.abort();
+}
+
+async fn h2_client(server: SocketAddr) -> marmo_transport::H2ClientConnection {
+    let tcp = TcpStream::connect(server).await.expect("connect");
+    let tls = TlsClient::new(&TlsClientOptions {
+        server_name: "localhost",
+        alpn: &["h2".to_owned()],
+        required_alpn: Some("h2"),
+        insecure: true,
+        client_certificate: None,
+        client_private_key: None,
+        handshake_timeout: Some(Duration::from_secs(5)),
+    })
+    .expect("tls client");
+    let stream = tls.wrap(Box::new(tcp)).await.expect("tls handshake");
+    H2Client::new(H2ClientOptions {
+        host: "localhost".into(),
+        path: "/h2".into(),
+    })
+    .handshake(stream)
+    .await
+    .expect("h2 handshake")
+}
+
+#[tokio::test]
+async fn serves_multiple_vmess_streams_on_one_http2_connection() {
+    let (echo, echo_task) = echo_server().await;
+    let proxy = format!(
+        r#"{{
+          "limits": {{ "handshake_timeout_s": 5, "idle_timeout_s": 10 }},
+          "inbounds": [ {} ],
+          "outbounds": [ {{ "tag": "direct", "protocol": "direct" }} ],
+          "route": {{ "final": "direct" }}
+        }}"#,
+        vmess_inbound(true, "h2")
+    );
+    let (proxy_address, proxy_handle, proxy_task) = start(&proxy).await;
+    let connection = h2_client(proxy_address).await;
+    let target = Endpoint::from(echo);
+
+    let mut clients = Vec::new();
+    for _ in 0..4 {
+        let stream = connection.open_stream().await.expect("open stream");
+        clients.push(VmessClient::from_stream(stream, &target, COMMAND_TCP).await);
+    }
+
+    for (index, client) in clients.iter_mut().enumerate() {
+        let payload = format!("stream-{index}");
+        client.send_chunk(payload.as_bytes()).await;
+        let echoed = client.recv_chunk().await;
+        assert_eq!(echoed, payload.as_bytes());
+    }
+
+    let metrics = proxy_handle.metrics();
+    assert_eq!(metrics.connections_accepted, 1);
+    assert_eq!(metrics.h2_streams_accepted, 4);
+    assert_eq!(metrics.h2_streams_rejected, 0);
+
+    drop(clients);
+    drop(connection);
     stop(proxy_handle, proxy_task).await;
     echo_task.abort();
 }

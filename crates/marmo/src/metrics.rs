@@ -20,6 +20,14 @@ pub struct MetricsSnapshot {
     pub connections_rejected: u64,
     /// TCP streams whose handler finished.
     pub connections_closed: u64,
+    /// HTTP/2 streams accepted after stream admission.
+    pub h2_streams_accepted: u64,
+    /// HTTP/2 streams currently active.
+    pub h2_streams_active: u64,
+    /// HTTP/2 streams rejected by the stream budget.
+    pub h2_streams_rejected: u64,
+    /// HTTP/2 streams whose handler finished.
+    pub h2_streams_closed: u64,
     /// Bytes relayed from clients to outbounds.
     pub bytes_client_to_remote: u64,
     /// Bytes relayed from outbounds to clients.
@@ -54,6 +62,12 @@ pub enum MetricEvent<'a> {
     ConnectionClosed,
     /// Admission control rejected a TCP stream.
     ConnectionRejected,
+    /// An HTTP/2 stream passed stream admission.
+    H2StreamAccepted,
+    /// An HTTP/2 stream handler finished.
+    H2StreamClosed,
+    /// The HTTP/2 stream budget rejected a stream.
+    H2StreamRejected,
     /// Bytes copied in both relay directions.
     BytesRelayed {
         /// Client to outbound.
@@ -98,6 +112,9 @@ struct Inner {
     accepted: AtomicU64,
     rejected: AtomicU64,
     closed: AtomicU64,
+    h2_accepted: AtomicU64,
+    h2_rejected: AtomicU64,
+    h2_closed: AtomicU64,
     client_to_remote: AtomicU64,
     remote_to_client: AtomicU64,
     timeouts_handshake: AtomicU64,
@@ -119,6 +136,9 @@ impl Metrics {
                 accepted: AtomicU64::new(0),
                 rejected: AtomicU64::new(0),
                 closed: AtomicU64::new(0),
+                h2_accepted: AtomicU64::new(0),
+                h2_rejected: AtomicU64::new(0),
+                h2_closed: AtomicU64::new(0),
                 client_to_remote: AtomicU64::new(0),
                 remote_to_client: AtomicU64::new(0),
                 timeouts_handshake: AtomicU64::new(0),
@@ -144,6 +164,15 @@ impl Metrics {
             }
             MetricEvent::ConnectionRejected => {
                 self.inner.rejected.fetch_add(1, Ordering::Relaxed);
+            }
+            MetricEvent::H2StreamAccepted => {
+                self.inner.h2_accepted.fetch_add(1, Ordering::Relaxed);
+            }
+            MetricEvent::H2StreamClosed => {
+                self.inner.h2_closed.fetch_add(1, Ordering::Relaxed);
+            }
+            MetricEvent::H2StreamRejected => {
+                self.inner.h2_rejected.fetch_add(1, Ordering::Relaxed);
             }
             MetricEvent::BytesRelayed {
                 client_to_remote,
@@ -200,11 +229,17 @@ impl Metrics {
     pub(crate) fn snapshot(&self) -> MetricsSnapshot {
         let accepted = self.inner.accepted.load(Ordering::Relaxed);
         let closed = self.inner.closed.load(Ordering::Relaxed);
+        let h2_accepted = self.inner.h2_accepted.load(Ordering::Relaxed);
+        let h2_closed = self.inner.h2_closed.load(Ordering::Relaxed);
         MetricsSnapshot {
             connections_accepted: accepted,
             connections_active: accepted.saturating_sub(closed),
             connections_rejected: self.inner.rejected.load(Ordering::Relaxed),
             connections_closed: closed,
+            h2_streams_accepted: h2_accepted,
+            h2_streams_active: h2_accepted.saturating_sub(h2_closed),
+            h2_streams_rejected: self.inner.h2_rejected.load(Ordering::Relaxed),
+            h2_streams_closed: h2_closed,
             bytes_client_to_remote: self.inner.client_to_remote.load(Ordering::Relaxed),
             bytes_remote_to_client: self.inner.remote_to_client.load(Ordering::Relaxed),
             timeouts_handshake: self.inner.timeouts_handshake.load(Ordering::Relaxed),
@@ -260,6 +295,10 @@ mod tests {
         metrics.record(MetricEvent::ConnectionAccepted);
         metrics.record(MetricEvent::ConnectionClosed);
         metrics.record(MetricEvent::ConnectionRejected);
+        metrics.record(MetricEvent::H2StreamAccepted);
+        metrics.record(MetricEvent::H2StreamAccepted);
+        metrics.record(MetricEvent::H2StreamClosed);
+        metrics.record(MetricEvent::H2StreamRejected);
         metrics.record(MetricEvent::BytesRelayed {
             client_to_remote: 10,
             remote_to_client: 20,
@@ -279,6 +318,10 @@ mod tests {
         assert_eq!(snapshot.connections_accepted, 2);
         assert_eq!(snapshot.connections_active, 1);
         assert_eq!(snapshot.connections_rejected, 1);
+        assert_eq!(snapshot.h2_streams_accepted, 2);
+        assert_eq!(snapshot.h2_streams_active, 1);
+        assert_eq!(snapshot.h2_streams_rejected, 1);
+        assert_eq!(snapshot.h2_streams_closed, 1);
         assert_eq!(snapshot.bytes_client_to_remote, 10);
         assert_eq!(snapshot.bytes_remote_to_client, 20);
         assert_eq!(snapshot.timeouts_handshake, 1);
@@ -288,6 +331,6 @@ mod tests {
         assert_eq!(snapshot.health_failures, 1);
         assert_eq!(snapshot.dns_fallbacks, 1);
         assert_eq!(snapshot.dns_failures, 1);
-        assert_eq!(sink.0.load(Ordering::Relaxed), 11);
+        assert_eq!(sink.0.load(Ordering::Relaxed), 15);
     }
 }

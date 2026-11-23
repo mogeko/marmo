@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 pub(crate) struct Supervisor {
     token: CancellationToken,
     permits: Arc<Semaphore>,
+    streams: Arc<Semaphore>,
 }
 
 impl Supervisor {
@@ -17,6 +18,9 @@ impl Supervisor {
         Self {
             token: CancellationToken::new(),
             permits: Arc::new(Semaphore::new(permits)),
+            // HTTP/2 streams have their own budget so one accepted TCP
+            // connection cannot consume the connection limit from its streams.
+            streams: Arc::new(Semaphore::new(permits)),
         }
     }
 
@@ -31,5 +35,10 @@ impl Supervisor {
     /// Returns `None` when the instance is at its connection limit.
     pub(crate) fn try_acquire(&self) -> Option<OwnedSemaphorePermit> {
         self.permits.clone().try_acquire_owned().ok()
+    }
+
+    /// Returns `None` when the instance is at its HTTP/2 stream limit.
+    pub(crate) fn try_acquire_stream(&self) -> Option<OwnedSemaphorePermit> {
+        self.streams.clone().try_acquire_owned().ok()
     }
 }

@@ -1,5 +1,6 @@
 //! Inbound protocol handshakes.
 
+pub(crate) mod h2;
 pub(crate) mod http;
 pub(crate) mod mux;
 pub(crate) mod shadowsocks;
