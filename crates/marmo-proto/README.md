@@ -52,7 +52,8 @@ parsed by a codec can be routed without re-parsing a string.
   `thiserror` enum.
 - Untrusted input never causes a panic, an unbounded read, or an unbounded
   allocation.
-- Every decoder has a fuzz target in the repository's `fuzz/` directory.
+- Every decoder has a golden fixture in `tests/fixtures/` and a fuzz target in
+  the repository's `fuzz/` directory.
 
 ## License
 
