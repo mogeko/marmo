@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use marmo::{Config, Instance, InstanceHandle, ServeError};
 use marmo_transport::Layer;
+use marmo_transport::h2::{H2Client, H2ClientOptions};
 use marmo_transport::tls::{TlsClient, TlsClientOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -856,6 +857,147 @@ async fn relays_through_vless_mux_over_websocket() {
     assert_eq!(echoed, payload);
 
     stop(front_handle, front_task).await;
+    stop(proxy_handle, proxy_task).await;
+    echo_task.abort();
+}
+
+async fn h2_client(server: SocketAddr) -> marmo_transport::H2ClientConnection {
+    let tcp = TcpStream::connect(server).await.expect("connect");
+    let tls = TlsClient::new(&TlsClientOptions {
+        server_name: "localhost",
+        alpn: &["h2".to_owned()],
+        required_alpn: Some("h2"),
+        insecure: true,
+        client_certificate: None,
+        client_private_key: None,
+        handshake_timeout: Some(Duration::from_secs(5)),
+    })
+    .expect("tls client");
+    let stream = tls.wrap(Box::new(tcp)).await.expect("tls handshake");
+    H2Client::new(H2ClientOptions {
+        host: "localhost".into(),
+        path: "/h2".into(),
+    })
+    .handshake(stream)
+    .await
+    .expect("h2 handshake")
+}
+
+fn vless_tcp_request(target: &marmo_net::Endpoint) -> Vec<u8> {
+    let uuid = marmo_proto::vless::Uuid::parse(UUID).expect("uuid");
+    let mut header = [0_u8; 256];
+    let length = marmo_proto::vless::encode_request(
+        &uuid,
+        target,
+        marmo_proto::vless::COMMAND_TCP,
+        &mut header,
+    )
+    .expect("encode request");
+    header[..length].to_vec()
+}
+
+#[tokio::test]
+async fn serves_multiple_vless_streams_on_one_http2_connection() {
+    let (echo, echo_task) = echo_server().await;
+    let proxy = format!(
+        r#"{{
+          "limits": {{ "handshake_timeout_s": 5, "idle_timeout_s": 10 }},
+          "inbounds": [ {} ],
+          "outbounds": [ {{ "tag": "direct", "protocol": "direct" }} ],
+          "route": {{ "final": "direct" }}
+        }}"#,
+        vless_h2_inbound()
+    );
+    let (proxy_address, proxy_handle, proxy_task) = start(&proxy).await;
+    let connection = h2_client(proxy_address).await;
+    let request = vless_tcp_request(&marmo_net::Endpoint::from(echo));
+
+    let mut streams = Vec::new();
+    for _ in 0..4 {
+        streams.push(connection.open_stream().await.expect("open stream"));
+    }
+
+    for (index, stream) in streams.iter_mut().enumerate() {
+        stream.write_all(&request).await.expect("request header");
+        let mut response = [0_u8; 2];
+        stream.read_exact(&mut response).await.expect("response");
+        assert_eq!(response, [0, 0]);
+
+        let payload = format!("stream-{index}");
+        stream.write_all(payload.as_bytes()).await.expect("write");
+        let mut echoed = vec![0_u8; payload.len()];
+        stream.read_exact(&mut echoed).await.expect("read");
+        assert_eq!(echoed, payload.as_bytes());
+        stream.shutdown().await.expect("shutdown");
+    }
+
+    let metrics = proxy_handle.metrics();
+    assert_eq!(metrics.connections_accepted, 1);
+    assert_eq!(metrics.h2_streams_accepted, 4);
+    assert_eq!(metrics.h2_streams_rejected, 0);
+
+    drop(connection);
+    stop(proxy_handle, proxy_task).await;
+    echo_task.abort();
+}
+
+#[tokio::test]
+async fn rejects_vless_http2_streams_over_the_stream_budget() {
+    let (echo, echo_task) = echo_server().await;
+    let proxy = format!(
+        r#"{{
+          "limits": {{
+            "max_connections": 1,
+            "handshake_timeout_s": 5,
+            "idle_timeout_s": 10
+          }},
+          "inbounds": [ {} ],
+          "outbounds": [ {{ "tag": "direct", "protocol": "direct" }} ],
+          "route": {{ "final": "direct" }}
+        }}"#,
+        vless_h2_inbound()
+    );
+    let (proxy_address, proxy_handle, proxy_task) = start(&proxy).await;
+    let connection = h2_client(proxy_address).await;
+    let request = vless_tcp_request(&marmo_net::Endpoint::from(echo));
+
+    // Hold the only stream permit open.
+    let mut first = connection.open_stream().await.expect("first stream");
+    first.write_all(&request).await.expect("first request");
+    let mut response = [0_u8; 2];
+    first
+        .read_exact(&mut response)
+        .await
+        .expect("first response");
+    first.write_all(b"first").await.expect("first write");
+    let mut echoed = [0_u8; 5];
+    first.read_exact(&mut echoed).await.expect("first read");
+
+    // The second stream gets an HTTP/2 200 or a reset, but either way the
+    // stream budget rejects it.
+    let second = connection.open_stream().await;
+    if let Ok(mut stream) = second {
+        let _ = stream.write_all(&request).await;
+        let mut response = [0_u8; 2];
+        let _ = stream.read_exact(&mut response).await;
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if proxy_handle.metrics().h2_streams_rejected == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "stream rejection was not recorded"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(proxy_handle.metrics().connections_accepted, 1);
+    assert_eq!(proxy_handle.metrics().h2_streams_accepted, 1);
+
+    drop(first);
+    drop(connection);
     stop(proxy_handle, proxy_task).await;
     echo_task.abort();
 }
