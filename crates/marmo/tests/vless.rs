@@ -861,6 +861,53 @@ async fn relays_through_vless_mux_over_websocket() {
     echo_task.abort();
 }
 
+#[tokio::test]
+async fn relays_through_vless_mux_over_http2() {
+    let (echo, echo_task) = echo_server().await;
+    let proxy = format!(
+        r#"{{
+          "limits": {{ "handshake_timeout_s": 5, "idle_timeout_s": 10 }},
+          "inbounds": [ {} ],
+          "outbounds": [ {{ "tag": "direct", "protocol": "direct" }} ],
+          "route": {{ "final": "direct" }}
+        }}"#,
+        vless_h2_inbound()
+    );
+    let (proxy_address, proxy_handle, proxy_task) = start(&proxy).await;
+    let outbound =
+        vless_h2_outbound(proxy_address).replace(r#""uuid": "#, r#""mux": true, "uuid": "#);
+    let front = format!(
+        r#"{{
+          "limits": {{ "handshake_timeout_s": 5, "idle_timeout_s": 10 }},
+          "inbounds": [
+            {{ "tag": "socks", "protocol": "socks5", "listen": "127.0.0.1:0" }}
+          ],
+          "outbounds": [ {outbound} ],
+          "route": {{ "final": "vl" }}
+        }}"#
+    );
+    let (front_address, front_handle, front_task) = start(&front).await;
+
+    let mut client = TcpStream::connect(front_address).await.expect("connect");
+    socks5_connect(&mut client, echo).await;
+    let payload: Vec<u8> = (0..16_000).map(|index| (index % 251) as u8).collect();
+    let (mut reader, mut writer) = client.into_split();
+    let write = writer.write_all(&payload);
+    let read = async {
+        let mut received = vec![0_u8; payload.len()];
+        reader.read_exact(&mut received).await.expect("read");
+        received
+    };
+    let (written, echoed) = tokio::join!(write, read);
+    written.expect("write");
+    assert_eq!(echoed, payload);
+    assert_eq!(proxy_handle.metrics().connections_accepted, 1);
+
+    stop(front_handle, front_task).await;
+    stop(proxy_handle, proxy_task).await;
+    echo_task.abort();
+}
+
 async fn h2_client(server: SocketAddr) -> marmo_transport::H2ClientConnection {
     let tcp = TcpStream::connect(server).await.expect("connect");
     let tls = TlsClient::new(&TlsClientOptions {
@@ -998,6 +1045,36 @@ async fn rejects_vless_http2_streams_over_the_stream_budget() {
 
     drop(first);
     drop(connection);
+    stop(proxy_handle, proxy_task).await;
+    echo_task.abort();
+}
+
+#[tokio::test]
+async fn pools_vless_http2_connections() {
+    let (echo, echo_task) = echo_server().await;
+    let (front, front_handle, front_task, proxy_handle, proxy_task) =
+        ws_chain(vless_h2_inbound(), vless_h2_outbound).await;
+
+    let mut clients = Vec::new();
+    for _ in 0..4 {
+        let mut client = TcpStream::connect(front).await.expect("connect");
+        socks5_connect(&mut client, echo).await;
+        clients.push(client);
+    }
+
+    for (index, client) in clients.iter_mut().enumerate() {
+        let payload = format!("pooled-{index}");
+        client.write_all(payload.as_bytes()).await.expect("write");
+        let mut echoed = vec![0_u8; payload.len()];
+        client.read_exact(&mut echoed).await.expect("read");
+        assert_eq!(echoed, payload.as_bytes());
+    }
+
+    let metrics = proxy_handle.metrics();
+    assert_eq!(metrics.connections_accepted, 1);
+    assert!(metrics.h2_streams_accepted >= 4);
+
+    stop(front_handle, front_task).await;
     stop(proxy_handle, proxy_task).await;
     echo_task.abort();
 }
