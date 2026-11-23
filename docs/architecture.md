@@ -1,7 +1,7 @@
 # Architecture
 
 Status: **Current Rust architecture.** Accepted decisions are ADR-0017 through
-ADR-0030. The library is the only implementation in this repository; there is
+ADR-0031. The library is the only implementation in this repository; there is
 no CLI, daemon, GUI, or application layer.
 
 ## 1. Purpose
@@ -879,7 +879,7 @@ Open questions:
 
 ## 21. Decision index
 
-Current decisions are ADR-0017 through ADR-0030. Historical decisions from the
+Current decisions are ADR-0017 through ADR-0031. Historical decisions from the
 initial implementation are ADR-0001 through ADR-0016 and remain in
 [`docs/decisions/`](decisions/README.md); their bodies are unchanged.
 
@@ -899,3 +899,4 @@ initial implementation are ADR-0001 through ADR-0016 and remain in
 | [0028](decisions/0028-rule-sets.md) | Injected rule sets | Accepted |
 | [0029](decisions/0029-process-identity.md) | Process identity injection | Accepted |
 | [0030](decisions/0030-dns-resolver.md) | DNS cache and DoH/DoT resolver | Accepted |
+| [0031](decisions/0031-root-http2-multiplexing.md) | Root-level HTTP/2 multiplexing and pooling | Accepted |
