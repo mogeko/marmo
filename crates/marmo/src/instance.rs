@@ -16,7 +16,7 @@ use marmo_proto::shadowsocks::{Key, Method};
 use marmo_proto::trojan::PasswordHash;
 use marmo_proto::vless::Uuid;
 use marmo_proto::vmess::{CmdKey, Security as VmessCipher};
-use marmo_transport::h2::{H2Client, H2ClientOptions, H2Server, H2ServerOptions};
+use marmo_transport::h2::{H2Client, H2ClientOptions, H2ServerOptions};
 use marmo_transport::tls::{TlsClient, TlsClientOptions, TlsServer, TlsServerOptions};
 use marmo_transport::ws::{WsClient, WsClientOptions, WsServer, WsServerOptions};
 use marmo_transport::{
@@ -1109,11 +1109,13 @@ enum InboundKind {
     Vless {
         uuid: Arc<Uuid>,
         layers: Arc<[Arc<dyn Layer>]>,
+        h2: Option<H2ServerOptions>,
     },
     Vmess {
         cmd_key: Arc<CmdKey>,
         replay: Arc<Mutex<ReplayFilter>>,
         layers: Arc<[Arc<dyn Layer>]>,
+        h2: Option<H2ServerOptions>,
     },
 }
 
@@ -1193,12 +1195,10 @@ impl InboundConfig {
                 if let Some(options) = ws {
                     layers.push(Arc::new(WsServer::new(options)));
                 }
-                if let Some(options) = h2 {
-                    layers.push(Arc::new(H2Server::new(options)));
-                }
                 InboundKind::Vless {
                     uuid,
                     layers: Arc::from(layers),
+                    h2,
                 }
             }
             Self::Vmess {
@@ -1214,13 +1214,11 @@ impl InboundConfig {
                 if let Some(options) = ws {
                     layers.push(Arc::new(WsServer::new(options)));
                 }
-                if let Some(options) = h2 {
-                    layers.push(Arc::new(H2Server::new(options)));
-                }
                 InboundKind::Vmess {
                     cmd_key,
                     replay: Arc::new(Mutex::new(ReplayFilter::new())),
                     layers: Arc::from(layers),
+                    h2,
                 }
             }
         })
@@ -1632,34 +1630,64 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                             )
                             .await;
                         }
-                        InboundKind::Vless { uuid, layers } => {
-                            inbound::vless::handle(
-                                stream,
-                                task_context,
-                                tag,
-                                uuid,
-                                layers,
-                                sniffing,
-                                deadline,
-                            )
-                            .await;
+                        InboundKind::Vless { uuid, layers, h2 } => {
+                            if let Some(options) = h2 {
+                                inbound::vless::serve_h2(
+                                    stream,
+                                    task_context,
+                                    tag,
+                                    uuid,
+                                    layers,
+                                    options,
+                                    sniffing,
+                                    deadline,
+                                )
+                                .await;
+                            } else {
+                                inbound::vless::handle(
+                                    stream,
+                                    task_context,
+                                    tag,
+                                    uuid,
+                                    layers,
+                                    sniffing,
+                                    deadline,
+                                )
+                                .await;
+                            }
                         }
                         InboundKind::Vmess {
                             cmd_key,
                             replay,
                             layers,
+                            h2,
                         } => {
-                            inbound::vmess::handle(
-                                stream,
-                                task_context,
-                                tag,
-                                cmd_key,
-                                replay,
-                                layers,
-                                sniffing,
-                                deadline,
-                            )
-                            .await;
+                            if let Some(options) = h2 {
+                                inbound::vmess::serve_h2(
+                                    stream,
+                                    task_context,
+                                    tag,
+                                    cmd_key,
+                                    replay,
+                                    layers,
+                                    options,
+                                    sniffing,
+                                    deadline,
+                                )
+                                .await;
+                            } else {
+                                inbound::vmess::handle(
+                                    stream,
+                                    task_context,
+                                    tag,
+                                    cmd_key,
+                                    replay,
+                                    layers,
+                                    sniffing,
+                                    deadline,
+                                )
+                                .await;
+                            }
                         }
                     }
                 }, &runtime);
