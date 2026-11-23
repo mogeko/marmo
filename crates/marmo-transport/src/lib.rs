@@ -16,7 +16,10 @@ use std::pin::Pin;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-pub use h2::{H2Client, H2ClientOptions, H2Error, H2Server, H2ServerOptions};
+pub use h2::{
+    H2Client, H2ClientConnection, H2ClientOptions, H2Error, H2Server, H2ServerConnection,
+    H2ServerOptions,
+};
 pub use relay::{
     RELAY_BUFFER_SIZE, RelayCounters, RelayError, RelayOptions, RelayStats, relay,
     relay_with_counters,
@@ -120,6 +123,8 @@ impl Layer for WsServer {
     }
 }
 
+// Temporary one-shot adapters. ADR-0031 moves `Instance` to the connection
+// API; the `Layer` impls are removed once both directions are wired.
 impl Layer for H2Client {
     fn wrap<'a>(&'a self, inner: BoxStream) -> BoxFuture<'a, Result<BoxStream, LayerError>> {
         Box::pin(async move { self.connect(inner).await.map_err(LayerError::H2) })

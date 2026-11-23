@@ -54,6 +54,7 @@ ADR-0017 onward.
 | [0028](0028-rule-sets.md) | Injected rule sets | Accepted (2026-11-22) | `DomainSet`/`IpSet`; no library format |
 | [0029](0029-process-identity.md) | Process identity injection | Accepted (2026-11-22) | injected resolver; no OS lookup in the library |
 | [0030](0030-dns-resolver.md) | DNS cache and DoH/DoT resolver | Accepted (2026-11-22) | `dns` feature; built-in + injected resolver; MSRV 1.88 |
+| [0031](0031-root-http2-multiplexing.md) | Root-level HTTP/2 multiplexing and pooling | Accepted (2026-11-23) | root H2 managers; fixed 4/16/64 outbound bounds; inbound stream budget |
 
 ADR-0001, 0003, 0007, 0010, 0013, and 0014 are superseded. ADR-0009 is
 superseded only in its license half; its clean-room protocol rule remains in
