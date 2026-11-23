@@ -10,6 +10,8 @@ cargo +nightly fuzz run socks5 -- -runs=20000 -max_len=4096
 cargo +nightly fuzz run sniff -- -runs=20000 -max_len=8192
 cargo +nightly fuzz run trojan -- -runs=20000 -max_len=4096
 cargo +nightly fuzz run vless -- -runs=20000 -max_len=4096
+cargo +nightly fuzz run vmess -- -runs=20000 -max_len=4096
+cargo +nightly fuzz run mux -- -runs=20000 -max_len=4096
 cargo +nightly fuzz run http -- -runs=20000 -max_len=8192
 ```
 
@@ -32,6 +34,8 @@ because a `schedule` would only run from the repository default branch.
 | `sniff` | TLS ClientHello SNI, HTTP Host, HTTP/2 preface and HEADERS HPACK |
 | `trojan` | authentication prefix, request headers, UDP frame headers |
 | `vless` | request headers, response header, UoT length, address parsing |
+| `vmess` | AEAD request/response headers, chunks, Mux.Cool metadata |
+| `mux` | New/Keep/End/KeepAlive metadata and frame headers |
 
 The SS2022 targets take the first byte as the method selector (bit 0: 0 =
 `2022-blake3-aes-128-gcm`, 1 = `2022-blake3-aes-256-gcm`); the rest is the wire
@@ -43,7 +47,8 @@ input.
 
 - encoder-produced greetings, requests, responses, chunks, UDP packets, and
   Mux.Cool metadata with fixed keys and timestamps;
-- synthetic protocol fixtures (`fixture-*`) shared with the earlier test corpus.
+- spec-derived fixtures shared with `crates/marmo-proto/tests/fixtures/`.
 
-None is a capture of real traffic. libFuzzer writes newly minimised inputs
-into the corpus directory during a run; do not commit those.
+Per-target provenance is recorded in [`corpus/README.md`](corpus/README.md).
+None is a capture of real traffic. libFuzzer writes newly minimised inputs into
+the corpus directory during a run; do not commit those.
