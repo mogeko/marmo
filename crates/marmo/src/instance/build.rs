@@ -10,6 +10,7 @@ use tokio::runtime::Handle;
 
 use crate::config::{Inbound, Outbound as ConfigOutbound, VmessSecurity};
 use crate::direct::Dialer;
+#[cfg(feature = "dns")]
 use crate::dns::DnsRuntime;
 use crate::metrics::{Metrics, MetricsSink};
 use crate::outbound::Outbound;
