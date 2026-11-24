@@ -805,8 +805,11 @@ Module boundaries inside `marmo` are enforced by review, not by the compiler.
   tokio. No live third-party servers in CI.
 - DNS integration tests are feature-gated (`--features dns`) and use local UDP,
   DoT, and DoH fixtures; they never contact a public resolver.
-- Protocol tests use synthetic vectors and the fuzz corpus in `fuzz/corpus/`;
-  no fixture is a capture of real traffic.
+- Protocol tests use synthetic vectors, golden wire images in
+  `crates/marmo-proto/tests/fixtures/`, and the fuzz corpus in `fuzz/corpus/`;
+  no fixture is a capture of real traffic. Seed provenance is recorded in
+  `fuzz/corpus/README.md`, and differential reference results are in
+  `docs/protocols/interop.md`.
 - HTTP/2 multiplexing is covered at three levels: transport connection tests,
   inbound stream-budget tests, and integration tests that open several proxied
   connections and assert one accepted TCP connection at the HTTP/2 peer.

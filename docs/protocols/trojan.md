@@ -136,6 +136,9 @@ that points at the same listener.
   fallback HTTP service and receives its response.
 - Fuzz: the `trojan` target under `cargo +nightly fuzz run`; corpus seeds are
   in `fuzz/corpus/trojan/` and are synthetic, spec-derived inputs.
+- Golden Trojan auth/request/UDP fixtures live in
+  `crates/marmo-proto/tests/fixtures/trojan/`; differential results are in
+  [`interop.md`](interop.md).
 - Standalone example: `crates/marmo/examples/trojan.rs` runs a server and a
   SOCKS5 client, with an optional fallback HTTP service for local probes.
 

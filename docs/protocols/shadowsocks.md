@@ -54,9 +54,13 @@ Source: [SIP022 AEAD-2022 Ciphers](https://github.com/shadowsocks/shadowsocks-or
   Shadowsocks 2022 UDP server -> direct UDP echo.
 - Reference interop: verified locally against shadowsocks-rust 1.25.0, TCP/UDP
   in both directions; the harness is intentionally not committed.
-- Synthetic malformed request and datagram bytes live in `fuzz/corpus/ss2022_*`;
-  the fuzz targets construct authenticated inputs so address, padding, and
-  length parsing is reached after AEAD.
+- Golden SS2022 TCP/UDP fixtures live in
+  `crates/marmo-proto/tests/fixtures/shadowsocks/`; synthetic malformed request
+  and datagram bytes live in `fuzz/corpus/ss2022_*`. The fuzz targets construct
+  authenticated inputs so address, padding, and length parsing is reached after
+  AEAD.
+- Differential results against shadowsocks-rust are recorded in
+  [`interop.md`](interop.md).
 - Fuzz targets: `ss2022_tcp` and `ss2022_udp` under `cargo +nightly fuzz run`.
   The bounded corpus smoke runs in the `Fuzz` workflow. See
   `docs/security/audit.md`.

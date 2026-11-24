@@ -233,8 +233,10 @@ Planned scope when it is taken up:
 - Local-only interop: the TLS adapter and VLESS-over-TLS request/response were
   checked against a Python/OpenSSL TLS echo and VLESS mock. The harness is not
   committed.
-- Synthetic VLESS inputs live in `fuzz/corpus/vless/`; the shared Mux.Cool
-  seeds live in `fuzz/corpus/vmess/`.
+- Golden VLESS request/Mux/UoT fixtures live in
+  `crates/marmo-proto/tests/fixtures/vless/`; synthetic VLESS inputs live in
+  `fuzz/corpus/vless/`. Differential results are in
+  [`interop.md`](interop.md).
 - Fuzz targets: `vless` for request/UoT framing and `vmess` for chunk and
   Mux.Cool metadata; the bounded corpus smoke runs in the `Fuzz` workflow. See
   `docs/security/audit.md`.

@@ -12,6 +12,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+marmo-net = { path = "../crates/marmo-net" }
 marmo-proto = { path = "../crates/marmo-proto" }
 
 [[bin]]
@@ -31,6 +32,13 @@ bench = false
 [[bin]]
 name = "ss2022_udp"
 path = "fuzz_targets/ss2022_udp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mux"
+path = "fuzz_targets/mux.rs"
 test = false
 doc = false
 bench = false

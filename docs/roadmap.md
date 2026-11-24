@@ -12,13 +12,14 @@
 | --- | --- | --- |
 | 0 | Decisions, workspace, CI, baseline | Complete |
 | 1 | Minimal usable proxy | Complete |
-| 2 | Full protocol/transport set, routing depth, selectors, DNS | In progress |
+| 2 | Full protocol/transport set, routing depth, selectors, DNS | Complete |
 | 3 | QUIC, TUIC, Hysteria2, gRPC, XHTTP | Not started |
 | 4 | TUN/transparent, platform hardening, external audit | Not started |
 
-Phase 2 is not fully closed, so Phase 3 should not be treated as the only
-remaining work. The original Phase 3 "in-tree QUIC" clause is superseded by
-ADR-0018: the Rust tree uses `quinn` rather than writing a QUIC stack.
+Phase 2 is closed; Phase 3 is the only remaining implementation phase before
+platform hardening and audit. The original Phase 3 "in-tree QUIC" clause is
+superseded by ADR-0018: the Rust tree uses `quinn` rather than writing a QUIC
+stack.
 
 ## Phase 0 — decisions and baseline
 
@@ -48,9 +49,9 @@ ADR-0018: the Rust tree uses `quinn` rather than writing a QUIC stack.
 
 ## Phase 2 — full protocol/transport set and routing depth
 
-**Status: in progress.** Core protocol transports, TLS, selectors, health,
-limits, rule sets, process identity, DNS, and root-level HTTP/2 pooling are
-complete. Fixture parity (P2-13) remains.
+**Status: complete.** Core protocol transports, TLS, selectors, health, limits,
+rule sets, process identity, DNS, root-level HTTP/2 pooling, and fixture parity
+are complete.
 
 ### Completed
 
@@ -68,23 +69,16 @@ complete. Fixture parity (P2-13) remains.
 | P2-10 | Process rules via injected resolver (`process_name`/`process_path`) | Done | P1-6 | Resolver injection, bounded cache/timeout, fail-open, tests (ADR-0029) |
 | P2-11 | DNS cache + DoH/DoT resolver | Done | P1-1 | TTL cache, bounded entries, DoH policy, fallback tests (ADR-0030) |
 | P2-12 | Root-level HTTP/2 multiplexing and pooling | Done | P2-4 | Multiple streams per connection, 4/16/64 pool bounds, inbound stream budget, tests (ADR-0031) |
+| P2-13 | Fixture parity for all codecs | Done | P1-5, P2-1..P2-4 | Golden fixtures per codec, Mux fuzz target, provenance, differential interop records |
 | P2-14 | Client-side Mux.Cool pooling (VMess/VLESS) | Done | P2-1, P2-7 | Pool bounds, TCP/UDP/mixed, Xray interop |
 
-### Remaining
-
-| ID | Item | Status | Depends on | Exit criteria | Estimate |
-| --- | --- | --- | --- | --- | --- |
-| P2-13 | Fixture parity for all codecs | Planned | P1-5, P2-1..P2-4 | Corpus/unit vectors, differential interop records | 1 d |
-
-**Phase 2 gate:** every remaining item either complete or explicitly moved out
-of Phase 2 by an ADR. VMess landed under ADR-0025, DNS under ADR-0030, and root
-HTTP/2 multiplexing/pooling under ADR-0031; P2-13 remains.
+**Phase 2 gate:** every item is complete. VMess landed under ADR-0025, DNS
+under ADR-0030, and root HTTP/2 multiplexing/pooling under ADR-0031.
 
 ## Phase 3 — QUIC, TUIC, Hysteria2, gRPC, XHTTP
 
-**Status: not started.** Phase 3 depends on Phase 2 closeout for release
-sequencing, but the QUIC adapter can be developed in parallel once the
-datagram/endpoint boundary is settled.
+**Status: not started.** Phase 2 is closed; Phase 3 can start with the
+datagram/endpoint boundary.
 
 | ID | Item | Status | Depends on | Exit criteria | Estimate |
 | --- | --- | --- | --- | --- | --- |
@@ -151,12 +145,11 @@ P1 core (net, config, relay, limits)
 
 ## Critical path
 
-1. Close Phase 2: P2-13 fixture parity. P2-8 through P2-12 and P2-14 are done.
-2. Settle P3-1 datagram/endpoint boundary.
-3. Build P3-2 QUIC, then P3-3 TUIC and P3-4 Hysteria2.
-4. P3-5 gRPC and P3-6 XHTTP can run in parallel once H2 is stable; XHTTP `h3`
+1. Settle P3-1 datagram/endpoint boundary.
+2. Build P3-2 QUIC, then P3-3 TUIC and P3-4 Hysteria2.
+3. P3-5 gRPC and P3-6 XHTTP can run in parallel once H2 is stable; XHTTP `h3`
    follows P3-2.
-5. Phase 4 TUN/transparent depends on routing and platform work; external audit
+4. Phase 4 TUN/transparent depends on routing and platform work; external audit
    is last.
 
 ## Post-1.0 backlog
