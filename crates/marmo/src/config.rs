@@ -22,7 +22,7 @@ pub const MAX_CONFIG_BYTES: usize = 4 * 1024 * 1024;
 pub struct Config {
     /// Schema version; only `2` is defined today.
     pub version: u8,
-    /// Global connection and timeout policy.
+    /// Global connection and timeout policy (`ConfigLimits`).
     pub limits: Limits,
     /// Process-identity lookup bounds.
     pub process: Process,
