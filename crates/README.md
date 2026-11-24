@@ -50,9 +50,9 @@ tag runs the `Release` workflow.
 - Errors are `thiserror` enums, `#[non_exhaustive]`; `anyhow` stays in examples
   and tests. Config is schema version 2; TLS credentials are inline PEM
   (ADR-0023).
-- Every `marmo-proto` decoder has a fuzz target and a fixture, including the
-  HTTP/1 request and CONNECT response parser and Mux.Cool metadata. Every bug
-  fix adds a regression test.
+- Every `marmo-proto` decoder has a fuzz target. Wire-format fixtures cover
+  the encoder-backed codecs, including the HTTP/1 request and CONNECT response
+  parser and Mux.Cool metadata. Every bug fix adds a regression test.
 - Public items need documentation. `missing_docs` is denied by CI.
 - License is MIT OR Apache-2.0. Dependency changes record a
   `cargo tree --format '{l}'` review; CI rejects GPL/AGPL/MPL. Apache-2.0-only

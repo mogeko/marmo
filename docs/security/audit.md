@@ -59,10 +59,11 @@ not implemented in this revision (QUIC, TUIC, Hysteria2).
 - **Dependency surface.** `Cargo.lock` is committed and CI uses `--locked`;
   CI rejects GPL/AGPL/MPL and runs `cargo-audit` when dependencies change.
 - **Fuzzing.** Every decoder in `marmo-proto`, including HTTP/1 and Mux.Cool
-  metadata, has a fuzz target and a golden fixture. The Mux.Cool frame reader
-  is covered by unit tests rather than a separate target. Corpus provenance is
-  recorded in `fuzz/corpus/README.md`; the deterministic corpus runs in CI and
-  long runs are manual.
+  metadata, has a fuzz target. Wire-format fixtures cover the encoder-backed
+  codecs; the Mux.Cool frame reader is covered by unit tests rather than a
+  separate target. Corpus provenance is recorded in
+  `fuzz/corpus/README.md`; the deterministic corpus runs in CI and long runs
+  are manual.
 - **VMess AEAD.** Only the AEAD header is accepted; legacy MD5/CFB and body
   None/Zero are rejected. Auth IDs are verified by AES decryption, CRC32, and a
   120-second window, then inserted into a bounded 4,096-entry replay filter.
