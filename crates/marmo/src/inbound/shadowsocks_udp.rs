@@ -1,6 +1,6 @@
 //! Shadowsocks 2022 UDP inbound: per-client-session relay sockets.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -21,6 +21,8 @@ use crate::shadowsocks::{random_bytes, unix_now};
 
 /// Fixed session-table capacity.
 const MAX_SESSIONS: usize = 128;
+/// Maximum distinct destinations whose replies one session accepts.
+const MAX_TARGETS: usize = 128;
 /// Largest plaintext payload carried by one packet.
 const MAX_PAYLOAD: usize = 65_535;
 /// Largest encoded packet: separate header, body header, address, payload, tag.
@@ -120,6 +122,9 @@ pub(crate) async fn serve(
                 let Some(target) = session.resolve(&destination).await else {
                     continue;
                 };
+                if !session.allow(target) {
+                    continue;
+                }
                 let _ = session.socket.send_to(decoded.payload, target).await;
             }
         }
@@ -138,6 +143,7 @@ struct ClientState {
 struct Session {
     socket: Arc<UdpSocket>,
     state: Arc<Mutex<ClientState>>,
+    allowed: Arc<Mutex<HashSet<SocketAddr>>>,
     window: Window,
     ipv4: bool,
     dialer: Dialer,
@@ -164,10 +170,12 @@ impl Session {
             address: source,
             last_active: Instant::now(),
         }));
+        let allowed = Arc::new(Mutex::new(HashSet::new()));
         let task_listener = Arc::clone(listener);
         let task_socket = Arc::clone(&socket);
         let task_key = Arc::clone(key);
         let task_state = Arc::clone(&state);
+        let task_allowed = Arc::clone(&allowed);
         let task = tokio::spawn(async move {
             let mut counter = 0_u64;
             let mut received = vec![0_u8; MAX_PAYLOAD];
@@ -176,6 +184,13 @@ impl Session {
                 let Ok((length, source)) = task_socket.recv_from(&mut received).await else {
                     return;
                 };
+                let allowed = task_allowed
+                    .lock()
+                    .map(|allowed| allowed.contains(&source))
+                    .unwrap_or(false);
+                if !allowed {
+                    continue;
+                }
                 let address = match task_state.lock() {
                     Ok(mut state) => {
                         state.last_active = Instant::now();
@@ -214,6 +229,7 @@ impl Session {
         Some(Self {
             socket,
             state,
+            allowed,
             window: Window::default(),
             ipv4,
             dialer,
@@ -223,6 +239,20 @@ impl Session {
 
     async fn resolve(&self, destination: &Endpoint) -> Option<SocketAddr> {
         self.dialer.resolve_udp(destination, self.ipv4).await.ok()
+    }
+
+    fn allow(&self, target: SocketAddr) -> bool {
+        let Ok(mut allowed) = self.allowed.lock() else {
+            return false;
+        };
+        if allowed.contains(&target) {
+            return true;
+        }
+        if allowed.len() >= MAX_TARGETS {
+            return false;
+        }
+        allowed.insert(target);
+        true
     }
 
     fn touch(&self, source: SocketAddr) {
