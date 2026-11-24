@@ -28,7 +28,10 @@ mod vless;
 mod vmess;
 
 pub use config::{
-    Config, ConfigError, Dns, DnsProtocol, DnsServer, DnsTls, MAX_CONFIG_BYTES, Process,
+    ClientAuth, Config, ConfigError, Dns, DnsProtocol, DnsServer, DnsTls, HealthCheck, Inbound,
+    InboundProtocol, InboundTls, Limits as ConfigLimits, MAX_CONFIG_BYTES, Outbound,
+    OutboundProtocol, Process, Route, Rule, SniffProtocol, Sniffing, Strategy, StreamNetwork,
+    StreamTransport, Tls, VmessSecurity,
 };
 pub use instance::{
     BindError, BoundAddr, BoundInstance, BuildError, Instance, InstanceBuilder, InstanceHandle,

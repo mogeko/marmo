@@ -28,7 +28,7 @@ stack.
 | ID | Item | Status | Depends on | Exit criteria |
 | --- | --- | --- | --- | --- |
 | P0-1 | Scope, license, runtime, dependencies, workspace decisions | Done | — | ADR-0017..ADR-0023 accepted |
-| P0-2 | Five-crate workspace and MSRV | Done | P0-1 | `cargo test --workspace --locked` on Linux/macOS/Windows |
+| P0-2 | Four-crate workspace and MSRV | Done | P0-1 | `cargo test --workspace --locked` on Linux/macOS/Windows |
 | P0-3 | CI: fmt, clippy, tests, MSRV, audit, copyleft | Done | P0-2 | All jobs green on `master` |
 | P0-4 | Fuzz harness and corpus baseline | Done | P0-2 | `cargo +nightly fuzz build` and decoder smoke pass |
 | P0-5 | Docs, ADR index, protocol notes | Done | P0-1 | `docs/architecture.md`, `docs/decisions/`, `docs/protocols/` current |
@@ -62,14 +62,14 @@ are complete.
 | P2-3 | TLS 1.3: ALPN, mTLS, platform verifier | Done | P1 | `rustls` tests and TLS interop |
 | P2-4 | WebSocket and HTTP/2 transports | Done | P1 | WS/H2 loopback, interop, VLESS over both |
 | P2-5 | Selectors and health probes | Done | P1-6 | Five strategies, EWMA, TCP probes, unit tests |
-| P2-6 | Connection limits and deadlines | Done | P1-2 | Absolute handshake, shared idle, half-close tests |
+| P2-6 | Connection limits and deadlines | Done | P1-2 | Absolute handshake, shared idle, half-close tests; Mux sessions use the handshake deadline and a separate session budget |
 | P2-7 | VMess AEAD inbound/outbound: TCP, direct UDP, Mux.Cool | Done | P2-3, P2-4 | Vectors, loopback, Xray interop, fuzz |
 | P2-8 | Sniffing: TLS SNI, HTTP Host, HTTP/2 `:authority` | Done | P1-4, P2-1, P2-3 | Buffered replay, routing on sniffed domain, tests |
 | P2-9 | Injected domain/IP sets: GEOIP/GEOSITE, keyword, port ranges, inbound | Done | P1-6, P2-8 | `DomainSet`/`IpSet` injection, bounded refs, hot-swappable data, routing tests (ADR-0028) |
 | P2-10 | Process rules via injected resolver (`process_name`/`process_path`) | Done | P1-6 | Resolver injection, bounded cache/timeout, fail-open, tests (ADR-0029) |
 | P2-11 | DNS cache + DoH/DoT resolver | Done | P1-1 | TTL cache, bounded entries, DoH policy, fallback tests (ADR-0030) |
 | P2-12 | Root-level HTTP/2 multiplexing and pooling | Done | P2-4 | Multiple streams per connection, 4/16/64 pool bounds, inbound stream budget, tests (ADR-0031) |
-| P2-13 | Fixture parity for all codecs | Done | P1-5, P2-1..P2-4 | Golden fixtures per codec, Mux fuzz target, provenance, differential interop records |
+| P2-13 | Fixture parity for all codecs | Done | P1-5, P2-1..P2-4 | Golden fixtures per codec, Mux fuzz target in the CI smoke, provenance, differential interop records |
 | P2-14 | Client-side Mux.Cool pooling (VMess/VLESS) | Done | P2-1, P2-7 | Pool bounds, TCP/UDP/mixed, Xray interop |
 
 **Phase 2 gate:** every item is complete. VMess landed under ADR-0025, DNS

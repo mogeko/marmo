@@ -5,6 +5,8 @@
 //! values so the parser has no lifetime coupling to the read buffer and can be
 //! fuzzed in isolation.
 
+use std::fmt;
+
 use marmo_net::Endpoint;
 use thiserror::Error;
 
@@ -16,7 +18,7 @@ pub const FORWARD_HEAD_MAX: usize = HEAD_MAX + 1024;
 pub const MAX_HEADERS: usize = 64;
 
 /// One parsed header borrowed from the request buffer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct Header<'a> {
     /// Field name as sent by the peer.
     pub name: &'a str,
@@ -24,8 +26,18 @@ pub struct Header<'a> {
     pub value: &'a [u8],
 }
 
+impl fmt::Debug for Header<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Header")
+            .field("name", &self.name)
+            .field("value_len", &self.value.len())
+            .finish()
+    }
+}
+
 /// A parsed request head borrowed from the input buffer.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct RequestHead<'a> {
     /// Request method.
     pub method: &'a str,
@@ -35,6 +47,18 @@ pub struct RequestHead<'a> {
     pub version: u8,
     headers: [Header<'a>; MAX_HEADERS],
     count: usize,
+}
+
+impl fmt::Debug for RequestHead<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RequestHead")
+            .field("method", &self.method)
+            .field("target", &self.target)
+            .field("version", &self.version)
+            .field("header_count", &self.count)
+            .finish()
+    }
 }
 
 impl<'a> RequestHead<'a> {
@@ -221,6 +245,7 @@ pub fn build_forward_head(
     head.push(b'0' + version);
     head.extend_from_slice(b"\r\n");
 
+    let connection_tokens = connection_tokens(headers);
     let mut has_content_length = false;
     let mut has_transfer_encoding = false;
     for header in headers {
@@ -228,6 +253,15 @@ pub fn build_forward_head(
             return Err(HttpError::BadRequest);
         }
         if skip_hop_by_hop(header.name) {
+            continue;
+        }
+        // RFC 9110: a connection option names an additional hop-by-hop field.
+        // Keep the framing fields even if a peer tries to nominate them.
+        if !is_framing_header(header.name)
+            && connection_tokens
+                .iter()
+                .any(|token| header.name.eq_ignore_ascii_case(token))
+        {
             continue;
         }
         if header.name.eq_ignore_ascii_case("content-length") {
@@ -306,6 +340,29 @@ fn skip_hop_by_hop(name: &str) -> bool {
         || name.eq_ignore_ascii_case("proxy-authorization")
 }
 
+fn is_framing_header(name: &str) -> bool {
+    name.eq_ignore_ascii_case("content-length") || name.eq_ignore_ascii_case("transfer-encoding")
+}
+
+fn connection_tokens<'a>(headers: &'a [Header<'a>]) -> Vec<&'a str> {
+    let mut tokens = Vec::new();
+    for header in headers {
+        if !header.name.eq_ignore_ascii_case("connection") {
+            continue;
+        }
+        let Ok(value) = std::str::from_utf8(header.value) else {
+            continue;
+        };
+        for token in value.split(',') {
+            let token = token.trim();
+            if is_token(token) {
+                tokens.push(token);
+            }
+        }
+    }
+    tokens
+}
+
 fn parse_authority(authority: &str) -> Result<Endpoint, HttpError> {
     if authority.is_empty() || authority.contains('@') {
         return Err(HttpError::BadRequest);
@@ -363,12 +420,13 @@ mod tests {
     #[test]
     fn parses_and_rewrites_a_forward_request() {
         let head = parse_request(
-            b"GET http://example.com:8080/a?b=1 HTTP/1.1\r\nHost: example.com\r\nProxy-Connection: keep-alive\r\nX-Test: 1\r\n\r\n",
+            b"GET http://example.com:8080/a?b=1 HTTP/1.1\r\nHost: example.com\r\nProxy-Connection: keep-alive\r\nConnection: X-Hop\r\nX-Hop: secret\r\nX-Test: 1\r\n\r\n",
         )
         .expect("head");
         assert_eq!(head.method, "GET");
         assert_eq!(head.version, 1);
-        assert_eq!(head.headers().len(), 3);
+        assert_eq!(head.headers().len(), 5);
+        assert!(!format!("{head:?}").contains("X-Test"));
 
         let target = parse_absolute(head.target).expect("target");
         assert_eq!(target.endpoint.domain(), Some("example.com"));
@@ -381,6 +439,7 @@ mod tests {
         assert!(text.contains("X-Test: 1\r\n"));
         assert!(!text.to_ascii_lowercase().contains("proxy-connection"));
         assert!(!text.to_ascii_lowercase().contains("keep-alive"));
+        assert!(!text.to_ascii_lowercase().contains("x-hop"));
         assert!(text.ends_with("Connection: close\r\n\r\n"));
     }
 

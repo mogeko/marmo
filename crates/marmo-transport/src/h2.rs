@@ -197,10 +197,11 @@ impl H2Server {
         let (send, recv) = match accept_request(request, &mut respond, &self.options.path) {
             Ok(value) => value,
             Err(error) => {
-                tokio::spawn(async move {
-                    connection.graceful_shutdown();
+                connection.graceful_shutdown();
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(1), async {
                     while connection.accept().await.is_some() {}
-                });
+                })
+                .await;
                 return Err(error);
             }
         };

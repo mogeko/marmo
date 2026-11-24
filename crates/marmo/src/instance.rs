@@ -28,6 +28,7 @@ use tokio::runtime::Handle;
 use tokio::task::JoinSet;
 use tokio::time::{interval, timeout};
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroize;
 
 use crate::config::{
     Config, ConfigError, HealthCheck, InboundProtocol, OutboundProtocol, Strategy, StreamNetwork,
@@ -43,7 +44,7 @@ use crate::outbound::{self, Outbound, http_connect, udp::UdpOutbound};
 use crate::process::{ProcessRequest, ProcessResolver, ProcessRuntime};
 use crate::routing::{Action, Metadata, Router, RoutingError};
 use crate::ruleset::{DomainSet, IpSet, RuleSets};
-use crate::shadowsocks::credentials;
+use crate::shadowsocks::{SaltReplay, credentials};
 use crate::sniff::Policy;
 use crate::supervisor::Supervisor;
 use crate::vmess::ReplayFilter;
@@ -800,6 +801,19 @@ impl BackgroundTasks {
             task.abort();
         }
     }
+
+    /// Waits for pool supervisors to drain, aborting any that exceed `grace`.
+    async fn shutdown(&mut self, grace: Duration) {
+        let tasks = std::mem::take(&mut self.0);
+        let deadline = tokio::time::Instant::now() + grace;
+        for mut task in tasks {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if timeout(remaining, &mut task).await.is_err() {
+                task.abort();
+                let _ = task.await;
+            }
+        }
+    }
 }
 
 impl Drop for BackgroundTasks {
@@ -914,9 +928,9 @@ impl BoundInstance {
             }
         }
 
-        supervisor.cancel();
-        background.abort_all();
         let grace = limits.shutdown_grace;
+        supervisor.cancel();
+        background.shutdown(grace).await;
         let drain = async { while tasks.join_next().await.is_some() {} };
         if timeout(grace, drain).await.is_err() {
             tasks.abort_all();
@@ -1100,6 +1114,7 @@ enum InboundKind {
     Shadowsocks {
         method: Method,
         key: Arc<Key>,
+        replay: Arc<Mutex<SaltReplay>>,
     },
     Trojan {
         password: Arc<PasswordHash>,
@@ -1174,12 +1189,26 @@ impl InboundTlsConfig {
     }
 }
 
+impl Drop for InboundTlsConfig {
+    fn drop(&mut self) {
+        self.certificate.zeroize();
+        self.private_key.zeroize();
+        if let Some(ca) = self.client_ca.as_mut() {
+            ca.zeroize();
+        }
+    }
+}
+
 impl InboundConfig {
     fn build(self, tag: &str, metrics: &Arc<Metrics>) -> Result<InboundKind, BindError> {
         Ok(match self {
             Self::Socks5 => InboundKind::Socks5,
             Self::Http => InboundKind::Http,
-            Self::Shadowsocks { method, key } => InboundKind::Shadowsocks { method, key },
+            Self::Shadowsocks { method, key } => InboundKind::Shadowsocks {
+                method,
+                key,
+                replay: Arc::new(Mutex::new(SaltReplay::new())),
+            },
             Self::Trojan {
                 password,
                 tls,
@@ -1278,6 +1307,17 @@ struct OutboundTlsConfig {
     client_certificate: Option<String>,
     client_private_key: Option<String>,
     handshake_timeout: Duration,
+}
+
+impl Drop for OutboundTlsConfig {
+    fn drop(&mut self) {
+        if let Some(certificate) = self.client_certificate.as_mut() {
+            certificate.zeroize();
+        }
+        if let Some(key) = self.client_private_key.as_mut() {
+            key.zeroize();
+        }
+    }
 }
 
 impl OutboundSpec {
@@ -1535,7 +1575,7 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
     let runtime = context.runtime.clone();
 
     if let Some(socket) = inbound.udp.take()
-        && let InboundKind::Shadowsocks { method, key } = &inbound.kind
+        && let InboundKind::Shadowsocks { method, key, .. } = &inbound.kind
     {
         let udp_context = Arc::clone(&context);
         let tag = Arc::clone(&inbound.tag);
@@ -1599,13 +1639,18 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                         InboundKind::Http => {
                             http::handle(stream, task_context, tag, sniffing, deadline).await;
                         }
-                        InboundKind::Shadowsocks { method, key } => {
+                        InboundKind::Shadowsocks {
+                            method,
+                            key,
+                            replay,
+                        } => {
                             inbound::shadowsocks::handle(
                                 stream,
                                 task_context,
                                 tag,
                                 method,
                                 key,
+                                replay,
                                 sniffing,
                                 deadline,
                             )

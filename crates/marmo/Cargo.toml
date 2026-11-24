@@ -43,6 +43,7 @@ h2.workspace = true
 http.workspace = true
 marmo-transport.workspace = true
 proptest.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [lints]
 workspace = true

@@ -100,6 +100,7 @@ fn shadowsocks_fixtures_match() {
         request.consumed,
         include_bytes!("fixtures/shadowsocks/tcp-request.bin").len()
     );
+    drop(request);
 
     let packet = decode_udp_packet(
         method,

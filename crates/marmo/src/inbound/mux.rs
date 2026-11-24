@@ -14,11 +14,11 @@ use marmo_proto::mux::{
 use marmo_proto::vless::MAX_UDP_PAYLOAD;
 use marmo_transport::BoxStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
-use tokio::sync::{Mutex, Notify, mpsc};
+use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, mpsc};
 use tokio::task::{AbortHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
-use crate::deadline::wait_for_activity;
+use crate::deadline::{Deadline, wait_for_activity};
 use crate::instance::Context;
 use crate::mux::{Frame, MuxReader, MuxWriter};
 use crate::routing::{Action, Metadata};
@@ -41,6 +41,7 @@ struct Session {
     cancel: CancellationToken,
     abort: AbortHandle,
     uplink: mpsc::Sender<Uplink>,
+    _permit: OwnedSemaphorePermit,
 }
 
 /// Serves Mux.Cool frames until the physical stream closes or fails.
@@ -56,6 +57,7 @@ pub(crate) async fn serve(
     };
     let writer: Writer = Arc::new(Mutex::new(MuxWriter::new(writer)));
     let (closed_tx, mut closed_rx) = mpsc::channel::<u16>(MAX_SESSIONS);
+    let activity = Arc::new(Notify::new());
     let mut state = State {
         sessions: HashMap::new(),
         tasks: JoinSet::new(),
@@ -65,8 +67,8 @@ pub(crate) async fn serve(
         inbound,
         source,
         token: token.clone(),
+        activity: Arc::clone(&activity),
     };
-    let activity = Arc::new(Notify::new());
     let mut frames = frames;
     loop {
         let has_tasks = !state.tasks.is_empty();
@@ -110,6 +112,7 @@ struct State {
     inbound: Arc<str>,
     source: Endpoint,
     token: CancellationToken,
+    activity: Arc<Notify>,
 }
 
 impl State {
@@ -138,6 +141,9 @@ impl State {
         let Some(target) = frame.meta.target.clone() else {
             return false;
         };
+        if frame.meta.network != NETWORK_TCP && frame.meta.network != NETWORK_UDP {
+            return false;
+        }
         if self.sessions.len() >= MAX_SESSIONS {
             let _ = self
                 .writer
@@ -147,6 +153,15 @@ impl State {
                 .await;
             return true;
         }
+        let Some(permit) = self.context.supervisor.try_acquire_mux() else {
+            let _ = self
+                .writer
+                .lock()
+                .await
+                .end_error(id, b"session limit")
+                .await;
+            return true;
+        };
         let (uplink, receiver) = mpsc::channel(QUEUE);
         let cancel = self.token.child_token();
         let session = SessionContext {
@@ -158,6 +173,11 @@ impl State {
             source: self.source.clone(),
             token: cancel.clone(),
             closed: self.closed.clone(),
+            deadline: Deadline::after(
+                self.context.limits.handshake_timeout,
+                Arc::clone(&self.context.metrics),
+            ),
+            activity: Arc::clone(&self.activity),
         };
         let abort = match frame.meta.network {
             NETWORK_TCP => self.tasks.spawn(run_tcp(session, receiver)),
@@ -170,6 +190,7 @@ impl State {
                 cancel,
                 abort,
                 uplink: uplink.clone(),
+                _permit: permit,
             },
         );
         if !frame.data.is_empty() {
@@ -217,6 +238,8 @@ struct SessionContext {
     source: Endpoint,
     token: CancellationToken,
     closed: mpsc::Sender<u16>,
+    deadline: Deadline,
+    activity: Arc<Notify>,
 }
 
 async fn run_tcp(session: SessionContext, mut receiver: mpsc::Receiver<Uplink>) {
@@ -237,9 +260,9 @@ async fn run_tcp(session: SessionContext, mut receiver: mpsc::Receiver<Uplink>) 
         };
         let connected = tokio::select! {
             _ = session.token.cancelled() => return,
-            result = session.context.connect(action, &session.target) => result,
+            result = session.deadline.run(session.context.connect(action, &session.target)) => result,
         };
-        let Ok(connected) = connected else {
+        let Ok(Ok(connected)) = connected else {
             let _ = session
                 .writer
                 .lock()
@@ -275,6 +298,7 @@ async fn run_tcp(session: SessionContext, mut receiver: mpsc::Receiver<Uplink>) 
                             {
                                 break;
                             }
+                            session.activity.notify_one();
                         }
                         Err(_) => break,
                     }
@@ -306,9 +330,11 @@ async fn run_udp(session: SessionContext, mut receiver: mpsc::Receiver<Uplink>) 
         let ipv4 = session.source.ip().is_none_or(|ip| ip.is_ipv4());
         let outbound = tokio::select! {
             _ = session.token.cancelled() => return,
-            result = session.context.udp_outbound(action, ipv4, &session.target) => result,
+            result = session
+                .deadline
+                .run(session.context.udp_outbound(action, ipv4, &session.target)) => result,
         };
-        let Ok(Some(mut outbound)) = outbound else {
+        let Ok(Ok(Some(mut outbound))) = outbound else {
             let _ = session
                 .writer
                 .lock()
@@ -344,6 +370,7 @@ async fn run_udp(session: SessionContext, mut receiver: mpsc::Receiver<Uplink>) 
                     {
                         break;
                     }
+                    session.activity.notify_one();
                 }
             }
         }

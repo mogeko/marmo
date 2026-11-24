@@ -8,8 +8,10 @@ owns the proxy policy around them (ADR-0018).
 
 - HTTP/1.0 and HTTP/1.1 request heads, origin-form and absolute-form targets,
   and CONNECT response heads.
-- Inbound `CONNECT host:port` tunnels and forward proxying. One request per
-  connection; there is no request pipelining.
+- Inbound `CONNECT host:port` tunnels and forward proxying. One request head is
+  parsed per connection; bytes after that head are relayed as opaque bytes.
+  Pipelined requests are not parsed or routed individually, so clients must not
+  rely on pipelining.
 - Bounds: 8 KiB request head, 64 headers, 8 KiB + 1 KiB rewritten forward head;
   control characters and invalid header names/values are rejected.
 - CONNECT requires a `host:port` target. Normally the `200 Connection
@@ -19,9 +21,10 @@ owns the proxy policy around them (ADR-0018).
   `502`, an oversized/invalid head returns `431`/`400`, and an unsupported
   version returns `505`.
 - Forward requests are rewritten from absolute-form to origin-form. `Host` is
-  taken from the URI authority, hop-by-hop headers are stripped, and the
-  upstream is forced to `Connection: close`. The request body (if any) is
-  relayed after the rewritten head.
+  taken from the URI authority, hop-by-hop headers are stripped, including
+  fields nominated by `Connection:` (framing fields are kept), and the upstream
+  is forced to `Connection: close`. The request body (if any) is relayed after
+  the rewritten head.
 - Outbound HTTP CONNECT sends the request head, validates the response head,
   and replays any bytes that followed it.
 - Optional inbound credentials are not part of this release; routing and

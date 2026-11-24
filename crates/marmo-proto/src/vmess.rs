@@ -569,22 +569,28 @@ struct Pending {
     padding: usize,
 }
 
-enum BodyCipher {
+enum BodyCipherKind {
     Aes(Box<Aes128Gcm>),
     ChaCha(Box<ChaCha20Poly1305>),
 }
 
+struct BodyCipher {
+    kind: BodyCipherKind,
+    key: [u8; 16],
+}
+
 impl BodyCipher {
     fn new(security: Security, key: &[u8; 16]) -> Self {
-        match security {
-            Security::Aes128Gcm => Self::Aes(Box::new(
+        let kind = match security {
+            Security::Aes128Gcm => BodyCipherKind::Aes(Box::new(
                 Aes128Gcm::new_from_slice(key).expect("16-byte AES-128-GCM key"),
             )),
-            Security::ChaCha20Poly1305 => Self::ChaCha(Box::new(
+            Security::ChaCha20Poly1305 => BodyCipherKind::ChaCha(Box::new(
                 ChaCha20Poly1305::new_from_slice(&chacha_key(key))
                     .expect("32-byte ChaCha20-Poly1305 key"),
             )),
-        }
+        };
+        Self { kind, key: *key }
     }
 
     fn seal(
@@ -592,11 +598,11 @@ impl BodyCipher {
     ) -> Result<[u8; 16], VmessError> {
         let nonce = Nonce::try_from(&nonce[..]).map_err(|_| VmessError::Crypto)?;
         let inout = InOutBuf::new(plaintext, out).map_err(|_| VmessError::NoSpace)?;
-        let tag = match self {
-            Self::Aes(cipher) => cipher
+        let tag = match &self.kind {
+            BodyCipherKind::Aes(cipher) => cipher
                 .encrypt_inout_detached(&nonce, b"", inout)
                 .map_err(|_| VmessError::Crypto)?,
-            Self::ChaCha(cipher) => cipher
+            BodyCipherKind::ChaCha(cipher) => cipher
                 .encrypt_inout_detached(&nonce, b"", inout)
                 .map_err(|_| VmessError::Crypto)?,
         };
@@ -611,14 +617,20 @@ impl BodyCipher {
         let nonce = Nonce::try_from(&nonce[..]).map_err(|_| VmessError::Crypto)?;
         let tag = aes_gcm::Tag::try_from(tag).map_err(|_| VmessError::AuthenticationFailed)?;
         let inout = InOutBuf::new(ciphertext, out).map_err(|_| VmessError::NoSpace)?;
-        match self {
-            Self::Aes(cipher) => cipher
+        match &self.kind {
+            BodyCipherKind::Aes(cipher) => cipher
                 .decrypt_inout_detached(&nonce, b"", inout, &tag)
                 .map_err(|_| VmessError::AuthenticationFailed),
-            Self::ChaCha(cipher) => cipher
+            BodyCipherKind::ChaCha(cipher) => cipher
                 .decrypt_inout_detached(&nonce, b"", inout, &tag)
                 .map_err(|_| VmessError::AuthenticationFailed),
         }
+    }
+}
+
+impl Drop for BodyCipher {
+    fn drop(&mut self) {
+        self.key.zeroize();
     }
 }
 

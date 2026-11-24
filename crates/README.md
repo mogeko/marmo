@@ -5,7 +5,7 @@ Four crates, one dependency direction, no optional transport backends.
 | Crate | Purpose | Published |
 | --- | --- | --- |
 | `marmo` | `Instance`, config, routing, inbounds, outbounds, metrics, public API | yes |
-| `marmo-proto` | HTTP/1, SOCKS5, SS2022, Trojan, VLESS, XUDP codecs; no I/O, no tokio | yes |
+| `marmo-proto` | HTTP/1, SOCKS5, SS2022, Trojan, VLESS, VMess, Mux.Cool codecs; no I/O, no tokio | yes |
 | `marmo-net` | `Endpoint`, CIDR, `Network`; no protocols | yes |
 | `marmo-transport` | stream traits, `Layer` adapters (TLS/WS/H2), relay | yes |
 
@@ -50,9 +50,9 @@ tag runs the `Release` workflow.
 - Errors are `thiserror` enums, `#[non_exhaustive]`; `anyhow` stays in examples
   and tests. Config is schema version 2; TLS credentials are inline PEM
   (ADR-0023).
-- Every `marmo-proto` decoder has a fuzz target and a fixture, including the
-  HTTP/1 request and CONNECT response parser and Mux.Cool metadata. Every bug
-  fix adds a regression test.
+- Every `marmo-proto` decoder has a fuzz target. Wire-format fixtures cover
+  the encoder-backed codecs, including the HTTP/1 request and CONNECT response
+  parser and Mux.Cool metadata. Every bug fix adds a regression test.
 - Public items need documentation. `missing_docs` is denied by CI.
 - License is MIT OR Apache-2.0. Dependency changes record a
   `cargo tree --format '{l}'` review; CI rejects GPL/AGPL/MPL. Apache-2.0-only

@@ -23,9 +23,16 @@ impl DomainName {
     pub const MAX_LEN: usize = 253;
 
     /// Validates and stores a domain name.
+    ///
+    /// A single trailing dot (the DNS root label) is removed so routing sees
+    /// one canonical form. More than one trailing dot is rejected.
     pub fn parse(name: &str) -> Result<Self, EndpointError> {
+        let name = name.strip_suffix('.').unwrap_or(name);
         if name.is_empty() {
             return Err(EndpointError::EmptyHost);
+        }
+        if name.ends_with('.') {
+            return Err(EndpointError::InvalidHost);
         }
         if name.len() > Self::MAX_LEN {
             return Err(EndpointError::DomainTooLong);
@@ -361,6 +368,21 @@ mod tests {
         assert_eq!(DomainName::parse("a/b"), Err(EndpointError::InvalidHost));
         let long = "a".repeat(DomainName::MAX_LEN + 1);
         assert_eq!(DomainName::parse(&long), Err(EndpointError::DomainTooLong));
+    }
+
+    #[test]
+    fn strips_one_trailing_dot() {
+        let endpoint = Endpoint::parse("Example.COM.:443").expect("parse");
+        assert_eq!(endpoint.domain(), Some("example.com"));
+        assert_eq!(
+            DomainName::parse("example.com.").expect("domain").as_str(),
+            "example.com"
+        );
+        assert_eq!(DomainName::parse("."), Err(EndpointError::EmptyHost));
+        assert_eq!(
+            DomainName::parse("example.com.."),
+            Err(EndpointError::InvalidHost)
+        );
     }
 
     #[test]
