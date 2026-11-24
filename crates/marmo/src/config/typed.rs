@@ -15,7 +15,7 @@ use super::{
 ///
 /// The protocol variant carries exactly the fields that protocol uses; endpoint
 /// and UUID parsing has already happened. Construct one through
-/// [`ConfigBuilder::inbound`].
+/// [`super::ConfigBuilder::inbound`].
 #[derive(Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Inbound {
@@ -293,7 +293,7 @@ impl Inbound {
 
 /// A validated outbound or selector.
 ///
-/// Construct one through [`ConfigBuilder::outbound`].
+/// Construct one through [`super::ConfigBuilder::outbound`].
 #[derive(Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Outbound {
