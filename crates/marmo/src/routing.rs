@@ -36,6 +36,7 @@ impl OutboundId {
 
 /// Result of routing one connection or UDP session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum Action {
     /// Dial this outbound.
     Route(OutboundId),
@@ -47,6 +48,7 @@ pub enum Action {
 
 /// Why a connection was rejected.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum RejectReason {
     /// No rule matched and the final action is not a route.
     NoRoute,
