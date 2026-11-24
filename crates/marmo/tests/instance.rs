@@ -117,6 +117,42 @@ async fn relays_through_socks5_connect() {
     echo_task.abort();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn relays_on_a_multi_thread_runtime() {
+    let (echo, echo_task) = echo_server().await;
+    let (address, handle, serve) = start(DIRECT).await;
+
+    let mut client = TcpStream::connect(address).await.expect("connect");
+    assert_eq!(socks5_connect(&mut client, echo).await, 0);
+    client.write_all(b"multi").await.expect("write");
+    let mut buffer = [0_u8; 5];
+    client.read_exact(&mut buffer).await.expect("read");
+    assert_eq!(&buffer, b"multi");
+
+    stop(handle, serve).await;
+    echo_task.abort();
+}
+
+#[tokio::test]
+async fn silent_handshake_hits_the_absolute_deadline() {
+    let json = r#"{
+      "limits": { "handshake_timeout_s": 1, "idle_timeout_s": 5 },
+      "inbounds": [
+        { "tag": "socks", "protocol": "socks5", "listen": "127.0.0.1:0" }
+      ],
+      "route": { "final": "direct" }
+    }"#;
+    let (address, handle, serve) = start(json).await;
+    let mut client = TcpStream::connect(address).await.expect("connect");
+    let mut buffer = [0_u8; 1];
+    let result = timeout(Duration::from_secs(3), client.read(&mut buffer))
+        .await
+        .expect("handshake timeout");
+    assert!(matches!(result, Ok(0) | Err(_)));
+    assert!(handle.metrics().timeouts_handshake >= 1);
+    stop(handle, serve).await;
+}
+
 #[tokio::test]
 async fn routes_to_a_configured_outbound() {
     let (echo, echo_task) = echo_server().await;
