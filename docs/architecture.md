@@ -119,7 +119,9 @@ Rules:
 - **Timeouts are local.** Handshake, idle, and half-close deadlines use
   `tokio::time::timeout` or `Sleep` inside `select!`. A small per-listener
   reaper expires Shadowsocks UDP sessions; there is no global connection or
-  deadline registry. Admission control is a `Semaphore` permit.
+  deadline registry. Admission control is a `Semaphore` permit. ADR-0015's
+  2026-11-20 implementation amendment describes an earlier reaper design; the
+  current Rust tree uses local deadlines plus that per-listener table reaper.
 - **Dropping is cancellation.** A dropped connection future must leave the
   session table, metrics, and peer stream in a consistent state. Every
   `select!` branch is either cancel-safe or is not dropped (ADR-0017).
