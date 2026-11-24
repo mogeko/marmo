@@ -1,6 +1,6 @@
 # ADR-0032: Validated configuration and runtime limits
 
-- Status: Proposed
+- Status: Accepted (2026-11-24)
 - Date: 2026-11-24
 - Deciders: @mogeko
 - Related: ADR-0008, ADR-0017, ADR-0028, ADR-0029, ADR-0030
@@ -192,7 +192,7 @@ Tests and observation:
 
 ## Approval
 
-- [ ] Accept the recommendation (opaque validated `Config`, `ConfigBuilder`,
+- [x] Accept the recommendation (opaque validated `Config`, `ConfigBuilder`,
   typed `Inbound`/`Outbound`, `Limits`/`RuntimeLimits` split).
 - [ ] Choose an alternative: keep the current public DTO and validation path.
 - [ ] Choose a different limits naming scheme: ...

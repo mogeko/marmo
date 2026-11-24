@@ -1,6 +1,6 @@
 # ADR-0033: Datagram boundary for UDP outbounds
 
-- Status: Proposed
+- Status: Accepted (2026-11-24)
 - Date: 2026-11-24
 - Deciders: @mogeko
 - Related: ADR-0004, ADR-0017, ADR-0027, ADR-0031
@@ -155,7 +155,7 @@ Tests and observation:
 
 ## Approval
 
-- [ ] Accept the recommendation (`Datagram`, `BoxDatagram`,
+- [x] Accept the recommendation (`Datagram`, `BoxDatagram`,
   `DatagramError::NoReply`, remove `UdpOutbound`).
 - [ ] Keep the `UdpOutbound` enum and defer this to P3-1.
 - [ ] Make the trait public.

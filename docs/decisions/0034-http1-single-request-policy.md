@@ -1,6 +1,6 @@
 # ADR-0034: HTTP/1 single-request forwarding policy
 
-- Status: Proposed
+- Status: Accepted (2026-11-24)
 - Date: 2026-11-24
 - Deciders: @mogeko
 - Related: ADR-0008, ADR-0018, ADR-0032
@@ -109,7 +109,7 @@ Tests and observation:
 
 ## Approval
 
-- [ ] Accept Option A now and P4-6 for full framing/pipelining.
+- [x] Accept Option A now and P4-6 for full framing/pipelining.
 - [ ] Implement Option B now.
 - [ ] Keep the current behavior and reword the docs only.
 - [ ] Choose a different request-boundary policy: ...
