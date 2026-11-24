@@ -40,7 +40,7 @@ use crate::dns::DnsRuntime;
 use crate::inbound::{self, http, socks5};
 use crate::limits::Limits;
 use crate::metrics::{MetricEvent, Metrics, MetricsSink, MetricsSnapshot};
-use crate::outbound::{self, Outbound, http_connect, udp::UdpOutbound};
+use crate::outbound::{self, Outbound, datagram::BoxDatagram, http_connect};
 use crate::process::{ProcessRequest, ProcessResolver, ProcessRuntime};
 use crate::routing::{Action, Metadata, Router, RoutingError};
 use crate::ruleset::{DomainSet, IpSet, RuleSets};
@@ -1092,7 +1092,7 @@ impl Context {
     /// destination, such as Trojan UDP ASSOCIATE.
     pub(crate) async fn udp_outbound(
         &self, action: Action, ipv4: bool, target: &Endpoint,
-    ) -> io::Result<Option<UdpOutbound>> {
+    ) -> io::Result<Option<BoxDatagram>> {
         match action {
             Action::Direct => self.direct.connect_datagram(target, ipv4).await,
             Action::Route(id) => match self.outbounds.get(id.index() as usize) {

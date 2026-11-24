@@ -4,7 +4,6 @@ use std::io;
 use std::sync::{Arc, Mutex};
 
 use marmo_net::{Endpoint, Network};
-use marmo_proto::vless::MAX_UDP_PAYLOAD;
 use marmo_proto::vmess::{
     COMMAND_MUX, COMMAND_TCP, COMMAND_UDP, ChunkDecoder, ChunkEncoder, CmdKey, REQUEST_HEADER_MAX,
     Request, RequestProgress, encode_response, is_mux_target, request_progress, response_keys,
@@ -18,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::deadline::{Deadline, wait_for_activity};
 use crate::instance::Context;
-use crate::outbound::udp::UdpOutbound;
+use crate::outbound::datagram::{BoxDatagram, DatagramError};
 use crate::routing::{Action, Metadata};
 use crate::sniff::{self, Policy};
 use crate::vmess::{ChunkReader, ChunkStream, ChunkWriter, ReplayFilter, now_unix, random};
@@ -361,9 +360,9 @@ async fn handle_mux(
 
 async fn reply_loop(
     mut frames: ChunkWriter<WriteHalf<BoxStream>>, mut receiver: mpsc::Receiver<Vec<u8>>,
-    mut outbound: UdpOutbound, target: Endpoint, token: CancellationToken, activity: Arc<Notify>,
+    mut outbound: BoxDatagram, target: Endpoint, token: CancellationToken, activity: Arc<Notify>,
 ) {
-    let mut buffer = vec![0_u8; MAX_UDP_PAYLOAD];
+    let mut buffer = vec![0_u8; outbound.max_datagram_size()];
     loop {
         tokio::select! {
             _ = token.cancelled() => break,
@@ -376,8 +375,10 @@ async fn reply_loop(
                 }
             }
             received = outbound.recv_from(&mut buffer) => {
-                let Ok((length, _source)) = received else {
-                    break;
+                let (length, _source) = match received {
+                    Ok(reply) => reply,
+                    Err(DatagramError::NoReply) => continue,
+                    Err(DatagramError::Io(_)) => break,
                 };
                 activity.notify_one();
                 if frames.write(&buffer[..length]).await.is_err() {

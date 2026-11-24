@@ -62,7 +62,8 @@ impl crate::outbound::Outbound for VlessOutbound {
 
     fn connect_datagram<'a>(
         &'a self, target: &'a Endpoint, _ipv4: bool,
-    ) -> marmo_transport::BoxFuture<'a, io::Result<Option<crate::outbound::udp::UdpOutbound>>> {
+    ) -> marmo_transport::BoxFuture<'a, io::Result<Option<crate::outbound::datagram::BoxDatagram>>>
+    {
         Box::pin(async move {
             if self.mux {
                 let Some(pool) = self.pool.get() else {
@@ -72,9 +73,9 @@ impl crate::outbound::Outbound for VlessOutbound {
                     ));
                 };
                 let datagram = pool.open_udp(target).await?;
-                return Ok(Some(crate::outbound::udp::UdpOutbound::Mux(Box::new(
-                    datagram,
-                ))));
+                return Ok(Some(
+                    Box::new(datagram) as crate::outbound::datagram::BoxDatagram
+                ));
             }
             let h2_pool = self.h2_pool()?;
             if self.xudp {
@@ -87,7 +88,9 @@ impl crate::outbound::Outbound for VlessOutbound {
                     h2_pool,
                 )
                 .await?;
-                Ok(Some(crate::outbound::udp::UdpOutbound::VlessXudp(client)))
+                Ok(Some(
+                    Box::new(client) as crate::outbound::datagram::BoxDatagram
+                ))
             } else {
                 let client = connect_udp(
                     &self.dialer,
@@ -98,7 +101,9 @@ impl crate::outbound::Outbound for VlessOutbound {
                     h2_pool,
                 )
                 .await?;
-                Ok(Some(crate::outbound::udp::UdpOutbound::Vless(client)))
+                Ok(Some(
+                    Box::new(client) as crate::outbound::datagram::BoxDatagram
+                ))
             }
         })
     }

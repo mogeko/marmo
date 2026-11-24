@@ -23,8 +23,8 @@ use zeroize::Zeroizing;
 
 use crate::deadline::{Deadline, wait_for_activity};
 use crate::instance::Context;
+use crate::outbound::datagram::{BoxDatagram, DatagramError};
 use crate::outbound::trojan::tls_error;
-use crate::outbound::udp::UdpOutbound;
 use crate::routing::{Action, Metadata};
 use crate::sniff::{self, Policy};
 use crate::trojan::{FrameReader, write_frame};
@@ -251,7 +251,7 @@ async fn reply_loop(
     mut writer: WriteHalf<BoxStream>, mut receiver: mpsc::Receiver<(Action, Endpoint, Vec<u8>)>,
     context: Arc<Context>, ipv4: bool, token: CancellationToken, activity: Arc<Notify>,
 ) {
-    let mut outbound: Option<(Action, UdpOutbound)> = None;
+    let mut outbound: Option<(Action, BoxDatagram)> = None;
     let mut buffer = vec![0_u8; MAX_UDP_PAYLOAD];
     loop {
         tokio::select! {
@@ -288,8 +288,10 @@ async fn reply_loop(
                     None => std::future::pending().await,
                 }
             } => {
-                let Ok((length, source)) = received else {
-                    break;
+                let (length, source) = match received {
+                    Ok(reply) => reply,
+                    Err(DatagramError::NoReply) => continue,
+                    Err(DatagramError::Io(_)) => break,
                 };
                 activity.notify_one();
                 if write_frame(&mut writer, &source, &buffer[..length]).await.is_err() {

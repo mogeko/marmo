@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::{HealthCheck, Strategy};
 use crate::metrics::{MetricEvent, Metrics};
-use crate::outbound::udp::UdpOutbound;
+use crate::outbound::datagram::BoxDatagram;
 use crate::outbound::{Connected, Outbound};
 
 /// A selector outbound over a flat list of nodes (ADR-0006).
@@ -137,7 +137,7 @@ impl Outbound for SelectorOutbound {
 
     fn connect_datagram<'a>(
         &'a self, target: &'a Endpoint, ipv4: bool,
-    ) -> BoxFuture<'a, std::io::Result<Option<UdpOutbound>>> {
+    ) -> BoxFuture<'a, std::io::Result<Option<BoxDatagram>>> {
         Box::pin(async move {
             let start = self.start();
             if !matches!(self.strategy, Strategy::Fallback) {
@@ -256,7 +256,8 @@ mod tests {
 
         fn connect_datagram<'a>(
             &'a self, _target: &'a Endpoint, _ipv4: bool,
-        ) -> BoxFuture<'a, std::io::Result<Option<UdpOutbound>>> {
+        ) -> BoxFuture<'a, std::io::Result<Option<crate::outbound::datagram::BoxDatagram>>>
+        {
             Box::pin(async { Ok(None) })
         }
     }

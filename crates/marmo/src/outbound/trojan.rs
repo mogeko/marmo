@@ -59,7 +59,8 @@ impl crate::outbound::Outbound for TrojanOutbound {
 
     fn connect_datagram<'a>(
         &'a self, target: &'a Endpoint, _ipv4: bool,
-    ) -> marmo_transport::BoxFuture<'a, io::Result<Option<crate::outbound::udp::UdpOutbound>>> {
+    ) -> marmo_transport::BoxFuture<'a, io::Result<Option<crate::outbound::datagram::BoxDatagram>>>
+    {
         Box::pin(async move {
             let client = connect_udp(
                 &self.dialer,
@@ -69,7 +70,9 @@ impl crate::outbound::Outbound for TrojanOutbound {
                 target,
             )
             .await?;
-            Ok(Some(crate::outbound::udp::UdpOutbound::Trojan(client)))
+            Ok(Some(
+                Box::new(client) as crate::outbound::datagram::BoxDatagram
+            ))
         })
     }
 }

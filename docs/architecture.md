@@ -232,12 +232,14 @@ Contract:
 - Ownership is explicit: the connection task owns both streams and every
   buffer they borrow.
 
-Datagrams currently use the internal `UdpOutbound` enum in
-`outbound/udp.rs`: a wildcard direct socket with a bounded destination set, or
-a protocol-owned channel (Shadowsocks, Trojan, VLESS/XUDP, VMess, Mux.Cool).
-Each implementation bounds its queues and drops or rejects datagrams under
-pressure. A transport-neutral `Datagram` trait is part of the P3-1 QUIC work;
-it is not part of the current API.
+Datagrams use the internal object-safe `Datagram` boundary in
+`outbound/datagram.rs` (ADR-0033): `send_to`/`recv_from` return a
+`DatagramError`, and `BoxDatagram` mirrors `BoxStream`. Implementations cover a
+direct socket with a bounded destination set, or a protocol-owned association
+(Shadowsocks, Trojan, VLESS/XUDP, VMess, Mux.Cool). Each bounds its queues and
+drops or rejects datagrams under pressure. Replies from unknown sources are not
+an I/O error: a direct association reports `DatagramError::NoReply`, which
+inbound UDP loops treat as "keep waiting" rather than closing the association.
 
 ### 8.3 Transport composition
 
@@ -304,7 +306,7 @@ pub(crate) trait Outbound: Send + Sync {
         -> BoxFuture<'a, io::Result<Connected>>;
 
     fn connect_datagram<'a>(&'a self, target: &'a Endpoint, ipv4: bool)
-        -> BoxFuture<'a, io::Result<Option<UdpOutbound>>>;
+        -> BoxFuture<'a, io::Result<Option<BoxDatagram>>>;
 
     fn is_direct(&self) -> bool;
     fn udp_direct(&self) -> bool;

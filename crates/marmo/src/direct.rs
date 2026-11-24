@@ -149,12 +149,16 @@ impl crate::outbound::Outbound for DirectOutbound {
 
     fn connect_datagram<'a>(
         &'a self, _target: &'a Endpoint, ipv4: bool,
-    ) -> marmo_transport::BoxFuture<'a, std::io::Result<Option<crate::outbound::udp::UdpOutbound>>>
-    {
+    ) -> marmo_transport::BoxFuture<
+        'a,
+        std::io::Result<Option<crate::outbound::datagram::BoxDatagram>>,
+    > {
         Box::pin(async move {
             let socket =
-                crate::outbound::udp::UdpOutbound::direct(self.dialer.clone(), ipv4).await?;
-            Ok(Some(socket))
+                crate::outbound::datagram::DirectDatagram::new(self.dialer.clone(), ipv4).await?;
+            Ok(Some(
+                Box::new(socket) as crate::outbound::datagram::BoxDatagram
+            ))
         })
     }
 

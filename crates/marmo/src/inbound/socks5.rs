@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::deadline::Deadline;
 use crate::instance::Context;
-use crate::outbound::udp::UdpOutbound;
+use crate::outbound::datagram::{BoxDatagram, DatagramError};
 use crate::routing::{Action, Metadata};
 use crate::sniff::{self, Policy};
 
@@ -239,12 +239,12 @@ enum UdpEvent {
     Cancel,
     Control(io::Result<usize>),
     Client(io::Result<(usize, SocketAddr)>),
-    Upstream(io::Result<(usize, Endpoint)>),
+    Upstream(Result<(usize, Endpoint), DatagramError>),
 }
 
 async fn udp_event(
     token: &CancellationToken, client: &mut TcpStream, client_socket: &UdpSocket,
-    upstream: &mut Option<UdpOutbound>, client_buffer: &mut [u8], upstream_buffer: &mut [u8],
+    upstream: &mut Option<BoxDatagram>, client_buffer: &mut [u8], upstream_buffer: &mut [u8],
     control_buffer: &mut [u8],
 ) -> UdpEvent {
     let awaiting = async {
@@ -291,7 +291,7 @@ async fn udp_associate(
 
     let tcp_peer_ip = client.peer_addr().ok().map(|address| address.ip());
     let mut client_address = None;
-    let mut upstream: Option<UdpOutbound> = None;
+    let mut upstream: Option<BoxDatagram> = None;
     let mut upstream_action: Option<Action> = None;
     let mut client_buffer = vec![0_u8; UDP_BUFFER];
     let mut upstream_buffer = vec![0_u8; UDP_BUFFER];

@@ -51,7 +51,8 @@ impl crate::outbound::Outbound for ShadowsocksOutbound {
 
     fn connect_datagram<'a>(
         &'a self, _target: &'a Endpoint, _ipv4: bool,
-    ) -> marmo_transport::BoxFuture<'a, io::Result<Option<crate::outbound::udp::UdpOutbound>>> {
+    ) -> marmo_transport::BoxFuture<'a, io::Result<Option<crate::outbound::datagram::BoxDatagram>>>
+    {
         Box::pin(async move {
             let client = crate::shadowsocks::SsUdpClient::connect(
                 &self.dialer,
@@ -60,7 +61,9 @@ impl crate::outbound::Outbound for ShadowsocksOutbound {
                 Arc::clone(&self.key),
             )
             .await?;
-            Ok(Some(crate::outbound::udp::UdpOutbound::Shadowsocks(client)))
+            Ok(Some(
+                Box::new(client) as crate::outbound::datagram::BoxDatagram
+            ))
         })
     }
 }

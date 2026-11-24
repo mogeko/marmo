@@ -117,6 +117,57 @@ async fn udp_associate_relays_datagrams() {
 }
 
 #[tokio::test]
+async fn unknown_reply_sources_do_not_close_the_association() {
+    let target = UdpSocket::bind(("127.0.0.1", 0)).await.expect("bind");
+    let target_address = target.local_addr().expect("addr");
+
+    let (address, handle, serve) = start(DIRECT).await;
+    let mut control = TcpStream::connect(address).await.expect("control");
+    control.write_all(&[5, 1, 0]).await.expect("greeting");
+    let mut method = [0_u8; 2];
+    control.read_exact(&mut method).await.expect("method");
+    control
+        .write_all(&[5, 3, 0, 1, 0, 0, 0, 0, 0, 0])
+        .await
+        .expect("associate");
+    let (_, relay) = read_reply(&mut control).await;
+
+    let client = UdpSocket::bind(("127.0.0.1", 0)).await.expect("client udp");
+    let packet = udp_packet(target_address, 0, b"ping");
+    client.send_to(&packet, relay).await.expect("send");
+
+    let mut buffer = [0_u8; 65_535];
+    let (length, upstream) = timeout(Duration::from_secs(2), target.recv_from(&mut buffer))
+        .await
+        .expect("target timeout")
+        .expect("target recv");
+    assert_eq!(&buffer[..length], b"ping");
+
+    // More unrelated packets than one receive attempt tolerates. The direct
+    // datagram must report NoReply and the relay must keep waiting.
+    let injector = UdpSocket::bind(("127.0.0.1", 0)).await.expect("injector");
+    for _ in 0..2 * 32 {
+        injector
+            .send_to(b"injected", upstream)
+            .await
+            .expect("inject");
+    }
+    target
+        .send_to(b"still-alive", upstream)
+        .await
+        .expect("reply");
+
+    let (length, _) = timeout(Duration::from_secs(2), client.recv_from(&mut buffer))
+        .await
+        .expect("reply timeout")
+        .expect("reply");
+    assert_eq!(&buffer[10..length], b"still-alive");
+
+    let _ = control.shutdown().await;
+    stop(handle, serve).await;
+}
+
+#[tokio::test]
 async fn fragmented_datagrams_are_dropped() {
     let echo = UdpSocket::bind(("127.0.0.1", 0)).await.expect("bind");
     let echo_address = echo.local_addr().expect("addr");

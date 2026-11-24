@@ -9,8 +9,9 @@ use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::outbound::udp::UdpOutbound;
+use crate::outbound::datagram::BoxDatagram;
 
+pub(crate) mod datagram;
 pub(crate) mod h2;
 pub(crate) mod http_connect;
 pub(crate) mod mux;
@@ -18,7 +19,6 @@ pub(crate) mod selector;
 pub(crate) mod shadowsocks;
 pub(crate) mod stream_pool;
 pub(crate) mod trojan;
-pub(crate) mod udp;
 pub(crate) mod vless;
 pub(crate) mod vmess;
 
@@ -46,7 +46,7 @@ pub(crate) trait Outbound: Send + Sync {
     /// Opens a datagram path, or `None` when the outbound has no UDP.
     fn connect_datagram<'a>(
         &'a self, target: &'a Endpoint, ipv4: bool,
-    ) -> BoxFuture<'a, io::Result<Option<UdpOutbound>>>;
+    ) -> BoxFuture<'a, io::Result<Option<BoxDatagram>>>;
 
     /// Whether this outbound is the direct dialer.
     fn is_direct(&self) -> bool {
