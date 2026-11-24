@@ -183,7 +183,13 @@ struct CompiledRule {
 
 impl CompiledRule {
     fn matches(&self, metadata: &Metadata<'_>) -> bool {
-        let domain = metadata.domain.or_else(|| metadata.destination.domain());
+        // Normalize a trailing DNS root label even when a caller supplied the
+        // metadata directly. Endpoint parsing already canonicalizes names, but
+        // the router is a public boundary and must not depend on that.
+        let domain = metadata
+            .domain
+            .or_else(|| metadata.destination.domain())
+            .map(|domain| domain.strip_suffix('.').unwrap_or(domain));
 
         if !self.domains.is_empty() {
             let Some(domain) = domain else {
@@ -192,7 +198,7 @@ impl CompiledRule {
             if !self
                 .domains
                 .iter()
-                .any(|expected| expected.as_ref() == domain)
+                .any(|expected| expected.eq_ignore_ascii_case(domain))
             {
                 return false;
             }
@@ -434,16 +440,20 @@ fn compile_action(
 /// `www.example.com` matches `example.com`, but `notexample.com` does not.
 /// A suffix that starts with `.` is matched literally.
 fn matches_suffix(domain: &str, suffix: &str) -> bool {
-    if domain == suffix {
-        return true;
+    if domain.len() == suffix.len() {
+        return domain.eq_ignore_ascii_case(suffix);
     }
-    if domain.len() <= suffix.len() || !domain.ends_with(suffix) {
+    if domain.len() < suffix.len() {
+        return false;
+    }
+    let start = domain.len() - suffix.len();
+    if !domain[start..].eq_ignore_ascii_case(suffix) {
         return false;
     }
     if suffix.starts_with('.') {
         return true;
     }
-    domain.as_bytes()[domain.len() - suffix.len() - 1] == b'.'
+    domain.as_bytes()[start - 1] == b'.'
 }
 
 /// Why a rule set could not be compiled.
@@ -566,6 +576,18 @@ mod tests {
         assert!(matches_suffix("www.example.com", ".example.com"));
         assert!(!matches_suffix("notexample.com", "example.com"));
         assert!(!matches_suffix("example.com.evil", "example.com"));
+        assert!(matches_suffix("WWW.Example.COM", "example.com"));
+    }
+
+    #[test]
+    fn trailing_dot_does_not_bypass_domain_rules() {
+        let router = router(ROUTES);
+        let mut metadata = metadata(None, ip(9, 443), Network::Tcp);
+        metadata.domain = Some("WWW.Example.COM.");
+        assert_eq!(
+            router.route(&metadata),
+            Action::Route(OutboundId::from_index(0))
+        );
     }
 
     #[test]
