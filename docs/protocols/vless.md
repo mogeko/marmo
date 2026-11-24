@@ -71,7 +71,7 @@ uses `rustls` for both TLS roles, `ws-net` for WebSocket, and `h2` for HTTP/2
   non-Xray servers.
 - Zero-length UDP frames are skipped on receive and dropped on send, matching
   the base Xray behavior.
-- Request header is written once, in a single vectored write where possible.
+- Request header is written once with `write_all` before any payload.
 - TLS:
   - SNI and hostname verification use `tls.sni`, or the server domain name when
     `sni` is absent. The client verifies with the platform verifier.

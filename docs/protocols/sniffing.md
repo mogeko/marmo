@@ -34,8 +34,9 @@ HTTP/2 is plaintext only. Inside TLS, the sniffer reports the SNI from the
   every byte. A prefix that is only plausible as HTTP starts with an uppercase
   ASCII method token; arbitrary binary and line protocols such as SSH are not
   delayed waiting for a request head.
-- A truncated prefix waits for more bytes under the inbound handshake deadline;
-  on EOF or timeout the connection closes as with any other handshake failure.
+- A truncated prefix waits for more bytes under the inbound handshake deadline.
+  A deadline expiry closes the connection; EOF during the peek ends the peek,
+  replays the buffered bytes, and continues routing without a sniffed domain.
 - An inbound-provided domain (SOCKS5 domain request, HTTP absolute target,
   VLESS/VMess/Trojan target) always wins over a sniffed domain.
 - UDP datagrams and Mux.Cool sessions are not sniffed; they are routed on the

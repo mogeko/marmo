@@ -21,12 +21,15 @@ Source: [SIP022 AEAD-2022 Ciphers](https://github.com/shadowsocks/shadowsocks-or
 - UDP packet: AES-block-encrypted separate header (session ID, packet ID),
   AEAD body encrypted with the session subkey and the separate-header nonce.
 - UDP server: bounded session table keyed by client session ID, per-session
-  outbound UDP socket and reply task, last-seen client address, 60-second idle
-  eviction, and a sliding replay window.
+  outbound UDP socket and reply task, last-seen client address, idle eviction
+  (never shorter than 60 seconds), and a sliding replay window.
 - UDP client: one client session ID and packet counter per association,
   server-session tracking, and response replay window.
-- Server checks timestamps within 30 seconds and rejects replayed request salts
-  for 60 seconds with a bounded in-memory cache.
+- Server checks timestamps within 30 seconds for TCP requests and UDP packets.
+  TCP request salts are rejected for 60 seconds with a bounded in-memory cache;
+  UDP packets outside the timestamp window are dropped before any session or
+  replay-window state is created. The UDP client applies the same timestamp
+  check to server packets.
 - Request padding is 1..64 bytes; the server rejects a request with neither
   padding nor initial payload.
 - AES-128/256-GCM uses the `aes-gcm` crate; BLAKE3 uses `blake3`. No handwritten primitives.

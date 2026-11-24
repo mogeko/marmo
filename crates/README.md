@@ -5,7 +5,7 @@ Four crates, one dependency direction, no optional transport backends.
 | Crate | Purpose | Published |
 | --- | --- | --- |
 | `marmo` | `Instance`, config, routing, inbounds, outbounds, metrics, public API | yes |
-| `marmo-proto` | HTTP/1, SOCKS5, SS2022, Trojan, VLESS, XUDP codecs; no I/O, no tokio | yes |
+| `marmo-proto` | HTTP/1, SOCKS5, SS2022, Trojan, VLESS, VMess, Mux.Cool codecs; no I/O, no tokio | yes |
 | `marmo-net` | `Endpoint`, CIDR, `Network`; no protocols | yes |
 | `marmo-transport` | stream traits, `Layer` adapters (TLS/WS/H2), relay | yes |
 

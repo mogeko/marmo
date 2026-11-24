@@ -24,7 +24,9 @@ pre-1.0.
   TCP, direct UDP, and Mux.Cool. `mux: true` enables client-side pooling for
   both, over TCP, TLS, WebSocket, and HTTP/2. HTTP/2 connections also carry
   many streams per connection and are pooled for both protocols (ADR-0031).
-- **Routing:** exact and suffix domains, IP CIDR, destination port, and network.
+- **Routing:** exact, suffix, keyword, and injected domain sets; IP CIDR and
+  injected IP sets; destination port and port ranges; network; inbound tag;
+  and injected process identity.
 - **Limits:** global connection cap plus handshake, idle, and half-close
   timeouts.
 - **Metrics:** connection, HTTP/2 stream, byte, timeout, UDP-session,

@@ -24,10 +24,8 @@ provided by `rustls` through `marmo-transport` in both directions.
   `ATYP | DST.ADDR | DST.PORT | Length (2B BE) | CRLF | Payload`.
   Every frame carries its own address, so one association can switch
   destinations. Server-to-client frames carry the source address.
-- The first TCP write is coalesced with the request header when the stream
-  layer provides a single buffer; a read that happens first sends the header
-  alone. A mutex/atomic pair prevents a concurrent read and write from sending
-  the header twice.
+- The request header is written once with `write_all` before any payload; the
+  header is not repeated by concurrent reads or writes.
 - Inbound UDP routes each datagram independently. The first accepted datagram
   selects the outbound tag; later datagrams that select a different tag are
   dropped, matching SOCKS5 UDP ASSOCIATE. A single `PacketConn` may send to
@@ -45,8 +43,8 @@ provided by `rustls` through `marmo-transport` in both directions.
   fallback path; no payload is logged.
 - Strict config validation:
   - inbound `password` is required and non-empty;
-  - inbound `tls` is required, with non-empty certificate and private-key
-    paths and a positive `handshake_timeout_s`;
+  - inbound `tls` is required, with inline certificate and private-key PEM and
+    a positive `handshake_timeout_s`;
   - inbound `fallback` is optional, must parse as `host:port`, and is rejected
     on other protocols;
   - outbound `server` and `password` are required;

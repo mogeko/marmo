@@ -111,11 +111,13 @@ Rules:
 - **One cancellation tree.** `Instance` owns a root
   `CancellationToken`; listeners and connections hold child tokens. Shutdown
   cancels the root and awaits the task sets with a grace timeout.
-- **Every task is owned.** Listeners use a `JoinSet`; UDP sessions use a
-  `TaskTracker`. No bare `tokio::spawn` outside those owners.
+- **Every task is owned.** Listeners use a `JoinSet`, outbound Mux pools use a
+  `TaskTracker`, and other background work holds its `JoinHandle` or abort
+  handle explicitly. No task is detached without an owner.
 - **Timeouts are local.** Handshake, idle, and half-close deadlines use
-  `tokio::time::timeout` or `Sleep` inside `select!`. There is no reaper and no
-  global deadline registry; admission control is a `Semaphore` permit.
+  `tokio::time::timeout` or `Sleep` inside `select!`. A small per-listener
+  reaper expires Shadowsocks UDP sessions; there is no global connection or
+  deadline registry. Admission control is a `Semaphore` permit.
 - **Dropping is cancellation.** A dropped connection future must leave the
   session table, metrics, and peer stream in a consistent state. Every
   `select!` branch is either cancel-safe or is not dropped (ADR-0017).
@@ -137,7 +139,7 @@ flavors; no design decision may assume a work-stealing scheduler.
 
 | Layer | Crate | Responsibility | Must not know about |
 | --- | --- | --- | --- |
-| core | `marmo` | limits, errors, metrics, config, logging | protocols, sockets |
+| core | `marmo` | limits, errors, metrics, config | protocols, sockets |
 | net | `marmo-net` | addresses, endpoints, network | proxy protocols |
 | transport | `marmo-transport` | stream/datagram adapters: TLS, WebSocket, HTTP/2, QUIC, relay | routing, config |
 | protocol | `marmo-proto` | wire codecs (header encode/decode, auth, per-connection state) | routing, config, listeners |
@@ -179,7 +181,7 @@ depends only on upstream crates and the erased stream boundary.
                      +--------------------+----------------------+
                                           |
                      +--------------------v----------------------+
-                     | net: tokio tcp/udp | socket2 | resolver   |
+                     | net: tokio tcp/udp | resolver                 |
                      +--------------------+----------------------+
                                           |
                      +--------------------v----------------------+
@@ -226,21 +228,12 @@ Contract:
 - Ownership is explicit: the connection task owns both streams and every
   buffer they borrow.
 
-Datagrams use `tokio::net::UdpSocket` for the direct case and a small trait for
-protocol-owned channels:
-
-```rust
-pub trait Datagram: Send + Sync + 'static {
-    fn send_to<'a>(&'a self, data: &'a [u8], dest: &'a Endpoint)
-        -> BoxFuture<'a, Result<(), DatagramError>>;
-    fn recv_from<'a>(&'a self, buf: &'a mut [u8])
-        -> BoxFuture<'a, Result<(usize, Endpoint), DatagramError>>;
-    fn max_datagram_size(&self) -> usize;
-}
-```
-
-Implementations bound their queues. Dropping a datagram is a session-layer
-policy decision, not a silent block inside the socket.
+Datagrams currently use the internal `UdpOutbound` enum in
+`outbound/udp.rs`: a wildcard direct socket with a bounded destination set, or
+a protocol-owned channel (Shadowsocks, Trojan, VLESS/XUDP, VMess, Mux.Cool).
+Each implementation bounds its queues and drops or rejects datagrams under
+pressure. A transport-neutral `Datagram` trait is part of the P3-1 QUIC work;
+it is not part of the current API.
 
 ### 8.3 Transport composition
 
@@ -266,63 +259,60 @@ pub trait Layer: Send + Sync {
     fn wrap<'a>(
         &'a self,
         inner: BoxStream,
-        opts: &'a LayerOptions,
-    ) -> BoxFuture<'a, Result<BoxStream, TransportError>>;
+    ) -> BoxFuture<'a, Result<BoxStream, LayerError>>;
+
+    fn accept<'a>(&'a self, inner: BoxStream)
+        -> BoxFuture<'a, Result<BoxStream, LayerError>>;
 }
 ```
 
-Layers are compiled from config into a `Vec<Box<dyn Layer>>` in spec order (for
+Layers are compiled from config into a `Vec<Arc<dyn Layer>>` in spec order (for
 example VLESS → TLS → WebSocket → TCP). Transport parameters (SNI, ALPN,
-`Host`, path, subprotocols) come from the outbound config at dial time, never
-from globals. Inbound stacks mirror the same order.
+`Host`, path, subprotocols) are bound when the layer is built, never read from
+globals. Inbound stacks mirror the same order. `accept` defaults to
+`LayerError::Unsupported` for client-only layers.
 
 ### 8.4 Inbound and metadata
 
-```rust
-pub struct Connection {
-    pub stream: Option<BoxStream>,      // None for datagram-only inbounds
-    pub datagrams: Option<Box<dyn Datagram>>,
-    pub metadata: Metadata,
-}
+There is no public `Connection` wrapper: each inbound handler owns its stream
+or datagram path and constructs `Metadata` directly.
 
-pub struct Metadata {
+```rust
+pub struct Metadata<'a> {
     pub network: Network,               // tcp | udp
     pub source: Endpoint,
     pub destination: Endpoint,          // literal IP or unresolved domain + port
-    pub domain: Option<Arc<str>>,       // inbound protocol or sniffer
-    pub inbound: InboundId,             // compiled tag index
+    pub domain: Option<&'a str>,        // inbound protocol or sniffer
+    pub inbound: Option<&'a str>,       // inbound tag
     pub process: Option<ProcessInfo>,   // injected resolver, opt-in
 }
 ```
 
-`Metadata` is immutable once routing starts. It is a plain struct owned by the
-connection task; there is no arena and no allocator threading. Anything that
-must outlive the task is an `Arc`.
+`Metadata` is immutable once routing starts. It borrows the domain and inbound
+tag for the duration of the routing call; anything that must outlive the task
+is an `Arc`.
 
 ### 8.5 Outbound
 
 ```rust
-pub trait Outbound: Send + Sync {
-    fn connect<'a>(
-        &'a self,
-        target: &'a Endpoint,
-        opts: &'a ConnectOptions,
-    ) -> BoxFuture<'a, Result<BoxStream, ConnectError>>;
+pub(crate) trait Outbound: Send + Sync {
+    fn connect<'a>(&'a self, target: &'a Endpoint)
+        -> BoxFuture<'a, io::Result<Connected>>;
 
-    fn connect_datagram<'a>(
-        &'a self,
-        target: &'a Endpoint,
-        opts: &'a ConnectOptions,
-    ) -> BoxFuture<'a, Result<Box<dyn Datagram>, ConnectError>>;
+    fn connect_datagram<'a>(&'a self, target: &'a Endpoint, ipv4: bool)
+        -> BoxFuture<'a, io::Result<Option<UdpOutbound>>>;
 
-    fn capabilities(&self) -> Capabilities;   // tcp, udp
-    fn health(&self) -> HealthSnapshot;
+    fn is_direct(&self) -> bool;
+    fn udp_direct(&self) -> bool;
+    fn start(&self, runtime: &Handle, token: &CancellationToken) -> Vec<JoinHandle<()>>;
+    fn start_health(&self, runtime: &Handle, token: &CancellationToken)
+        -> Option<JoinHandle<()>>;
 }
 ```
 
-Groups implement the same trait and contain an ordered node list. Nesting is
-limited to one level, as before. `Box<dyn Outbound>` is created once at
-startup; the connection path makes one virtual call per dial, not per byte.
+The trait is internal to the facade. Groups implement it and contain an ordered
+node list; nesting is limited to one level. `Arc<dyn Outbound>` is created once
+at startup; the connection path makes one virtual call per dial, not per byte.
 
 ### 8.6 Router
 
@@ -333,7 +323,7 @@ pub trait Router: Send + Sync {
 ```
 
 `route` is synchronous, allocation-free, and safe for concurrent reads. Rule
-targets compile to `OutboundId(u16)` instead of `&str`, so a match returns a
+targets compile to `OutboundId(u32)` instead of `&str`, so a match returns a
 small copy type. Rules are immutable after construction and live behind an
 `Arc`.
 
@@ -393,23 +383,24 @@ stream is reset without closing the shared connection (ADR-0031).
 
 ### 9.2 UDP
 
-1. The inbound receives a datagram and derives a session key:
-   `(client_endpoint, target_endpoint, inbound_id)` plus the protocol
-   association ID for SOCKS5/Trojan/VLESS.
-2. The session table (bounded, sharded, LRU-ish) creates a session on first
-   use; routing runs once per session and the chosen outbound is sticky for
-   the session lifetime.
-3. A per-session task holds a session permit, a bounded `mpsc` queue, and an
-   idle deadline. Replies go back to the client on the original path.
-4. Sessions expire on idle timeout or when the table is full (oldest idle
-   first). In current the table capacity is fixed at initialization per inbound
-   (128 for the Shadowsocks UDP listener, matching the initial implementation); a
-   configurable `max_udp_sessions` is post-1.0. UDP caps stay separate from
-   `max_connections`, as in ADR-0015.
-
-Datagrams above `max_datagram_size` are rejected with a counter, never
-fragmented by the library. There is no per-packet heap allocation on the
-forwarding path.
+- Shadowsocks 2022 has a per-listener session table keyed by client session ID,
+  capped at 128 sessions. Each session owns one wildcard UDP socket, one reply
+  task, a sliding replay window, and a bounded set of destinations whose
+  replies it accepts. Sessions expire on an idle period that is never shorter
+  than 60 seconds; when the table is full a new session is dropped rather than
+  evicting an active one. Routing is evaluated per datagram because each
+  packet carries its own destination.
+- SOCKS5, Trojan, VLESS, VMess, and Mux.Cool UDP associations are per-stream
+  rather than table entries. Routing runs per datagram; the first accepted
+  datagram selects the outbound tag, and later datagrams that select a
+  different tag are dropped. Replies go back on the original association.
+- There is no configurable `max_udp_sessions` yet; UDP caps remain separate
+  from `max_connections`, as in ADR-0015.
+- Oversized datagrams are bounded by the relay buffer and are not fragmented by
+  the library. Direct UDP paths track a bounded destination set so packets from
+  unrelated sources are not forwarded as replies. The forwarding path still
+  allocates for protocol frames and endpoint names; there is no global
+  zero-allocation guarantee.
 
 Trojan and SOCKS5 UDP associations are per-stream rather than table entries.
 Each datagram is routed independently; the first accepted datagram selects the
@@ -423,8 +414,11 @@ VLESS simple UoT binds one destination).
 - `CONNECT host:port` becomes a TCP relay; the response is sent only after the
   outbound connects.
 - Forward-proxy requests are rewritten from absolute-form to origin-form, with
-  `Host` taken from the URI authority and hop-by-hop headers stripped. Upstream
-  is forced to `Connection: close`; v1 handles one request per connection.
+  `Host` taken from the URI authority and hop-by-hop headers stripped, including
+  fields nominated by `Connection:`. Upstream is forced to
+  `Connection: close`. One request head is parsed per connection; bytes after
+  it are relayed as opaque data, and pipelined requests are not routed
+  individually.
 - HTTP/1.1 only; no request rewriting beyond the request line and headers.
 - No caching, content rewriting, or authentication beyond optional inbound
   credentials.
@@ -502,9 +496,11 @@ matcher set.
 Selection state is `AtomicU64`/`AtomicU32` per node; node-set replacement, when
 reload lands post-1.0, uses `ArcSwap` and never appears on the connect path. Health checks
 are opt-in per group: `tcp_connect` to a host:port with interval and timeout,
-driven by a task owned by the instance's `JoinSet`. Results feed an EWMA
-(`alpha = 0.2`) and a failure counter. `http_head`, jitter, and exponential
-backoff are post-1.0. No traffic is generated unless configured.
+driven by a task owned by the instance's `JoinSet`. Results feed a per-node
+EWMA (`alpha = 0.2`); a failed probe sets the node's EWMA to its maximum until
+the next success, and the instance records aggregate failure counters.
+`http_head`, jitter, and exponential backoff are post-1.0. No traffic is
+generated unless configured.
 
 ## 12. Protocol support matrix
 
@@ -552,11 +548,11 @@ the same inbound stream budget and outbound HTTP/2 pool as VLESS (ADR-0031).
 | DNS (`dns` feature) | `hickory-resolver` | UDP, TCP, DoT, DoH, TTL cache |
 | Config | `serde`, `serde_json`, `serde_path_to_error` | strict parsing, path-aware errors |
 | Errors | `thiserror` | typed errors; `anyhow` only in examples/tests |
-| Secrets | `secrecy`, `zeroize` | no secret in `Debug` or logs |
+| Secrets | `zeroize` | redacted `Debug` and explicit zeroization for credential-bearing types |
 | Buffers | `bytes` | zero-copy header parsing |
 | Reload (post-1.0) | `arc-swap` | lock-free config swap |
-| Sockets | `socket2` | keepalive, buffer sizes, `SO_REUSEADDR` |
-| IP/CIDR | `ipnet` | compiled ranges |
+| Sockets | `tokio` | TCP/UDP sockets; keepalive/buffer tuning is not implemented |
+| IP/CIDR | `std` | hand-written compiled ranges; no `ipnet` dependency |
 | Domain keywords | `aho-corasick` | inline `domain_keyword` automata |
 | Domain/IP sets and process identity | embedder-provided | `DomainSet`/`IpSet` and `ProcessResolver`; no library file or OS access |
 
@@ -646,7 +642,7 @@ For readiness, port 0 in tests, or a GUI that starts and stops the proxy:
 ```rust
 let bound = instance.bind().await?;      // binds every inbound, rolls back on error
 for addr in bound.local_addrs() {
-    tracing::info!(tag = addr.tag, network = ?addr.network, %addr.addr, "listening");
+    println!("{} {:?} {}", addr.tag, addr.network, addr.addr);
 }
 
 let ctl = bound.handle();                // Clone + Send + Sync
@@ -763,8 +759,10 @@ are the runtime-chosen traits, and `tower` compatibility is not promised.
   TLS trust store is the platform store or an inline `dns.tls.ca` PEM.
 - The library performs no filesystem I/O for credentials: `build()` and
   `bind()` never read files, and `spawn_blocking` is not needed on this path.
-- Secrets use `SecretString`/`zeroize`; `Debug` redacts passwords, UUIDs, and
-  keys. No payload, credential, SNI, or DNS query name is logged at `info`.
+- Secrets are held in ordinary owned strings/arrays with explicit `zeroize` on
+  drop and redacted `Debug` for the credential-bearing types. There is no
+  `secrecy` dependency. The library installs no logger; embedders must still
+  avoid logging raw payloads or credentials.
 - The library installs no global tracing subscriber and no signal handler; the
   embedder owns both.
 - No C ABI in v1. Semver applies to the Rust API; pre-1.0 may break between
@@ -796,9 +794,9 @@ Module boundaries inside `marmo` are enforced by review, not by the compiler.
 
 ## 16. Testing strategy
 
-- Unit tests live beside the code and need no network. `#[tokio::test]` runs
-  both `current_thread` and `multi_thread` flavors for concurrency-sensitive
-  tests.
+- Unit tests live beside the code and need no network. Most use the default
+  `current_thread` flavor; concurrency-sensitive integration tests also run
+  `multi_thread` explicitly.
 - `tokio::io::duplex` replaces sockets for codec and relay tests;
   `tokio::time::pause()` makes timeout and half-close tests deterministic.
 - Integration tests bind loopback port 0 and exercise real sockets through
@@ -813,30 +811,34 @@ Module boundaries inside `marmo` are enforced by review, not by the compiler.
 - HTTP/2 multiplexing is covered at three levels: transport connection tests,
   inbound stream-budget tests, and integration tests that open several proxied
   connections and assert one accepted TCP connection at the HTTP/2 peer.
-- `proptest` covers parsers and config validation; `cargo-fuzz` covers every
-  decoder and the framing glue we own (nightly only). Malformed input returns
-  a typed error, never panics. The DNS wire decoder is hickory's, so the
-  feature adds config tests rather than a new fuzz target.
+- `proptest` covers config, endpoint, and routing boundaries.
+  `cargo-fuzz` covers every `marmo-proto` decoder, including Mux.Cool metadata
+  (nightly only); the Mux.Cool frame reader is covered by unit tests rather
+  than a separate fuzz target. Malformed input returns a typed error, never
+  panics. The DNS wire decoder is hickory's, so the feature adds config tests
+  rather than a new fuzz target.
 - Interop runs against self-hosted reference binaries outside CI. No GPL code
   is linked, ported, or distributed.
 - CI matrix: Linux x86_64, macOS arm64, Windows x86_64; `cargo fmt --check`,
   `clippy -D warnings`, `cargo test`, `cargo audit`, and the copyleft check.
   A Linux docs job builds every feature with `RUSTDOCFLAGS="-D warnings"` so
   broken intra-doc links and other rustdoc warnings fail CI.
-- Benchmarks (`criterion`) and `miri`/`loom` runs are opt-in and never part of
-  the default test job.
+- Benchmarks (`criterion`) and `miri`/`loom` runs are not part of the current
+  tree; adding them is future work and would not be part of the default job.
 
 ## 17. Observability
 
-- `tracing` spans per connection (`inbound`, `outbound`, `network`, hashed
-  SNI) and per UDP session; default level is `info`.
-- Counters: accepted/active/rejected/failed connections, HTTP/2 stream
-  accepted/active/rejected/closed, bytes per direction, UDP sessions, rule
-  hits, health-check latency/failures, dropped datagrams, and DNS
-  queries/cache hits/fallbacks/failures. DNS query names are never recorded.
+- The library does not install a tracing subscriber and has no `tracing`
+  dependency. Per-connection spans and structured logs are planned as P5-4.
+- Counters currently cover accepted/active/rejected/closed connections,
+  HTTP/2 stream accepted/active/rejected/closed, bytes per direction, handshake
+  and relay timeouts, UDP sessions, health probes/failures, and DNS
+  queries/cache hits/fallbacks/failures. Rule-hit and dropped-datagram counters
+  are planned with P5-4.
 - Optional `MetricsSink` for embedders; no Prometheus dependency in the core.
-- Secrets and payloads are never recorded as span fields; redaction is a
-  review checklist item, not a best-effort filter.
+- The library records no payloads, credentials, SNI, or DNS query names. A
+  `MetricsSink` implementation is trusted embedder code and must preserve the
+  same policy.
 
 ## 18. Security
 
@@ -844,7 +846,8 @@ Module boundaries inside `marmo` are enforced by review, not by the compiler.
   [`docs/security/audit.md`](security/audit.md).
 - Untrusted bytes never panic, recurse, or allocate unboundedly. Decoders are
   fuzzed; length fields are bounded before allocation.
-- Secrets are zeroized and compared in constant time; `unsafe` is
+- Owned secret material is zeroized and password/UUID comparisons are constant
+  time; `unsafe` is
   `forbid`-denied in `marmo-proto` and `marmo` and requires a written
   justification in `marmo-transport`.
 - Dependency surface is part of the security surface: pinned lockfile, the

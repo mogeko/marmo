@@ -47,8 +47,9 @@ the ASCII labels below, the auth ID, and the connection nonce.
 - `AEAD Resp Header Len Key`, `AEAD Resp Header Len IV`
 - `AEAD Resp Header Key`, `AEAD Resp Header IV`
 
-MD5 appears only in the spec-mandated `CmdKey` derivation; the AEAD tags
-provide integrity.
+MD5 appears only where the VMess specification mandates it: the `CmdKey`
+derivation and the ChaCha20-Poly1305 body-key expansion. The AEAD tags provide
+integrity.
 
 ## Request
 

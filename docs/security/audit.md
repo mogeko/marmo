@@ -36,41 +36,55 @@ not implemented in this revision (QUIC, TUIC, Hysteria2).
 - **Bounded input.** Config is capped at 4 MiB. HTTP heads, protocol headers,
   UDP packets, WebSocket messages, and HTTP/2 frames have fixed bounds checked
   before allocation or copying.
-- **Cancellation.** Every connection owns a child token; every spawned task is
-  owned by a `JoinSet` or explicitly aborted. A dropped handshake does not leave
-  an authenticated session reachable.
+- **Cancellation.** Every connection owns a child token; spawned tasks are
+  owned by a `JoinSet`, a `TaskTracker`, or an explicitly held abort handle. A
+  dropped handshake does not leave an authenticated session reachable. Process
+  resolver calls run on `spawn_blocking`; a lookup timeout detaches the
+  blocking call and relies on the provider's own bound.
 - **Limits.** `max_connections`, handshake deadline, idle deadline, and
   half-close grace are enforced by the instance (ADR-0015). Multiplexed HTTP/2
   adds fixed bounds: one connection serves at most 16 streams, the outbound
   pool holds four connections and 64 streams in flight, and inbound streams
   have a separate `max_connections` budget so a single TCP connection cannot
-  bypass the connection cap without bound (ADR-0031).
-- **Secrets.** Passwords, UUIDs, certificates, and keys are redacted in
-  `Debug` and zeroized on drop. UUID and password comparisons are constant
-  time. No payload, credential, or SNI is logged.
+  bypass the connection cap without bound (ADR-0031). Mux.Cool has its own
+  per-instance logical-session budget in addition to the 128-session physical
+  cap.
+- **Secrets.** Credential-bearing public types (passwords, UUIDs,
+  certificates, keys, and Shadowsocks request/response state) have redacted
+  `Debug`; owned derived keys are zeroized, and UUID/password comparisons are
+  constant time. No payload, credential, or SNI is logged by the library.
 - **Configuration.** Strict JSON schema version 2; unknown and duplicate fields
   are errors. TLS credentials are inline PEM; file paths are rejected
   (ADR-0023). `tls.insecure` is accepted only for a loopback server.
 - **Dependency surface.** `Cargo.lock` is committed and CI uses `--locked`;
   CI rejects GPL/AGPL/MPL and runs `cargo-audit` when dependencies change.
-- **Fuzzing.** Every decoder in `marmo-proto`, including HTTP/1 and Mux.Cool,
-  has a fuzz target and a golden fixture. Corpus provenance is recorded in
-  `fuzz/corpus/README.md`; the deterministic corpus runs in CI and long runs
-  are manual.
+- **Fuzzing.** Every decoder in `marmo-proto`, including HTTP/1 and Mux.Cool
+  metadata, has a fuzz target and a golden fixture. The Mux.Cool frame reader
+  is covered by unit tests rather than a separate target. Corpus provenance is
+  recorded in `fuzz/corpus/README.md`; the deterministic corpus runs in CI and
+  long runs are manual.
 - **VMess AEAD.** Only the AEAD header is accepted; legacy MD5/CFB and body
   None/Zero are rejected. Auth IDs are verified by AES decryption, CRC32, and a
   120-second window, then inserted into a bounded 4,096-entry replay filter.
   The 16-bit chunk counter is capped at 65,536 per direction to prevent GCM
-  nonce reuse. MD5 appears only in the protocol-mandated CmdKey derivation.
+  nonce reuse. MD5 appears only where the protocol mandates it: CmdKey
+  derivation and the ChaCha20-Poly1305 key expansion.
 - **Mux.Cool.** The VMess and VLESS inbounds share one dispatcher bounded to 128
   sessions per physical connection, a 16-frame queue per session, 64 KiB
-  frames, 512-byte metadata, and the instance idle timeout. Sessions own one
-  task and are aborted with the physical connection.
+  frames, 512-byte metadata, the instance idle timeout, and a per-instance
+  logical-session permit. Sessions own one task and are aborted with the
+  physical connection; a session dial has the standard handshake deadline.
+  Downlink writes notify the physical connection's activity deadline.
 - **Mux.Cool outbound.** The client pool is bounded to four physical
   connections, 128 sessions per connection, 16 queued frames per session, and a
   4 MiB in-flight downlink budget. TCP downlink applies backpressure; UDP drops
   under queue pressure. Session ids are never reused, and all pool tasks are
   tracked and cancelled with the instance.
+- **Direct UDP replies.** Direct sockets are wildcard-bound for multi-target
+  associations, so the outbound and the Shadowsocks UDP server keep a bounded
+  set of destinations they have sent to and drop replies from unknown source
+  addresses. IP source spoofing within an allowed destination remains a
+  residual risk.
 - **DNS.** The optional resolver uses explicit IP endpoints and never reads
   `resolv.conf` or `hosts`. DoT/DoH verify against the platform trust store or
   an explicit inline CA; there is no `insecure` switch. Answers are capped at
@@ -109,6 +123,10 @@ not implemented in this revision (QUIC, TUIC, Hysteria2).
 - `rustls`, `h2`, `ws-net`, `tokio`, and `aws-lc-rs` are external trust
   anchors; their advisories are covered by Dependabot and `cargo-audit`.
 - Side channels were not measured.
+- Direct UDP paths reject replies from destinations they have not sent to, but
+  an attacker able to spoof an allowed source IP/port can still inject a reply.
+  This is a property of unauthenticated UDP, not something the library can
+  fully prevent.
 - The `aws-lc-rs` provider requires a C toolchain; a platform that cannot build
   it needs an ADR, not a silent backend switch.
 - The library is a proxy: a configuration mistake can expose a listener or
