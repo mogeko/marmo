@@ -337,7 +337,7 @@ pub struct UdpPacket<'a> {
 }
 
 /// A decoded UDP packet borrowing the plaintext buffer.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct UdpDecoded<'a> {
     /// Direction read from the authenticated body.
     pub direction: Direction,
@@ -353,6 +353,21 @@ pub struct UdpDecoded<'a> {
     pub destination: Endpoint,
     /// Payload.
     pub payload: &'a [u8],
+}
+
+impl fmt::Debug for UdpDecoded<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UdpDecoded")
+            .field("direction", &self.direction)
+            .field("session_id", &self.session_id)
+            .field("packet_id", &self.packet_id)
+            .field("client_session_id", &self.client_session_id)
+            .field("timestamp", &self.timestamp)
+            .field("destination", &self.destination)
+            .field("payload_len", &self.payload.len())
+            .finish()
+    }
 }
 
 /// Encodes one UDP packet.
@@ -580,7 +595,7 @@ impl Window {
 }
 
 /// The authenticated fixed header of a TCP client request.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct ClientRequestFixed {
     /// Request salt (zero-padded).
     pub salt: [u8; 32],
@@ -590,6 +605,23 @@ pub struct ClientRequestFixed {
     pub recv_key: [u8; 32],
     /// Variable-header length declared by the fixed header.
     pub variable_len: usize,
+}
+
+impl fmt::Debug for ClientRequestFixed {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ClientRequestFixed")
+            .field("salt_len", &self.salt_len)
+            .field("recv_key", &"<redacted>")
+            .field("variable_len", &self.variable_len)
+            .finish()
+    }
+}
+
+impl Drop for ClientRequestFixed {
+    fn drop(&mut self) {
+        self.recv_key.zeroize();
+    }
 }
 
 /// Decodes only the fixed header of a TCP client request.
@@ -684,7 +716,7 @@ pub fn decode_client_variable<'a>(
 }
 
 /// A decoded TCP client request header.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct ClientRequest<'a> {
     /// Request salt (zero-padded).
     pub salt: [u8; 32],
@@ -698,6 +730,25 @@ pub struct ClientRequest<'a> {
     pub initial_payload: &'a [u8],
     /// Bytes consumed from the request buffer.
     pub consumed: usize,
+}
+
+impl fmt::Debug for ClientRequest<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ClientRequest")
+            .field("salt_len", &self.salt_len)
+            .field("recv_key", &"<redacted>")
+            .field("target", &self.target)
+            .field("initial_payload_len", &self.initial_payload.len())
+            .field("consumed", &self.consumed)
+            .finish()
+    }
+}
+
+impl Drop for ClientRequest<'_> {
+    fn drop(&mut self) {
+        self.recv_key.zeroize();
+    }
 }
 
 /// Encodes a TCP client request (salt, fixed header, variable header).
@@ -779,7 +830,7 @@ pub fn decode_client_request<'a>(
 }
 
 /// The authenticated fixed header of a TCP server response.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ServerResponseFixed {
     /// Response salt (zero-padded).
     pub salt: [u8; 32],
@@ -789,6 +840,23 @@ pub struct ServerResponseFixed {
     pub send_key: [u8; 32],
     /// Length of the first payload carried after the fixed header.
     pub first_len: usize,
+}
+
+impl fmt::Debug for ServerResponseFixed {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ServerResponseFixed")
+            .field("salt_len", &self.salt_len)
+            .field("send_key", &"<redacted>")
+            .field("first_len", &self.first_len)
+            .finish()
+    }
+}
+
+impl Drop for ServerResponseFixed {
+    fn drop(&mut self) {
+        self.send_key.zeroize();
+    }
 }
 
 /// Decodes only the fixed header of a TCP server response.
@@ -876,7 +944,7 @@ pub fn decode_server_variable<'a>(
 }
 
 /// A decoded TCP server response header.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct ServerResponse<'a> {
     /// Response salt (zero-padded).
     pub salt: [u8; 32],
@@ -888,6 +956,24 @@ pub struct ServerResponse<'a> {
     pub first_payload: &'a [u8],
     /// Bytes consumed from the response buffer.
     pub consumed: usize,
+}
+
+impl fmt::Debug for ServerResponse<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ServerResponse")
+            .field("salt_len", &self.salt_len)
+            .field("send_key", &"<redacted>")
+            .field("first_payload_len", &self.first_payload.len())
+            .field("consumed", &self.consumed)
+            .finish()
+    }
+}
+
+impl Drop for ServerResponse<'_> {
+    fn drop(&mut self) {
+        self.send_key.zeroize();
+    }
 }
 
 /// Encodes a TCP server response (salt, fixed header, first payload).
@@ -1230,6 +1316,53 @@ mod tests {
     }
 
     #[test]
+    fn debug_redacts_shadowsocks_keys_and_payloads() {
+        let target = Endpoint::from_domain("example.com", 443).expect("domain");
+        let fixed = ClientRequestFixed {
+            salt: [1; 32],
+            salt_len: 16,
+            recv_key: [0x41; 32],
+            variable_len: 8,
+        };
+        let text = format!("{fixed:?}");
+        assert!(text.contains("<redacted>"));
+        assert!(!text.contains("recv_key: ["));
+
+        let request = ClientRequest {
+            salt: [1; 32],
+            salt_len: 16,
+            recv_key: [0x41; 32],
+            target,
+            initial_payload: b"secret-payload",
+            consumed: 32,
+        };
+        let text = format!("{request:?}");
+        assert!(text.contains("<redacted>"));
+        assert!(!text.contains("secret-payload"));
+
+        let fixed = ServerResponseFixed {
+            salt: [1; 32],
+            salt_len: 16,
+            send_key: [0x42; 32],
+            first_len: 4,
+        };
+        let text = format!("{fixed:?}");
+        assert!(text.contains("<redacted>"));
+        assert!(!text.contains("send_key: ["));
+
+        let response = ServerResponse {
+            salt: [1; 32],
+            salt_len: 16,
+            send_key: [0x42; 32],
+            first_payload: b"secret-response",
+            consumed: 32,
+        };
+        let text = format!("{response:?}");
+        assert!(text.contains("<redacted>"));
+        assert!(!text.contains("secret-response"));
+    }
+
+    #[test]
     fn timestamps_and_windows() {
         assert!(validate_timestamp(100, 130));
         assert!(!validate_timestamp(100, 131));
@@ -1269,6 +1402,7 @@ mod tests {
             assert_eq!(request.initial_payload, b"hello");
             assert_eq!(request.consumed, length);
             assert_eq!(&request.salt[..method.salt_len()], &salt[..]);
+            drop(request);
 
             encoded[length - 1] ^= 1;
             assert_eq!(
@@ -1383,6 +1517,7 @@ mod tests {
         .expect("decode");
         assert_eq!(response.first_payload, b"first");
         assert_eq!(response.consumed, length);
+        drop(response);
 
         assert_eq!(
             decode_server_response(

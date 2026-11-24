@@ -28,6 +28,7 @@ use tokio::runtime::Handle;
 use tokio::task::JoinSet;
 use tokio::time::{interval, timeout};
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroize;
 
 use crate::config::{
     Config, ConfigError, HealthCheck, InboundProtocol, OutboundProtocol, Strategy, StreamNetwork,
@@ -1175,6 +1176,16 @@ impl InboundTlsConfig {
     }
 }
 
+impl Drop for InboundTlsConfig {
+    fn drop(&mut self) {
+        self.certificate.zeroize();
+        self.private_key.zeroize();
+        if let Some(ca) = self.client_ca.as_mut() {
+            ca.zeroize();
+        }
+    }
+}
+
 impl InboundConfig {
     fn build(self, tag: &str, metrics: &Arc<Metrics>) -> Result<InboundKind, BindError> {
         Ok(match self {
@@ -1283,6 +1294,17 @@ struct OutboundTlsConfig {
     client_certificate: Option<String>,
     client_private_key: Option<String>,
     handshake_timeout: Duration,
+}
+
+impl Drop for OutboundTlsConfig {
+    fn drop(&mut self) {
+        if let Some(certificate) = self.client_certificate.as_mut() {
+            certificate.zeroize();
+        }
+        if let Some(key) = self.client_private_key.as_mut() {
+            key.zeroize();
+        }
+    }
 }
 
 impl OutboundSpec {
