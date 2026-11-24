@@ -13,6 +13,7 @@ use marmo_transport::BoxStream;
 use tokio::net::TcpStream;
 
 /// Handles one accepted Shadowsocks 2022 connection.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle(
     client: TcpStream, context: Arc<Context>, inbound: Arc<str>, method: Method, key: Arc<Key>,
     replay: Arc<Mutex<SaltReplay>>, sniffing: Option<Policy>, deadline: Deadline,

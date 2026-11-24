@@ -804,16 +804,14 @@ impl BackgroundTasks {
 
     /// Waits for pool supervisors to drain, aborting any that exceed `grace`.
     async fn shutdown(&mut self, grace: Duration) {
-        let mut tasks = std::mem::take(&mut self.0);
+        let tasks = std::mem::take(&mut self.0);
         let deadline = tokio::time::Instant::now() + grace;
-        for task in &mut tasks {
+        for mut task in tasks {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if timeout(remaining, &mut *task).await.is_err() {
+            if timeout(remaining, &mut task).await.is_err() {
                 task.abort();
+                let _ = task.await;
             }
-        }
-        for task in tasks {
-            let _ = task.await;
         }
     }
 }
