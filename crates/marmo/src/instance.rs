@@ -31,8 +31,8 @@ use tokio_util::sync::CancellationToken;
 use zeroize::Zeroize;
 
 use crate::config::{
-    Config, ConfigError, HealthCheck, InboundProtocol, OutboundProtocol, Strategy, StreamNetwork,
-    VmessSecurity,
+    Config, ConfigError, HealthCheck, Inbound, Outbound as ConfigOutbound, Strategy, StreamNetwork,
+    StreamTransport, VmessSecurity,
 };
 use crate::deadline::Deadline;
 use crate::direct::Dialer;
@@ -315,138 +315,60 @@ impl InstanceBuilder {
         }
         let process = self
             .process_resolver
-            .map(|resolver| Arc::new(ProcessRuntime::new(&self.config.raw.process, resolver)));
+            .map(|resolver| Arc::new(ProcessRuntime::new(&self.config.inner.process, resolver)));
 
-        let mut inbounds = Vec::with_capacity(self.config.raw.inbounds.len());
-        for inbound in &self.config.raw.inbounds {
-            let config = match inbound.protocol {
-                InboundProtocol::Socks5 => InboundConfig::Socks5,
-                InboundProtocol::Http => InboundConfig::Http,
-                InboundProtocol::Shadowsocks => {
-                    let (method, key) =
-                        credentials(inbound.method.as_deref(), inbound.password.as_deref())
-                            .map_err(|error| BuildError::Credentials {
-                                tag: inbound.tag.clone(),
-                                reason: error.to_string(),
-                            })?;
+        let mut inbounds = Vec::with_capacity(self.config.inner.inbounds.len());
+        for inbound in &self.config.inner.inbounds {
+            let tag = inbound.tag();
+            let config = match inbound {
+                Inbound::Socks5 { .. } => InboundConfig::Socks5,
+                Inbound::Http { .. } => InboundConfig::Http,
+                Inbound::Shadowsocks {
+                    method, password, ..
+                } => {
+                    let (method, key) = credentials(Some(method.as_str()), Some(password.expose()))
+                        .map_err(|error| BuildError::Credentials {
+                            tag: tag.to_owned(),
+                            reason: error.to_string(),
+                        })?;
                     InboundConfig::Shadowsocks { method, key }
                 }
-                InboundProtocol::Trojan => {
-                    let Some(tls) = inbound.tls.as_ref() else {
-                        return Err(BuildError::InboundOption {
-                            tag: inbound.tag.clone(),
-                            reason: "tls is required for trojan".into(),
-                        });
-                    };
-                    let Some(password) = inbound.password.as_deref() else {
-                        return Err(BuildError::InboundOption {
-                            tag: inbound.tag.clone(),
-                            reason: "password is required for trojan".into(),
-                        });
-                    };
-                    let fallback = match inbound.fallback.as_deref() {
-                        Some(text) => {
-                            let endpoint =
-                                Endpoint::parse(text).map_err(|_| BuildError::InboundOption {
-                                    tag: inbound.tag.clone(),
-                                    reason: format!("invalid fallback '{text}'"),
-                                })?;
-                            Some(endpoint)
-                        }
-                        None => None,
-                    };
-                    InboundConfig::Trojan {
-                        password: Arc::new(PasswordHash::derive(password)),
-                        tls: InboundTlsConfig::new(tls),
-                        fallback,
-                    }
-                }
-                InboundProtocol::Vless => {
-                    let mut ws = None;
-                    let mut h2 = None;
-                    match inbound.transport.as_ref() {
-                        None => {}
-                        Some(transport) => match transport.network {
-                            StreamNetwork::Tcp => {}
-                            StreamNetwork::Ws => {
-                                ws = Some(WsServerOptions {
-                                    path: transport.path.clone(),
-                                    subprotocols: transport
-                                        .subprotocols
-                                        .clone()
-                                        .unwrap_or_default(),
-                                    compression: transport.compression,
-                                });
-                            }
-                            StreamNetwork::H2 => {
-                                h2 = Some(H2ServerOptions {
-                                    path: transport.path.clone(),
-                                });
-                            }
-                        },
-                    }
-                    let Some(tls) = inbound.tls.as_ref() else {
-                        return Err(BuildError::InboundOption {
-                            tag: inbound.tag.clone(),
-                            reason: "tls is required for vless".into(),
-                        });
-                    };
-                    let Some(uuid) = inbound.uuid.as_deref() else {
-                        return Err(BuildError::InboundOption {
-                            tag: inbound.tag.clone(),
-                            reason: "uuid is required for vless".into(),
-                        });
-                    };
-                    let uuid = Uuid::parse(uuid).map_err(|_| BuildError::InboundOption {
-                        tag: inbound.tag.clone(),
-                        reason: "invalid vless uuid".into(),
-                    })?;
+                Inbound::Trojan {
+                    password,
+                    tls,
+                    fallback,
+                    ..
+                } => InboundConfig::Trojan {
+                    password: Arc::new(PasswordHash::derive(password.expose())),
+                    tls: InboundTlsConfig::new(tls),
+                    fallback: fallback.clone(),
+                },
+                Inbound::Vless {
+                    uuid,
+                    tls,
+                    transport,
+                    ..
+                } => {
+                    let (ws, h2) = server_transport(transport.as_ref());
                     let mut tls = InboundTlsConfig::new(tls);
                     if h2.is_some() && tls.alpn.is_empty() {
                         tls.alpn.push("h2".into());
                     }
                     InboundConfig::Vless {
-                        uuid: Arc::new(uuid),
+                        uuid: Arc::new(uuid.clone()),
                         tls,
                         ws,
                         h2,
                     }
                 }
-                InboundProtocol::Vmess => {
-                    let mut ws = None;
-                    let mut h2 = None;
-                    match inbound.transport.as_ref() {
-                        None => {}
-                        Some(transport) => match transport.network {
-                            StreamNetwork::Tcp => {}
-                            StreamNetwork::Ws => {
-                                ws = Some(WsServerOptions {
-                                    path: transport.path.clone(),
-                                    subprotocols: transport
-                                        .subprotocols
-                                        .clone()
-                                        .unwrap_or_default(),
-                                    compression: transport.compression,
-                                });
-                            }
-                            StreamNetwork::H2 => {
-                                h2 = Some(H2ServerOptions {
-                                    path: transport.path.clone(),
-                                });
-                            }
-                        },
-                    }
-                    let Some(uuid) = inbound.uuid.as_deref() else {
-                        return Err(BuildError::InboundOption {
-                            tag: inbound.tag.clone(),
-                            reason: "uuid is required for vmess".into(),
-                        });
-                    };
-                    let uuid = Uuid::parse(uuid).map_err(|_| BuildError::InboundOption {
-                        tag: inbound.tag.clone(),
-                        reason: "invalid vmess uuid".into(),
-                    })?;
-                    let tls = inbound.tls.as_ref().map(|tls| {
+                Inbound::Vmess {
+                    uuid,
+                    tls,
+                    transport,
+                    ..
+                } => {
+                    let (ws, h2) = server_transport(transport.as_ref());
+                    let tls = tls.as_ref().map(|tls| {
                         let mut tls = InboundTlsConfig::new(tls);
                         if h2.is_some() && tls.alpn.is_empty() {
                             tls.alpn.push("h2".into());
@@ -455,298 +377,148 @@ impl InstanceBuilder {
                     });
                     if (ws.is_some() || h2.is_some()) && tls.is_none() {
                         return Err(BuildError::InboundOption {
-                            tag: inbound.tag.clone(),
+                            tag: tag.to_owned(),
                             reason: "tls is required for vmess ws/h2".into(),
                         });
                     }
                     InboundConfig::Vmess {
-                        cmd_key: Arc::new(CmdKey::derive(&uuid)),
+                        cmd_key: Arc::new(CmdKey::derive(uuid)),
                         tls,
                         ws,
                         h2,
                     }
                 }
             };
-            let endpoint =
-                Endpoint::parse(&inbound.listen).map_err(|_| BuildError::InboundListen {
-                    tag: inbound.tag.clone(),
-                    listen: inbound.listen.clone(),
-                })?;
-            let Some(listen) = endpoint.to_socket_addr() else {
+            let Some(listen) = inbound.listen().to_socket_addr() else {
                 return Err(BuildError::InboundListen {
-                    tag: inbound.tag.clone(),
-                    listen: inbound.listen.clone(),
+                    tag: tag.to_owned(),
+                    listen: inbound.listen().to_string(),
                 });
             };
             inbounds.push(InboundSpec {
-                tag: Arc::from(inbound.tag.as_str()),
+                tag: Arc::from(tag),
                 config,
                 listen,
-                sniffing: Policy::from_config(inbound.sniffing.as_ref()),
+                sniffing: Policy::from_config(inbound.sniffing()),
             });
         }
 
-        let mut outbounds = Vec::with_capacity(self.config.raw.outbounds.len());
-        for outbound in &self.config.raw.outbounds {
-            let config = match outbound.protocol {
-                OutboundProtocol::Direct => OutboundConfig::Direct,
-                OutboundProtocol::Http => {
-                    let Some(server) = outbound.server.as_deref() else {
-                        return Err(BuildError::OutboundEndpoint {
-                            tag: outbound.tag.clone(),
-                            value: String::new(),
-                        });
-                    };
-                    let server =
-                        Endpoint::parse(server).map_err(|_| BuildError::OutboundEndpoint {
-                            tag: outbound.tag.clone(),
-                            value: server.to_string(),
+        let mut outbounds = Vec::with_capacity(self.config.inner.outbounds.len());
+        for outbound in &self.config.inner.outbounds {
+            let tag = outbound.tag();
+            let config = match outbound {
+                ConfigOutbound::Direct { .. } => OutboundConfig::Direct,
+                ConfigOutbound::Http { server, .. } => OutboundConfig::Http {
+                    server: server.clone(),
+                },
+                ConfigOutbound::Shadowsocks {
+                    server,
+                    method,
+                    password,
+                    ..
+                } => {
+                    let (method, key) = credentials(Some(method.as_str()), Some(password.expose()))
+                        .map_err(|error| BuildError::Credentials {
+                            tag: tag.to_owned(),
+                            reason: error.to_string(),
                         })?;
-                    OutboundConfig::Http { server }
-                }
-                OutboundProtocol::Shadowsocks => {
-                    let Some(server) = outbound.server.as_deref() else {
-                        return Err(BuildError::OutboundEndpoint {
-                            tag: outbound.tag.clone(),
-                            value: String::new(),
-                        });
-                    };
-                    let server =
-                        Endpoint::parse(server).map_err(|_| BuildError::OutboundEndpoint {
-                            tag: outbound.tag.clone(),
-                            value: server.to_string(),
-                        })?;
-                    let (method, key) =
-                        credentials(outbound.method.as_deref(), outbound.password.as_deref())
-                            .map_err(|error| BuildError::Credentials {
-                                tag: outbound.tag.clone(),
-                                reason: error.to_string(),
-                            })?;
                     OutboundConfig::Shadowsocks {
-                        server,
+                        server: server.clone(),
                         method,
                         key,
                     }
                 }
-                OutboundProtocol::Trojan => {
-                    let Some(server) = outbound.server.as_deref() else {
-                        return Err(BuildError::OutboundEndpoint {
-                            tag: outbound.tag.clone(),
-                            value: String::new(),
-                        });
-                    };
-                    let server =
-                        Endpoint::parse(server).map_err(|_| BuildError::OutboundEndpoint {
-                            tag: outbound.tag.clone(),
-                            value: server.to_string(),
-                        })?;
-                    let Some(password) = outbound.password.as_deref() else {
-                        return Err(BuildError::OutboundOption {
-                            tag: outbound.tag.clone(),
-                            reason: "password is required for trojan".into(),
-                        });
-                    };
-                    let Some(tls) = outbound.tls.as_ref() else {
-                        return Err(BuildError::OutboundOption {
-                            tag: outbound.tag.clone(),
-                            reason: "tls is required for trojan".into(),
-                        });
-                    };
-                    let tls = outbound_tls_config(tls, &server, &outbound.tag, None, None)?;
-                    OutboundConfig::Trojan {
-                        server,
-                        password: Arc::new(PasswordHash::derive(password)),
-                        tls,
-                    }
-                }
-                OutboundProtocol::Vless => {
-                    let Some(server) = outbound.server.as_deref() else {
-                        return Err(BuildError::OutboundEndpoint {
-                            tag: outbound.tag.clone(),
-                            value: String::new(),
-                        });
-                    };
-                    let server =
-                        Endpoint::parse(server).map_err(|_| BuildError::OutboundEndpoint {
-                            tag: outbound.tag.clone(),
-                            value: server.to_string(),
-                        })?;
-                    let Some(uuid) = outbound.uuid.as_deref() else {
-                        return Err(BuildError::OutboundOption {
-                            tag: outbound.tag.clone(),
-                            reason: "uuid is required for vless".into(),
-                        });
-                    };
-                    let uuid = Uuid::parse(uuid).map_err(|_| BuildError::OutboundOption {
-                        tag: outbound.tag.clone(),
-                        reason: "invalid vless uuid".into(),
-                    })?;
-                    let mut ws = None;
-                    let mut h2 = None;
-                    match outbound.transport.as_ref() {
-                        None => {}
-                        Some(transport) => match transport.network {
-                            StreamNetwork::Tcp => {}
-                            StreamNetwork::Ws => {
-                                ws = Some(WsClientOptions {
-                                    host: transport_host(
-                                        transport,
-                                        outbound.tls.as_ref(),
-                                        &server,
-                                        &outbound.tag,
-                                        "ws",
-                                    )?,
-                                    path: transport.path.clone(),
-                                    subprotocols: transport
-                                        .subprotocols
-                                        .clone()
-                                        .unwrap_or_default(),
-                                    compression: transport.compression,
-                                });
-                            }
-                            StreamNetwork::H2 => {
-                                h2 = Some(H2ClientOptions {
-                                    host: transport_host(
-                                        transport,
-                                        outbound.tls.as_ref(),
-                                        &server,
-                                        &outbound.tag,
-                                        "h2",
-                                    )?,
-                                    path: transport.path.clone(),
-                                });
-                            }
-                        },
-                    }
-                    let default_alpn = match (ws.as_ref(), h2.as_ref()) {
-                        (_, Some(_)) => Some("h2"),
-                        (Some(_), None) => Some("http/1.1"),
-                        (None, None) => None,
-                    };
-                    let required_alpn = h2.as_ref().map(|_| "h2");
-                    let tls = outbound
-                        .tls
+                ConfigOutbound::Trojan {
+                    server,
+                    password,
+                    tls,
+                    ..
+                } => OutboundConfig::Trojan {
+                    server: server.clone(),
+                    password: Arc::new(PasswordHash::derive(password.expose())),
+                    tls: outbound_tls_config(tls, server, tag, None, None)?,
+                },
+                ConfigOutbound::Vless {
+                    server,
+                    uuid,
+                    tls,
+                    transport,
+                    xudp,
+                    mux,
+                    ..
+                } => {
+                    let (ws, h2) = client_transport(transport.as_ref(), tls.as_ref(), server, tag)?;
+                    let tls = tls
                         .as_ref()
                         .map(|tls| {
                             outbound_tls_config(
                                 tls,
-                                &server,
-                                &outbound.tag,
-                                default_alpn,
-                                required_alpn,
+                                server,
+                                tag,
+                                transport_default_alpn(ws.as_ref(), h2.as_ref()),
+                                h2.as_ref().map(|_| "h2"),
                             )
                         })
                         .transpose()?;
                     OutboundConfig::Vless {
-                        server,
-                        uuid: Arc::new(uuid),
+                        server: server.clone(),
+                        uuid: Arc::new(uuid.clone()),
                         tls,
-                        xudp: outbound.xudp,
-                        mux: outbound.mux,
+                        xudp: *xudp,
+                        mux: *mux,
                         ws,
                         h2,
                     }
                 }
-                OutboundProtocol::Vmess => {
-                    let Some(server) = outbound.server.as_deref() else {
-                        return Err(BuildError::OutboundEndpoint {
-                            tag: outbound.tag.clone(),
-                            value: String::new(),
-                        });
-                    };
-                    let server =
-                        Endpoint::parse(server).map_err(|_| BuildError::OutboundEndpoint {
-                            tag: outbound.tag.clone(),
-                            value: server.to_string(),
-                        })?;
-                    let Some(uuid) = outbound.uuid.as_deref() else {
-                        return Err(BuildError::OutboundOption {
-                            tag: outbound.tag.clone(),
-                            reason: "uuid is required for vmess".into(),
-                        });
-                    };
-                    let uuid = Uuid::parse(uuid).map_err(|_| BuildError::OutboundOption {
-                        tag: outbound.tag.clone(),
-                        reason: "invalid vmess uuid".into(),
-                    })?;
-                    let mut ws = None;
-                    let mut h2 = None;
-                    match outbound.transport.as_ref() {
-                        None => {}
-                        Some(transport) => match transport.network {
-                            StreamNetwork::Tcp => {}
-                            StreamNetwork::Ws => {
-                                ws = Some(WsClientOptions {
-                                    host: transport_host(
-                                        transport,
-                                        outbound.tls.as_ref(),
-                                        &server,
-                                        &outbound.tag,
-                                        "ws",
-                                    )?,
-                                    path: transport.path.clone(),
-                                    subprotocols: transport
-                                        .subprotocols
-                                        .clone()
-                                        .unwrap_or_default(),
-                                    compression: transport.compression,
-                                });
-                            }
-                            StreamNetwork::H2 => {
-                                h2 = Some(H2ClientOptions {
-                                    host: transport_host(
-                                        transport,
-                                        outbound.tls.as_ref(),
-                                        &server,
-                                        &outbound.tag,
-                                        "h2",
-                                    )?,
-                                    path: transport.path.clone(),
-                                });
-                            }
-                        },
-                    }
-                    let default_alpn = match (ws.as_ref(), h2.as_ref()) {
-                        (_, Some(_)) => Some("h2"),
-                        (Some(_), None) => Some("http/1.1"),
-                        (None, None) => None,
-                    };
-                    let required_alpn = h2.as_ref().map(|_| "h2");
-                    let tls = outbound
-                        .tls
+                ConfigOutbound::Vmess {
+                    server,
+                    uuid,
+                    tls,
+                    transport,
+                    mux,
+                    security,
+                    ..
+                } => {
+                    let (ws, h2) = client_transport(transport.as_ref(), tls.as_ref(), server, tag)?;
+                    let tls = tls
                         .as_ref()
                         .map(|tls| {
                             outbound_tls_config(
                                 tls,
-                                &server,
-                                &outbound.tag,
-                                default_alpn,
-                                required_alpn,
+                                server,
+                                tag,
+                                transport_default_alpn(ws.as_ref(), h2.as_ref()),
+                                h2.as_ref().map(|_| "h2"),
                             )
                         })
                         .transpose()?;
-                    let security = match outbound.security.unwrap_or_default() {
+                    let security = match security {
                         VmessSecurity::Aes128Gcm => VmessCipher::Aes128Gcm,
                         VmessSecurity::ChaCha20Poly1305 => VmessCipher::ChaCha20Poly1305,
                     };
                     OutboundConfig::Vmess {
-                        server,
-                        cmd_key: Arc::new(CmdKey::derive(&uuid)),
+                        server: server.clone(),
+                        cmd_key: Arc::new(CmdKey::derive(uuid)),
                         security,
-                        mux: outbound.mux,
+                        mux: *mux,
                         tls,
                         ws,
                         h2,
                     }
                 }
-                OutboundProtocol::Selector => OutboundConfig::Selector {
-                    nodes: outbound.nodes.clone().unwrap_or_default(),
-                    strategy: outbound.strategy.unwrap_or(Strategy::Manual),
-                    health_check: outbound.health_check.clone(),
+                ConfigOutbound::Selector {
+                    nodes,
+                    strategy,
+                    health_check,
+                    ..
+                } => OutboundConfig::Selector {
+                    nodes: nodes.clone(),
+                    strategy: *strategy,
+                    health_check: health_check.clone(),
                 },
             };
             outbounds.push(OutboundSpec {
-                tag: Arc::from(outbound.tag.as_str()),
+                tag: Arc::from(tag),
                 config,
             });
         }
@@ -755,7 +527,7 @@ impl InstanceBuilder {
         let metrics = Arc::new(Metrics::new(self.metrics));
         #[cfg(feature = "dns")]
         let dns = DnsRuntime::build(
-            self.config.raw.dns.as_ref(),
+            self.config.inner.dns.as_ref(),
             self.dns_resolver,
             (*metrics).clone(),
         )
@@ -1448,6 +1220,72 @@ impl OutboundSpec {
     }
 }
 
+fn server_transport(
+    transport: Option<&StreamTransport>,
+) -> (Option<WsServerOptions>, Option<H2ServerOptions>) {
+    match transport.map(|transport| transport.network) {
+        Some(StreamNetwork::Ws) => {
+            let transport = transport.expect("ws transport");
+            (
+                Some(WsServerOptions {
+                    path: transport.path.clone(),
+                    subprotocols: transport.subprotocols.clone().unwrap_or_default(),
+                    compression: transport.compression,
+                }),
+                None,
+            )
+        }
+        Some(StreamNetwork::H2) => {
+            let transport = transport.expect("h2 transport");
+            (
+                None,
+                Some(H2ServerOptions {
+                    path: transport.path.clone(),
+                }),
+            )
+        }
+        Some(StreamNetwork::Tcp) | None => (None, None),
+    }
+}
+
+fn client_transport(
+    transport: Option<&StreamTransport>, tls: Option<&crate::config::Tls>, server: &Endpoint,
+    tag: &str,
+) -> Result<(Option<WsClientOptions>, Option<H2ClientOptions>), BuildError> {
+    let Some(transport) = transport else {
+        return Ok((None, None));
+    };
+    match transport.network {
+        StreamNetwork::Tcp => Ok((None, None)),
+        StreamNetwork::Ws => Ok((
+            Some(WsClientOptions {
+                host: transport_host(transport, tls, server, tag, "ws")?,
+                path: transport.path.clone(),
+                subprotocols: transport.subprotocols.clone().unwrap_or_default(),
+                compression: transport.compression,
+            }),
+            None,
+        )),
+        StreamNetwork::H2 => Ok((
+            None,
+            Some(H2ClientOptions {
+                host: transport_host(transport, tls, server, tag, "h2")?,
+                path: transport.path.clone(),
+            }),
+        )),
+    }
+}
+
+fn transport_default_alpn(
+    ws: Option<&WsClientOptions>, h2: Option<&H2ClientOptions>,
+) -> Option<&'static str> {
+    match (ws, h2) {
+        (_, Some(_)) => Some("h2"),
+        (Some(_), None) => Some("http/1.1"),
+        (None, None) => None,
+    }
+}
+
 fn transport_host(
     transport: &crate::config::StreamTransport, tls: Option<&crate::config::Tls>,
     server: &Endpoint, tag: &str, kind: &str,
@@ -1782,14 +1620,6 @@ pub enum BuildError {
     /// No tokio runtime was supplied and none is current.
     #[error("no tokio runtime; call .runtime(handle) or build inside a runtime")]
     NoRuntime,
-    /// The inbound protocol is not implemented yet.
-    #[error("inbound '{tag}' protocol {protocol:?} is not implemented")]
-    UnsupportedInbound {
-        /// Inbound tag.
-        tag: String,
-        /// Configured protocol.
-        protocol: InboundProtocol,
-    },
     /// The listen endpoint is not an IP literal.
     #[error("inbound '{tag}' listen is not an IP endpoint: {listen}")]
     InboundListen {

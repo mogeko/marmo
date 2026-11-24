@@ -64,7 +64,7 @@ mod tests {
         .parse()
         .expect("parse");
 
-        let limits = RuntimeLimits::from_config(&config.raw.limits);
+        let limits = RuntimeLimits::from_config(&config.inner.limits);
         assert_eq!(limits.max_connections, 7);
         assert_eq!(limits.handshake_timeout, Duration::from_secs(2));
         assert_eq!(limits.idle_timeout, None);
@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn maps_nonzero_idle() {
         let config: crate::Config = r#"{"limits":{"idle_timeout_s":5}}"#.parse().expect("parse");
-        let limits = RuntimeLimits::from_config(&config.raw.limits);
+        let limits = RuntimeLimits::from_config(&config.inner.limits);
         assert_eq!(limits.idle_timeout, Some(Duration::from_secs(5)));
     }
 }

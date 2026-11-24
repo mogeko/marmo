@@ -8,10 +8,12 @@
 use std::fmt;
 use std::str::FromStr;
 
-use marmo_net::Network;
+use marmo_net::{Endpoint, Network};
+use marmo_proto::shadowsocks::Method as SsMethod;
+use marmo_proto::vless::Uuid;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Upper bound for a configuration document (4 MiB).
 pub const MAX_CONFIG_BYTES: usize = 4 * 1024 * 1024;
@@ -20,9 +22,21 @@ pub const MAX_CONFIG_BYTES: usize = 4 * 1024 * 1024;
 ///
 /// The fields are private. Construct one with [`Config::from_json`] or
 /// [`ConfigBuilder`], both of which reject invalid documents before returning.
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Config {
-    pub(crate) raw: RawConfig,
+    pub(crate) inner: ConfigInner,
+}
+
+/// Validated configuration state.
+#[derive(Clone, PartialEq)]
+pub(crate) struct ConfigInner {
+    pub(crate) version: u8,
+    pub(crate) limits: Limits,
+    pub(crate) process: Process,
+    pub(crate) dns: Option<Dns>,
+    pub(crate) inbounds: Vec<Inbound>,
+    pub(crate) outbounds: Vec<Outbound>,
+    pub(crate) route: Route,
 }
 
 /// The strict JSON document.
@@ -43,9 +57,9 @@ pub(crate) struct RawConfig {
     #[serde(default)]
     pub(crate) dns: Option<Dns>,
     /// Configured inbounds.
-    pub(crate) inbounds: Vec<Inbound>,
+    pub(crate) inbounds: Vec<RawInbound>,
     /// Configured outbounds.
-    pub(crate) outbounds: Vec<Outbound>,
+    pub(crate) outbounds: Vec<RawOutbound>,
     /// Rule list and default action.
     pub(crate) route: Route,
 }
@@ -60,7 +74,9 @@ impl Config {
     pub fn from_json(text: &str) -> Result<Self, ConfigError> {
         let raw = RawConfig::from_json(text)?;
         raw.validate()?;
-        Ok(Self { raw })
+        Ok(Self {
+            inner: ConfigInner::from_raw(&raw)?,
+        })
     }
 
     /// Starts a programmatic configuration.
@@ -72,43 +88,43 @@ impl Config {
     /// Schema version; only `2` is defined today.
     #[must_use]
     pub fn version(&self) -> u8 {
-        self.raw.version
+        self.inner.version
     }
 
     /// Returns the runtime limits derived from this configuration.
     #[must_use]
     pub fn limits(&self) -> crate::limits::RuntimeLimits {
-        crate::limits::RuntimeLimits::from_config(&self.raw.limits)
+        crate::limits::RuntimeLimits::from_config(&self.inner.limits)
     }
 
     /// Process-identity lookup bounds.
     #[must_use]
     pub fn process(&self) -> &Process {
-        &self.raw.process
+        &self.inner.process
     }
 
     /// Optional DNS resolver policy.
     #[must_use]
     pub fn dns(&self) -> Option<&Dns> {
-        self.raw.dns.as_ref()
+        self.inner.dns.as_ref()
     }
 
     /// Configured inbounds.
     #[must_use]
     pub fn inbounds(&self) -> &[Inbound] {
-        &self.raw.inbounds
+        &self.inner.inbounds
     }
 
     /// Configured outbounds.
     #[must_use]
     pub fn outbounds(&self) -> &[Outbound] {
-        &self.raw.outbounds
+        &self.inner.outbounds
     }
 
     /// Rule list and default action.
     #[must_use]
     pub fn route(&self) -> &Route {
-        &self.raw.route
+        &self.inner.route
     }
 }
 
@@ -140,7 +156,12 @@ impl RawConfig {
 /// same semantic validation as [`Config::from_json`].
 #[derive(Clone)]
 pub struct ConfigBuilder {
-    raw: RawConfig,
+    limits: Limits,
+    process: Process,
+    dns: Option<Dns>,
+    inbounds: Vec<Inbound>,
+    outbounds: Vec<Outbound>,
+    route: Route,
 }
 
 impl ConfigBuilder {
@@ -148,62 +169,102 @@ impl ConfigBuilder {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            raw: RawConfig::default(),
+            limits: Limits::default(),
+            process: Process::default(),
+            dns: None,
+            inbounds: Vec::new(),
+            outbounds: Vec::new(),
+            route: Route::default(),
         }
     }
 
     /// Replaces global connection and timeout limits.
     #[must_use]
     pub fn limits(mut self, limits: Limits) -> Self {
-        self.raw.limits = limits;
+        self.limits = limits;
         self
     }
 
     /// Replaces process-identity lookup bounds.
     #[must_use]
     pub fn process(mut self, process: Process) -> Self {
-        self.raw.process = process;
+        self.process = process;
         self
     }
 
     /// Replaces the optional DNS policy.
     #[must_use]
     pub fn dns(mut self, dns: Option<Dns>) -> Self {
-        self.raw.dns = dns;
+        self.dns = dns;
         self
     }
 
     /// Appends one inbound.
     #[must_use]
     pub fn inbound(mut self, inbound: Inbound) -> Self {
-        self.raw.inbounds.push(inbound);
+        self.inbounds.push(inbound);
         self
     }
 
     /// Appends one outbound.
     #[must_use]
     pub fn outbound(mut self, outbound: Outbound) -> Self {
-        self.raw.outbounds.push(outbound);
+        self.outbounds.push(outbound);
         self
     }
 
     /// Replaces the rule list and default action.
     #[must_use]
     pub fn route(mut self, route: Route) -> Self {
-        self.raw.route = route;
+        self.route = route;
         self
     }
 
     /// Validates the assembled configuration.
     pub fn build(self) -> Result<Config, ConfigError> {
-        self.raw.validate()?;
-        Ok(Config { raw: self.raw })
+        let raw = RawConfig {
+            version: 2,
+            limits: self.limits.clone(),
+            process: self.process.clone(),
+            dns: self.dns.clone(),
+            inbounds: self.inbounds.iter().map(Inbound::to_raw).collect(),
+            outbounds: self.outbounds.iter().map(Outbound::to_raw).collect(),
+            route: self.route.clone(),
+        };
+        raw.validate()?;
+        Ok(Config {
+            inner: ConfigInner {
+                version: 2,
+                limits: self.limits,
+                process: self.process,
+                dns: self.dns,
+                inbounds: self.inbounds,
+                outbounds: self.outbounds,
+                route: self.route,
+            },
+        })
     }
 }
 
 impl Default for ConfigBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            inner: ConfigInner {
+                version: 2,
+                limits: Limits::default(),
+                process: Process::default(),
+                dns: None,
+                inbounds: Vec::new(),
+                outbounds: Vec::new(),
+                route: Route::default(),
+            },
+        }
     }
 }
 
@@ -367,11 +428,11 @@ pub struct DnsTls {
 /// An inbound listener.
 #[derive(Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Inbound {
+pub(crate) struct RawInbound {
     /// Unique, non-empty tag.
     pub tag: String,
     /// Protocol spoken on this listener.
-    pub protocol: InboundProtocol,
+    pub protocol: RawInboundProtocol,
     /// Listen endpoint, for example `127.0.0.1:1080`.
     pub listen: String,
     /// Shadowsocks method.
@@ -397,7 +458,7 @@ pub struct Inbound {
     pub sniffing: Option<Sniffing>,
 }
 
-impl Drop for Inbound {
+impl Drop for RawInbound {
     fn drop(&mut self) {
         if let Some(password) = self.password.as_mut() {
             password.zeroize();
@@ -411,7 +472,7 @@ impl Drop for Inbound {
 /// Inbound protocols.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum InboundProtocol {
+pub(crate) enum RawInboundProtocol {
     /// HTTP CONNECT and forward proxying.
     Http,
     /// Shadowsocks 2022.
@@ -424,6 +485,654 @@ pub enum InboundProtocol {
     Vless,
     /// VMess AEAD.
     Vmess,
+}
+
+/// A validated inbound listener.
+///
+/// The protocol variant carries exactly the fields that protocol uses; endpoint
+/// and UUID parsing has already happened. Construct one through
+/// [`ConfigBuilder::inbound`].
+#[derive(Clone, PartialEq)]
+#[non_exhaustive]
+pub enum Inbound {
+    /// SOCKS5 CONNECT and UDP ASSOCIATE.
+    Socks5 {
+        /// Unique, non-empty tag.
+        tag: String,
+        /// Bound listen endpoint.
+        listen: Endpoint,
+        /// Opt-in sniffing policy.
+        sniffing: Option<Sniffing>,
+    },
+    /// HTTP CONNECT and forward proxying.
+    Http {
+        /// Unique, non-empty tag.
+        tag: String,
+        /// Bound listen endpoint.
+        listen: Endpoint,
+        /// Opt-in sniffing policy.
+        sniffing: Option<Sniffing>,
+    },
+    /// Shadowsocks 2022.
+    Shadowsocks {
+        /// Unique, non-empty tag.
+        tag: String,
+        /// Bound listen endpoint.
+        listen: Endpoint,
+        /// AEAD method.
+        method: SsMethod,
+        /// Base64 PSK; redacted and zeroized.
+        password: SecretString,
+        /// Opt-in sniffing policy.
+        sniffing: Option<Sniffing>,
+    },
+    /// Trojan over TLS.
+    Trojan {
+        /// Unique, non-empty tag.
+        tag: String,
+        /// Bound listen endpoint.
+        listen: Endpoint,
+        /// Authentication password; redacted and zeroized.
+        password: SecretString,
+        /// TLS termination settings.
+        tls: InboundTls,
+        /// Fallback endpoint for unauthenticated traffic.
+        fallback: Option<Endpoint>,
+        /// Opt-in sniffing policy.
+        sniffing: Option<Sniffing>,
+    },
+    /// VLESS over TLS.
+    Vless {
+        /// Unique, non-empty tag.
+        tag: String,
+        /// Bound listen endpoint.
+        listen: Endpoint,
+        /// Client UUID.
+        uuid: Uuid,
+        /// TLS termination settings.
+        tls: InboundTls,
+        /// Optional L7 stream transport.
+        transport: Option<StreamTransport>,
+        /// Opt-in sniffing policy.
+        sniffing: Option<Sniffing>,
+    },
+    /// VMess AEAD.
+    Vmess {
+        /// Unique, non-empty tag.
+        tag: String,
+        /// Bound listen endpoint.
+        listen: Endpoint,
+        /// Client UUID.
+        uuid: Uuid,
+        /// Optional TLS termination settings.
+        tls: Option<InboundTls>,
+        /// Optional L7 stream transport.
+        transport: Option<StreamTransport>,
+        /// Opt-in sniffing policy.
+        sniffing: Option<Sniffing>,
+    },
+}
+
+impl Inbound {
+    /// Unique tag.
+    #[must_use]
+    pub fn tag(&self) -> &str {
+        match self {
+            Self::Socks5 { tag, .. }
+            | Self::Http { tag, .. }
+            | Self::Shadowsocks { tag, .. }
+            | Self::Trojan { tag, .. }
+            | Self::Vless { tag, .. }
+            | Self::Vmess { tag, .. } => tag,
+        }
+    }
+
+    /// Bound listen endpoint.
+    #[must_use]
+    pub fn listen(&self) -> &Endpoint {
+        match self {
+            Self::Socks5 { listen, .. }
+            | Self::Http { listen, .. }
+            | Self::Shadowsocks { listen, .. }
+            | Self::Trojan { listen, .. }
+            | Self::Vless { listen, .. }
+            | Self::Vmess { listen, .. } => listen,
+        }
+    }
+
+    /// Opt-in sniffing policy.
+    #[must_use]
+    pub fn sniffing(&self) -> Option<&Sniffing> {
+        match self {
+            Self::Socks5 { sniffing, .. }
+            | Self::Http { sniffing, .. }
+            | Self::Shadowsocks { sniffing, .. }
+            | Self::Trojan { sniffing, .. }
+            | Self::Vless { sniffing, .. }
+            | Self::Vmess { sniffing, .. } => sniffing.as_ref(),
+        }
+    }
+
+    fn from_raw(raw: &RawInbound, index: usize) -> Result<Self, ConfigError> {
+        let tag = raw.tag.clone();
+        let listen = conversion_endpoint(&raw.listen, format!("inbounds[{index}].listen"))?;
+        let sniffing = raw.sniffing.clone();
+        match raw.protocol {
+            RawInboundProtocol::Socks5 => Ok(Self::Socks5 {
+                tag,
+                listen,
+                sniffing,
+            }),
+            RawInboundProtocol::Http => Ok(Self::Http {
+                tag,
+                listen,
+                sniffing,
+            }),
+            RawInboundProtocol::Shadowsocks => {
+                Self::shadowsocks_from_raw(raw, index, tag, listen, sniffing)
+            }
+            RawInboundProtocol::Trojan => Self::trojan_from_raw(raw, index, tag, listen, sniffing),
+            RawInboundProtocol::Vless => Self::vless_from_raw(raw, index, tag, listen, sniffing),
+            RawInboundProtocol::Vmess => Ok(Self::Vmess {
+                tag,
+                listen,
+                uuid: conversion_uuid_text(raw.uuid.as_deref(), format!("inbounds[{index}].uuid"))?,
+                tls: raw.tls.clone(),
+                transport: raw.transport.clone(),
+                sniffing,
+            }),
+        }
+    }
+
+    fn shadowsocks_from_raw(
+        raw: &RawInbound, index: usize, tag: String, listen: Endpoint, sniffing: Option<Sniffing>,
+    ) -> Result<Self, ConfigError> {
+        let method =
+            conversion_method_text(raw.method.as_deref(), format!("inbounds[{index}].method"))?;
+        let password = conversion_secret_text(
+            raw.password.as_deref(),
+            format!("inbounds[{index}].password"),
+        )?;
+        Ok(Self::Shadowsocks {
+            tag,
+            listen,
+            method,
+            password,
+            sniffing,
+        })
+    }
+
+    fn trojan_from_raw(
+        raw: &RawInbound, index: usize, tag: String, listen: Endpoint, sniffing: Option<Sniffing>,
+    ) -> Result<Self, ConfigError> {
+        let password = conversion_secret_text(
+            raw.password.as_deref(),
+            format!("inbounds[{index}].password"),
+        )?;
+        let tls = raw.tls.clone().ok_or_else(|| {
+            conversion_error(format!("inbounds[{index}].tls"), "required for trojan")
+        })?;
+        let fallback = match raw.fallback.as_deref() {
+            Some(text) => Some(conversion_endpoint(
+                text,
+                format!("inbounds[{index}].fallback"),
+            )?),
+            None => None,
+        };
+        Ok(Self::Trojan {
+            tag,
+            listen,
+            password,
+            tls,
+            fallback,
+            sniffing,
+        })
+    }
+
+    fn vless_from_raw(
+        raw: &RawInbound, index: usize, tag: String, listen: Endpoint, sniffing: Option<Sniffing>,
+    ) -> Result<Self, ConfigError> {
+        let uuid = conversion_uuid_text(raw.uuid.as_deref(), format!("inbounds[{index}].uuid"))?;
+        let tls = raw.tls.clone().ok_or_else(|| {
+            conversion_error(format!("inbounds[{index}].tls"), "required for vless")
+        })?;
+        Ok(Self::Vless {
+            tag,
+            listen,
+            uuid,
+            tls,
+            transport: raw.transport.clone(),
+            sniffing,
+        })
+    }
+
+    fn to_raw(&self) -> RawInbound {
+        let mut raw = RawInbound {
+            tag: self.tag().into(),
+            protocol: RawInboundProtocol::Socks5,
+            listen: self.listen().to_string(),
+            method: None,
+            password: None,
+            uuid: None,
+            tls: None,
+            transport: None,
+            fallback: None,
+            sniffing: self.sniffing().cloned(),
+        };
+        match self {
+            Self::Socks5 { .. } => raw.protocol = RawInboundProtocol::Socks5,
+            Self::Http { .. } => raw.protocol = RawInboundProtocol::Http,
+            Self::Shadowsocks {
+                method, password, ..
+            } => {
+                raw.protocol = RawInboundProtocol::Shadowsocks;
+                raw.method = Some(method.to_string());
+                raw.password = Some(password.expose().to_owned());
+            }
+            Self::Trojan {
+                password,
+                tls,
+                fallback,
+                ..
+            } => {
+                raw.protocol = RawInboundProtocol::Trojan;
+                raw.password = Some(password.expose().to_owned());
+                raw.tls = Some(tls.clone());
+                raw.fallback = fallback.as_ref().map(ToString::to_string);
+            }
+            Self::Vless {
+                uuid,
+                tls,
+                transport,
+                ..
+            } => {
+                raw.protocol = RawInboundProtocol::Vless;
+                raw.uuid = Some(uuid.to_string());
+                raw.tls = Some(tls.clone());
+                raw.transport = transport.clone();
+            }
+            Self::Vmess {
+                uuid,
+                tls,
+                transport,
+                ..
+            } => {
+                raw.protocol = RawInboundProtocol::Vmess;
+                raw.uuid = Some(uuid.to_string());
+                raw.tls = tls.clone();
+                raw.transport = transport.clone();
+            }
+        }
+        raw
+    }
+}
+
+/// A validated outbound or selector.
+///
+/// Construct one through [`ConfigBuilder::outbound`].
+#[derive(Clone, PartialEq)]
+#[non_exhaustive]
+pub enum Outbound {
+    /// Direct dial.
+    Direct {
+        /// Unique, non-empty tag.
+        tag: String,
+    },
+    /// HTTP CONNECT.
+    Http {
+        /// Unique, non-empty tag.
+        tag: String,
+        /// Proxy server endpoint.
+        server: Endpoint,
+    },
+    /// Outbound selector.
+    Selector {
+        /// Unique, non-empty tag.
+        tag: String,
+        /// Member tags in preference order.
+        nodes: Vec<String>,
+        /// Selection strategy.
+        strategy: Strategy,
+        /// Optional health check.
+        health_check: Option<HealthCheck>,
+    },
+    /// Shadowsocks 2022.
+    Shadowsocks {
+        /// Unique, non-empty tag.
+        tag: String,
+        /// Proxy server endpoint.
+        server: Endpoint,
+        /// AEAD method.
+        method: SsMethod,
+        /// Base64 PSK; redacted and zeroized.
+        password: SecretString,
+    },
+    /// Trojan over TLS.
+    Trojan {
+        /// Unique, non-empty tag.
+        tag: String,
+        /// Proxy server endpoint.
+        server: Endpoint,
+        /// Authentication password; redacted and zeroized.
+        password: SecretString,
+        /// TLS client settings.
+        tls: Tls,
+    },
+    /// VLESS.
+    Vless {
+        /// Unique, non-empty tag.
+        tag: String,
+        /// Proxy server endpoint.
+        server: Endpoint,
+        /// Client UUID.
+        uuid: Uuid,
+        /// Optional TLS client settings.
+        tls: Option<Tls>,
+        /// Optional L7 stream transport.
+        transport: Option<StreamTransport>,
+        /// VLESS XUDP framing.
+        xudp: bool,
+        /// Client-side Mux.Cool pooling.
+        mux: bool,
+    },
+    /// VMess AEAD.
+    Vmess {
+        /// Unique, non-empty tag.
+        tag: String,
+        /// Proxy server endpoint.
+        server: Endpoint,
+        /// Client UUID.
+        uuid: Uuid,
+        /// Optional TLS client settings.
+        tls: Option<Tls>,
+        /// Optional L7 stream transport.
+        transport: Option<StreamTransport>,
+        /// Client-side Mux.Cool pooling.
+        mux: bool,
+        /// Body cipher.
+        security: VmessSecurity,
+    },
+}
+
+impl Outbound {
+    /// Unique tag.
+    #[must_use]
+    pub fn tag(&self) -> &str {
+        match self {
+            Self::Direct { tag }
+            | Self::Http { tag, .. }
+            | Self::Selector { tag, .. }
+            | Self::Shadowsocks { tag, .. }
+            | Self::Trojan { tag, .. }
+            | Self::Vless { tag, .. }
+            | Self::Vmess { tag, .. } => tag,
+        }
+    }
+
+    fn from_raw(raw: &RawOutbound, index: usize) -> Result<Self, ConfigError> {
+        match raw.protocol {
+            RawOutboundProtocol::Direct => Ok(Self::Direct {
+                tag: raw.tag.clone(),
+            }),
+            RawOutboundProtocol::Http => Ok(Self::Http {
+                tag: raw.tag.clone(),
+                server: conversion_server(raw, index)?,
+            }),
+            RawOutboundProtocol::Selector => Ok(Self::Selector {
+                tag: raw.tag.clone(),
+                nodes: raw.nodes.clone().unwrap_or_default(),
+                strategy: raw.strategy.ok_or_else(|| {
+                    conversion_error(format!("outbounds[{index}].strategy"), "required")
+                })?,
+                health_check: raw.health_check.clone(),
+            }),
+            RawOutboundProtocol::Shadowsocks => Ok(Self::Shadowsocks {
+                tag: raw.tag.clone(),
+                server: conversion_server(raw, index)?,
+                method: conversion_method_text(
+                    raw.method.as_deref(),
+                    format!("outbounds[{index}].method"),
+                )?,
+                password: conversion_secret_text(
+                    raw.password.as_deref(),
+                    format!("outbounds[{index}].password"),
+                )?,
+            }),
+            RawOutboundProtocol::Trojan => Ok(Self::Trojan {
+                tag: raw.tag.clone(),
+                server: conversion_server(raw, index)?,
+                password: conversion_secret_text(
+                    raw.password.as_deref(),
+                    format!("outbounds[{index}].password"),
+                )?,
+                tls: raw.tls.clone().ok_or_else(|| {
+                    conversion_error(format!("outbounds[{index}].tls"), "required for trojan")
+                })?,
+            }),
+            RawOutboundProtocol::Vless => Ok(Self::Vless {
+                tag: raw.tag.clone(),
+                server: conversion_server(raw, index)?,
+                uuid: conversion_uuid_text(
+                    raw.uuid.as_deref(),
+                    format!("outbounds[{index}].uuid"),
+                )?,
+                tls: raw.tls.clone(),
+                transport: raw.transport.clone(),
+                xudp: raw.xudp,
+                mux: raw.mux,
+            }),
+            RawOutboundProtocol::Vmess => Ok(Self::Vmess {
+                tag: raw.tag.clone(),
+                server: conversion_server(raw, index)?,
+                uuid: conversion_uuid_text(
+                    raw.uuid.as_deref(),
+                    format!("outbounds[{index}].uuid"),
+                )?,
+                tls: raw.tls.clone(),
+                transport: raw.transport.clone(),
+                mux: raw.mux,
+                security: raw.security.unwrap_or_default(),
+            }),
+        }
+    }
+
+    fn to_raw(&self) -> RawOutbound {
+        match self {
+            Self::Direct { tag } => Self::raw_base(tag, RawOutboundProtocol::Direct),
+            Self::Http { tag, server } => Self::server_raw(tag, RawOutboundProtocol::Http, server),
+            Self::Selector {
+                tag,
+                nodes,
+                strategy,
+                health_check,
+            } => Self::selector_raw(tag, nodes, *strategy, health_check.clone()),
+            Self::Shadowsocks {
+                tag,
+                server,
+                method,
+                password,
+            } => {
+                let mut raw = Self::server_raw(tag, RawOutboundProtocol::Shadowsocks, server);
+                raw.method = Some(method.to_string());
+                raw.password = Some(password.expose().to_owned());
+                raw
+            }
+            Self::Trojan {
+                tag,
+                server,
+                password,
+                tls,
+            } => {
+                let mut raw = Self::server_raw(tag, RawOutboundProtocol::Trojan, server);
+                raw.password = Some(password.expose().to_owned());
+                raw.tls = Some(tls.clone());
+                raw
+            }
+            Self::Vless {
+                tag,
+                server,
+                uuid,
+                tls,
+                transport,
+                xudp,
+                mux,
+            } => Self::vless_raw(tag, server, uuid, tls, transport, *xudp, *mux),
+            Self::Vmess {
+                tag,
+                server,
+                uuid,
+                tls,
+                transport,
+                mux,
+                security,
+            } => Self::vmess_raw(tag, server, uuid, tls, transport, *mux, *security),
+        }
+    }
+
+    fn selector_raw(
+        tag: &str, nodes: &[String], strategy: Strategy, health_check: Option<HealthCheck>,
+    ) -> RawOutbound {
+        let mut raw = Self::raw_base(tag, RawOutboundProtocol::Selector);
+        raw.nodes = Some(nodes.to_vec());
+        raw.strategy = Some(strategy);
+        raw.health_check = health_check;
+        raw
+    }
+
+    fn vless_raw(
+        tag: &str, server: &Endpoint, uuid: &Uuid, tls: &Option<Tls>,
+        transport: &Option<StreamTransport>, xudp: bool, mux: bool,
+    ) -> RawOutbound {
+        let mut raw = Self::server_raw(tag, RawOutboundProtocol::Vless, server);
+        raw.uuid = Some(uuid.to_string());
+        raw.tls = tls.clone();
+        raw.transport = transport.clone();
+        raw.xudp = xudp;
+        raw.mux = mux;
+        raw
+    }
+
+    fn vmess_raw(
+        tag: &str, server: &Endpoint, uuid: &Uuid, tls: &Option<Tls>,
+        transport: &Option<StreamTransport>, mux: bool, security: VmessSecurity,
+    ) -> RawOutbound {
+        let mut raw = Self::server_raw(tag, RawOutboundProtocol::Vmess, server);
+        raw.uuid = Some(uuid.to_string());
+        raw.tls = tls.clone();
+        raw.transport = transport.clone();
+        raw.mux = mux;
+        raw.security = Some(security);
+        raw
+    }
+
+    fn raw_base(tag: &str, protocol: RawOutboundProtocol) -> RawOutbound {
+        RawOutbound {
+            tag: tag.into(),
+            protocol,
+            server: None,
+            method: None,
+            password: None,
+            uuid: None,
+            tls: None,
+            transport: None,
+            xudp: false,
+            mux: false,
+            security: None,
+            nodes: None,
+            strategy: None,
+            health_check: None,
+        }
+    }
+
+    fn server_raw(tag: &str, protocol: RawOutboundProtocol, server: &Endpoint) -> RawOutbound {
+        let mut raw = Self::raw_base(tag, protocol);
+        raw.server = Some(server.to_string());
+        raw
+    }
+}
+
+impl ConfigInner {
+    fn from_raw(raw: &RawConfig) -> Result<Self, ConfigError> {
+        let mut inbounds = Vec::with_capacity(raw.inbounds.len());
+        for (index, inbound) in raw.inbounds.iter().enumerate() {
+            inbounds.push(Inbound::from_raw(inbound, index)?);
+        }
+        let mut outbounds = Vec::with_capacity(raw.outbounds.len());
+        for (index, outbound) in raw.outbounds.iter().enumerate() {
+            outbounds.push(Outbound::from_raw(outbound, index)?);
+        }
+        Ok(Self {
+            version: raw.version,
+            limits: raw.limits.clone(),
+            process: raw.process.clone(),
+            dns: raw.dns.clone(),
+            inbounds,
+            outbounds,
+            route: raw.route.clone(),
+        })
+    }
+}
+
+/// A secret configuration value.
+///
+/// The value is zeroized on drop and never printed by `Debug`.
+#[derive(Clone, PartialEq)]
+pub struct SecretString(Zeroizing<String>);
+
+impl SecretString {
+    /// Wraps an owned secret.
+    #[must_use]
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(Zeroizing::new(value.into()))
+    }
+
+    /// Exposes the secret to the library.
+    #[must_use]
+    pub fn expose(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl fmt::Debug for SecretString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+fn conversion_error(path: String, message: impl Into<String>) -> ConfigError {
+    ConfigError::Validate {
+        path,
+        message: message.into(),
+    }
+}
+
+fn conversion_endpoint(text: &str, path: String) -> Result<Endpoint, ConfigError> {
+    Endpoint::parse(text).map_err(|_| conversion_error(path, format!("invalid endpoint '{text}'")))
+}
+
+fn conversion_server(raw: &RawOutbound, index: usize) -> Result<Endpoint, ConfigError> {
+    let text = raw
+        .server
+        .as_deref()
+        .ok_or_else(|| conversion_error(format!("outbounds[{index}].server"), "required"))?;
+    conversion_endpoint(text, format!("outbounds[{index}].server"))
+}
+
+fn conversion_method_text(method: Option<&str>, path: String) -> Result<SsMethod, ConfigError> {
+    method
+        .and_then(SsMethod::parse)
+        .ok_or_else(|| conversion_error(path, "required or unsupported shadowsocks method"))
+}
+
+fn conversion_secret_text(value: Option<&str>, path: String) -> Result<SecretString, ConfigError> {
+    value
+        .map(|text| SecretString::new(text.to_owned()))
+        .ok_or_else(|| conversion_error(path, "required"))
+}
+
+fn conversion_uuid_text(text: Option<&str>, path: String) -> Result<Uuid, ConfigError> {
+    text.and_then(|value| Uuid::parse(value).ok())
+        .ok_or_else(|| conversion_error(path, "required or invalid UUID"))
 }
 
 /// Opt-in sniffing of the first stream bytes before routing.
@@ -540,11 +1249,11 @@ pub enum ClientAuth {
 /// An outbound node or selector.
 #[derive(Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Outbound {
+pub(crate) struct RawOutbound {
     /// Unique, non-empty tag.
     pub tag: String,
     /// Protocol or selector kind.
-    pub protocol: OutboundProtocol,
+    pub protocol: RawOutboundProtocol,
     /// Server endpoint for proxy protocols.
     #[serde(default)]
     pub server: Option<String>,
@@ -583,7 +1292,7 @@ pub struct Outbound {
     pub health_check: Option<HealthCheck>,
 }
 
-impl Drop for Outbound {
+impl Drop for RawOutbound {
     fn drop(&mut self) {
         if let Some(password) = self.password.as_mut() {
             password.zeroize();
@@ -597,7 +1306,7 @@ impl Drop for Outbound {
 /// Outbound protocols.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum OutboundProtocol {
+pub(crate) enum RawOutboundProtocol {
     /// Direct dial.
     Direct,
     /// HTTP CONNECT.
@@ -837,19 +1546,19 @@ impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Never print credentials: the config carries passwords and UUIDs.
         f.debug_struct("Config")
-            .field("version", &self.raw.version)
-            .field("limits", &self.raw.limits)
+            .field("version", &self.inner.version)
+            .field("limits", &self.inner.limits)
             .field(
                 "dns",
                 &self
-                    .raw
+                    .inner
                     .dns
                     .as_ref()
                     .map(|dns| (dns.servers.len(), dns.fallback.len())),
             )
-            .field("inbounds", &self.raw.inbounds.len())
-            .field("outbounds", &self.raw.outbounds.len())
-            .field("route", &self.raw.route)
+            .field("inbounds", &self.inner.inbounds.len())
+            .field("outbounds", &self.inner.outbounds.len())
+            .field("route", &self.inner.route)
             .finish()
     }
 }
@@ -919,12 +1628,12 @@ mod tests {
     fn parses_defaults() {
         let config = Config::from_json("{}").expect("parse");
         assert_eq!(config.version(), 2);
-        assert_eq!(config.raw.limits, Limits::default());
-        assert_eq!(config.raw.process, Process::default());
-        assert!(config.raw.dns.is_none());
-        assert!(config.raw.inbounds.is_empty());
-        assert!(config.raw.outbounds.is_empty());
-        assert_eq!(config.raw.route.final_outbound, "direct");
+        assert_eq!(config.limits().max_connections, 1024);
+        assert_eq!(config.process(), &Process::default());
+        assert!(config.dns().is_none());
+        assert!(config.inbounds().is_empty());
+        assert!(config.outbounds().is_empty());
+        assert_eq!(config.route().final_outbound, "direct");
     }
 
     #[cfg(feature = "dns")]
@@ -948,7 +1657,7 @@ mod tests {
           }
         }"#;
         let config = Config::from_json(text).expect("parse");
-        let dns = config.raw.dns.as_ref().expect("dns");
+        let dns = config.dns().expect("dns");
         assert_eq!(dns.servers.len(), 2);
         assert_eq!(dns.servers[0].protocol, DnsProtocol::Https);
         assert_eq!(dns.servers[0].path.as_deref(), Some("/dns-query"));
@@ -977,38 +1686,46 @@ mod tests {
     #[test]
     fn parses_full_config() {
         let config = Config::from_json(FULL).expect("parse");
-        assert_eq!(config.raw.limits.max_connections, 16);
-        assert_eq!(config.raw.limits.idle_timeout_s, 0);
+        assert_eq!(config.limits().max_connections, 16);
+        assert_eq!(config.limits().idle_timeout, None);
 
-        let inbound = &config.raw.inbounds[0];
-        assert_eq!(inbound.tag, "in-vless");
-        assert_eq!(inbound.protocol, InboundProtocol::Vless);
+        let Inbound::Vless {
+            tag,
+            tls,
+            transport,
+            sniffing,
+            ..
+        } = &config.inbounds()[0]
+        else {
+            panic!("expected a VLESS inbound");
+        };
+        assert_eq!(tag, "in-vless");
         assert_eq!(
-            inbound.transport.as_ref().expect("transport").network,
+            transport.as_ref().expect("transport").network,
             StreamNetwork::Ws
         );
-        assert!(inbound.transport.as_ref().expect("transport").compression);
-        assert_eq!(
-            inbound.tls.as_ref().expect("tls").client_auth,
-            ClientAuth::Required
-        );
-        let sniffing = inbound.sniffing.as_ref().expect("sniffing");
+        assert!(transport.as_ref().expect("transport").compression);
+        assert_eq!(tls.client_auth, ClientAuth::Required);
+        let sniffing = sniffing.as_ref().expect("sniffing");
         assert!(sniffing.enabled);
         assert_eq!(
             sniffing.protocols.as_deref(),
             Some([SniffProtocol::Tls, SniffProtocol::Http2].as_slice())
         );
 
-        let selector = &config.raw.outbounds[1];
-        assert_eq!(selector.protocol, OutboundProtocol::Selector);
-        assert_eq!(selector.strategy, Some(Strategy::LeastLatency));
-        assert_eq!(
-            selector.health_check.as_ref().expect("health").interval_s,
-            10
-        );
-        assert_eq!(selector.health_check.as_ref().expect("health").timeout_s, 5);
+        let Outbound::Selector {
+            strategy,
+            health_check,
+            ..
+        } = &config.outbounds()[1]
+        else {
+            panic!("expected a selector outbound");
+        };
+        assert_eq!(*strategy, Strategy::LeastLatency);
+        assert_eq!(health_check.as_ref().expect("health").interval_s, 10);
+        assert_eq!(health_check.as_ref().expect("health").timeout_s, 5);
 
-        let rule = &config.raw.route.rules[0];
+        let rule = &config.route().rules[0];
         assert_eq!(rule.network, Some(Network::Tcp));
         assert_eq!(rule.port.as_deref(), Some([443_u16].as_slice()));
         assert_eq!(rule.outbound, "group");
@@ -1090,10 +1807,11 @@ mod tests {
     }
 
     #[test]
-    fn round_trips() {
+    fn parses_json_and_typed_accessors_agree() {
         let config = Config::from_json(FULL).expect("parse");
-        let encoded = serde_json::to_string(&config.raw).expect("encode");
-        let decoded = Config::from_json(&encoded).expect("decode");
-        assert_eq!(decoded, config);
+        assert_eq!(config.inbounds().len(), 1);
+        assert_eq!(config.outbounds().len(), 2);
+        assert_eq!(config.outbounds()[1].tag(), "group");
+        assert_eq!(config.inbounds()[0].tag(), "in-vless");
     }
 }

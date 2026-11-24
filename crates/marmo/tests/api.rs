@@ -1,10 +1,10 @@
 //! Public API construction checks.
 //!
 //! These tests use only names reachable from the crate root. They check that a
-//! complete configuration can be built without JSON and that the builder
-//! rejects an invalid document at the same point as `Config::from_json`.
+//! complete typed configuration can be built without JSON and that the builder
+//! rejects the same invalid documents as `Config::from_json`.
 
-use marmo::{Config, Inbound, InboundProtocol, Limits, Outbound, OutboundProtocol, Route, Router};
+use marmo::{Config, Endpoint, Inbound, Limits, Outbound, Route, Router};
 
 #[test]
 fn builds_a_config_programmatically() {
@@ -16,33 +16,13 @@ fn builds_a_config_programmatically() {
             uplink_only_s: 1,
             downlink_only_s: 1,
         })
-        .inbound(Inbound {
+        .inbound(Inbound::Socks5 {
             tag: "socks".into(),
-            protocol: InboundProtocol::Socks5,
-            listen: "127.0.0.1:0".into(),
-            method: None,
-            password: None,
-            uuid: None,
-            tls: None,
-            transport: None,
-            fallback: None,
+            listen: Endpoint::parse("127.0.0.1:0").expect("listen"),
             sniffing: None,
         })
-        .outbound(Outbound {
+        .outbound(Outbound::Direct {
             tag: "direct".into(),
-            protocol: OutboundProtocol::Direct,
-            server: None,
-            method: None,
-            password: None,
-            uuid: None,
-            tls: None,
-            transport: None,
-            xudp: false,
-            mux: false,
-            security: None,
-            nodes: None,
-            strategy: None,
-            health_check: None,
         })
         .route(Route {
             rules: Vec::new(),
@@ -52,25 +32,89 @@ fn builds_a_config_programmatically() {
         .expect("valid config");
 
     assert_eq!(config.limits().max_connections, 8);
+    assert_eq!(config.inbounds()[0].tag(), "socks");
     Router::compile(&config).expect("router");
 }
 
 #[test]
 fn builder_rejects_semantically_invalid_config() {
     let error = Config::builder()
-        .inbound(Inbound {
+        .inbound(Inbound::Http {
             tag: String::new(),
-            protocol: InboundProtocol::Http,
-            listen: "127.0.0.1:0".into(),
-            method: None,
-            password: None,
-            uuid: None,
-            tls: None,
-            transport: None,
-            fallback: None,
+            listen: Endpoint::parse("127.0.0.1:0").expect("listen"),
             sniffing: None,
         })
         .build()
         .expect_err("empty tag");
     assert!(error.to_string().contains("inbounds[0].tag"));
+}
+
+#[test]
+fn builder_rejects_duplicate_tags_and_unknown_targets() {
+    let duplicate = Config::builder()
+        .outbound(Outbound::Direct {
+            tag: "direct".into(),
+        })
+        .outbound(Outbound::Direct {
+            tag: "direct".into(),
+        })
+        .build()
+        .expect_err("duplicate tag");
+    assert!(duplicate.to_string().contains("duplicate 'direct'"));
+
+    let unknown = Config::builder()
+        .outbound(Outbound::Direct {
+            tag: "direct".into(),
+        })
+        .route(Route {
+            rules: vec![marmo::Rule {
+                domain: None,
+                domain_suffix: None,
+                domain_keyword: None,
+                domain_set: None,
+                ip_cidr: None,
+                geoip: None,
+                port: None,
+                port_range: None,
+                network: None,
+                inbound: None,
+                process_name: None,
+                process_path: None,
+                outbound: "missing".into(),
+            }],
+            final_outbound: "direct".into(),
+        })
+        .build()
+        .expect_err("unknown target");
+    assert!(unknown.to_string().contains("unknown 'missing'"));
+}
+
+#[test]
+fn from_json_and_builder_agree() {
+    let json = r#"{
+      "inbounds": [
+        { "tag": "socks", "protocol": "socks5", "listen": "127.0.0.1:0" }
+      ],
+      "outbounds": [ { "tag": "direct", "protocol": "direct" } ],
+      "route": { "final": "direct" }
+    }"#;
+    let parsed = Config::from_json(json).expect("parse");
+    let built = Config::builder()
+        .inbound(Inbound::Socks5 {
+            tag: "socks".into(),
+            listen: Endpoint::parse("127.0.0.1:0").expect("listen"),
+            sniffing: None,
+        })
+        .outbound(Outbound::Direct {
+            tag: "direct".into(),
+        })
+        .route(Route {
+            rules: Vec::new(),
+            final_outbound: "direct".into(),
+        })
+        .build()
+        .expect("build");
+    assert_eq!(parsed.inbounds()[0].tag(), built.inbounds()[0].tag());
+    assert_eq!(parsed.outbounds()[0].tag(), built.outbounds()[0].tag());
+    assert_eq!(parsed.route(), built.route());
 }

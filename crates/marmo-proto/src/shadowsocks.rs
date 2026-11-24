@@ -63,6 +63,21 @@ impl Method {
     pub const fn salt_len(self) -> usize {
         self.key_len()
     }
+
+    /// Returns the configured spelling of this method.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Aes128Gcm => "2022-blake3-aes-128-gcm",
+            Self::Aes256Gcm => "2022-blake3-aes-256-gcm",
+        }
+    }
+}
+
+impl fmt::Display for Method {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// A decoded PSK.
@@ -1159,6 +1174,12 @@ pub enum SsError {
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn formats_methods() {
+        assert_eq!(Method::Aes128Gcm.to_string(), "2022-blake3-aes-128-gcm");
+        assert_eq!(Method::Aes256Gcm.to_string(), "2022-blake3-aes-256-gcm");
+    }
 
     fn key(method: Method) -> Vec<u8> {
         (0..method.key_len()).map(|value| value as u8).collect()

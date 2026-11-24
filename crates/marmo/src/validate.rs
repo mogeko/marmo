@@ -14,9 +14,9 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 
 use crate::config::{
-    ClientAuth, ConfigError, Dns as ConfigDns, DnsProtocol, DnsServer, Inbound, InboundProtocol,
-    Limits as ConfigLimits, Outbound, OutboundProtocol, Process as ConfigProcess, RawConfig, Route,
-    Rule, Sniffing, StreamNetwork, StreamTransport, Tls,
+    ClientAuth, ConfigError, Dns as ConfigDns, DnsProtocol, DnsServer, Limits as ConfigLimits,
+    Process as ConfigProcess, RawConfig, RawInbound, RawInboundProtocol, RawOutbound,
+    RawOutboundProtocol, Route, Rule, Sniffing, StreamNetwork, StreamTransport, Tls,
 };
 
 impl RawConfig {
@@ -209,7 +209,7 @@ fn validate_dns_server(server: &DnsServer, path: &str) -> Result<SocketAddr, Con
     Ok(address)
 }
 
-fn validate_inbounds(inbounds: &[Inbound]) -> Result<(), ConfigError> {
+fn validate_inbounds(inbounds: &[RawInbound]) -> Result<(), ConfigError> {
     for (index, inbound) in inbounds.iter().enumerate() {
         if inbound.tag.is_empty() {
             return Err(fail(format!("inbounds[{index}].tag"), "must not be empty"));
@@ -239,7 +239,7 @@ fn validate_inbounds(inbounds: &[Inbound]) -> Result<(), ConfigError> {
         validate_sniffing(inbound.sniffing.as_ref(), index)?;
 
         match inbound.protocol {
-            InboundProtocol::Socks5 | InboundProtocol::Http => {
+            RawInboundProtocol::Socks5 | RawInboundProtocol::Http => {
                 if inbound.method.is_some()
                     || inbound.password.is_some()
                     || inbound.uuid.is_some()
@@ -253,10 +253,10 @@ fn validate_inbounds(inbounds: &[Inbound]) -> Result<(), ConfigError> {
                     ));
                 }
             }
-            InboundProtocol::Shadowsocks => validate_shadowsocks_inbound(inbound, index)?,
-            InboundProtocol::Trojan => validate_trojan_inbound(inbound, index)?,
-            InboundProtocol::Vless => validate_vless_inbound(inbound, index)?,
-            InboundProtocol::Vmess => validate_vmess_inbound(inbound, index)?,
+            RawInboundProtocol::Shadowsocks => validate_shadowsocks_inbound(inbound, index)?,
+            RawInboundProtocol::Trojan => validate_trojan_inbound(inbound, index)?,
+            RawInboundProtocol::Vless => validate_vless_inbound(inbound, index)?,
+            RawInboundProtocol::Vmess => validate_vmess_inbound(inbound, index)?,
         }
     }
     Ok(())
@@ -292,7 +292,7 @@ fn validate_sniffing(sniffing: Option<&Sniffing>, index: usize) -> Result<(), Co
     Ok(())
 }
 
-fn validate_shadowsocks_inbound(inbound: &Inbound, index: usize) -> Result<(), ConfigError> {
+fn validate_shadowsocks_inbound(inbound: &RawInbound, index: usize) -> Result<(), ConfigError> {
     if inbound.uuid.is_some()
         || inbound.tls.is_some()
         || inbound.transport.is_some()
@@ -330,7 +330,7 @@ fn validate_shadowsocks_inbound(inbound: &Inbound, index: usize) -> Result<(), C
     Ok(())
 }
 
-fn validate_trojan_inbound(inbound: &Inbound, index: usize) -> Result<(), ConfigError> {
+fn validate_trojan_inbound(inbound: &RawInbound, index: usize) -> Result<(), ConfigError> {
     if inbound.method.is_some() || inbound.uuid.is_some() {
         return Err(fail(
             format!("inbounds[{index}]"),
@@ -377,7 +377,7 @@ fn validate_trojan_inbound(inbound: &Inbound, index: usize) -> Result<(), Config
     Ok(())
 }
 
-fn validate_vless_inbound(inbound: &Inbound, index: usize) -> Result<(), ConfigError> {
+fn validate_vless_inbound(inbound: &RawInbound, index: usize) -> Result<(), ConfigError> {
     if inbound.method.is_some() || inbound.password.is_some() || inbound.fallback.is_some() {
         return Err(fail(
             format!("inbounds[{index}]"),
@@ -401,7 +401,7 @@ fn validate_vless_inbound(inbound: &Inbound, index: usize) -> Result<(), ConfigE
     validate_inbound_transport(inbound, index, true)
 }
 
-fn validate_vmess_inbound(inbound: &Inbound, index: usize) -> Result<(), ConfigError> {
+fn validate_vmess_inbound(inbound: &RawInbound, index: usize) -> Result<(), ConfigError> {
     if inbound.method.is_some() || inbound.password.is_some() || inbound.fallback.is_some() {
         return Err(fail(
             format!("inbounds[{index}]"),
@@ -471,7 +471,7 @@ fn validate_inbound_tls_auth(
 }
 
 fn validate_inbound_transport(
-    inbound: &Inbound, index: usize, tls_required: bool,
+    inbound: &RawInbound, index: usize, tls_required: bool,
 ) -> Result<(), ConfigError> {
     let Some(transport) = inbound.transport.as_ref() else {
         return Ok(());
@@ -515,7 +515,7 @@ fn validate_inbound_transport(
     Ok(())
 }
 
-fn validate_outbounds(outbounds: &[Outbound]) -> Result<(), ConfigError> {
+fn validate_outbounds(outbounds: &[RawOutbound]) -> Result<(), ConfigError> {
     for (index, outbound) in outbounds.iter().enumerate() {
         if outbound.tag.is_empty() {
             return Err(fail(format!("outbounds[{index}].tag"), "must not be empty"));
@@ -526,7 +526,7 @@ fn validate_outbounds(outbounds: &[Outbound]) -> Result<(), ConfigError> {
                 "'reject' is reserved",
             ));
         }
-        if outbound.tag == "direct" && outbound.protocol != OutboundProtocol::Direct {
+        if outbound.tag == "direct" && outbound.protocol != RawOutboundProtocol::Direct {
             return Err(fail(
                 format!("outbounds[{index}].tag"),
                 "'direct' is reserved for direct",
@@ -542,23 +542,23 @@ fn validate_outbounds(outbounds: &[Outbound]) -> Result<(), ConfigError> {
         }
 
         match outbound.protocol {
-            OutboundProtocol::Direct => validate_direct(outbound, index)?,
-            OutboundProtocol::Http => validate_http(outbound, index)?,
-            OutboundProtocol::Shadowsocks => {
+            RawOutboundProtocol::Direct => validate_direct(outbound, index)?,
+            RawOutboundProtocol::Http => validate_http(outbound, index)?,
+            RawOutboundProtocol::Shadowsocks => {
                 validate_shadowsocks_outbound(outbound, index)?;
             }
-            OutboundProtocol::Selector => {
+            RawOutboundProtocol::Selector => {
                 validate_selector(outbound, index, outbounds)?;
             }
-            OutboundProtocol::Trojan => validate_trojan(outbound, index)?,
-            OutboundProtocol::Vless => validate_vless(outbound, index)?,
-            OutboundProtocol::Vmess => validate_vmess(outbound, index)?,
+            RawOutboundProtocol::Trojan => validate_trojan(outbound, index)?,
+            RawOutboundProtocol::Vless => validate_vless(outbound, index)?,
+            RawOutboundProtocol::Vmess => validate_vmess(outbound, index)?,
         }
     }
     Ok(())
 }
 
-fn validate_direct(outbound: &Outbound, index: usize) -> Result<(), ConfigError> {
+fn validate_direct(outbound: &RawOutbound, index: usize) -> Result<(), ConfigError> {
     reject_selector_fields(outbound, index)?;
     reject_vless_fields(outbound, index)?;
     if outbound.server.is_some() || outbound.method.is_some() || outbound.password.is_some() {
@@ -570,7 +570,7 @@ fn validate_direct(outbound: &Outbound, index: usize) -> Result<(), ConfigError>
     Ok(())
 }
 
-fn validate_http(outbound: &Outbound, index: usize) -> Result<(), ConfigError> {
+fn validate_http(outbound: &RawOutbound, index: usize) -> Result<(), ConfigError> {
     reject_selector_fields(outbound, index)?;
     reject_vless_fields(outbound, index)?;
     let server = outbound
@@ -592,7 +592,7 @@ fn validate_http(outbound: &Outbound, index: usize) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn validate_shadowsocks_outbound(outbound: &Outbound, index: usize) -> Result<(), ConfigError> {
+fn validate_shadowsocks_outbound(outbound: &RawOutbound, index: usize) -> Result<(), ConfigError> {
     reject_selector_fields(outbound, index)?;
     reject_vless_fields(outbound, index)?;
     let server = outbound.server.as_deref().ok_or_else(|| {
@@ -635,7 +635,7 @@ fn validate_shadowsocks_outbound(outbound: &Outbound, index: usize) -> Result<()
 }
 
 fn validate_selector(
-    outbound: &Outbound, index: usize, outbounds: &[Outbound],
+    outbound: &RawOutbound, index: usize, outbounds: &[RawOutbound],
 ) -> Result<(), ConfigError> {
     reject_vless_fields(outbound, index)?;
     if outbound.server.is_some() || outbound.method.is_some() || outbound.password.is_some() {
@@ -700,7 +700,7 @@ fn validate_selector(
                 format!("unknown '{node}'"),
             ));
         };
-        if candidate.protocol == OutboundProtocol::Selector {
+        if candidate.protocol == RawOutboundProtocol::Selector {
             return Err(fail(
                 format!("outbounds[{index}].nodes[{node_index}]"),
                 "nested selectors are not supported",
@@ -710,7 +710,7 @@ fn validate_selector(
     Ok(())
 }
 
-fn validate_trojan(outbound: &Outbound, index: usize) -> Result<(), ConfigError> {
+fn validate_trojan(outbound: &RawOutbound, index: usize) -> Result<(), ConfigError> {
     reject_selector_fields(outbound, index)?;
     if outbound.method.is_some()
         || outbound.uuid.is_some()
@@ -758,7 +758,7 @@ fn validate_trojan(outbound: &Outbound, index: usize) -> Result<(), ConfigError>
     validate_outbound_tls(tls, &server, index)
 }
 
-fn validate_vless(outbound: &Outbound, index: usize) -> Result<(), ConfigError> {
+fn validate_vless(outbound: &RawOutbound, index: usize) -> Result<(), ConfigError> {
     reject_selector_fields(outbound, index)?;
     if outbound.method.is_some() || outbound.password.is_some() {
         return Err(fail(
@@ -801,7 +801,7 @@ fn validate_vless(outbound: &Outbound, index: usize) -> Result<(), ConfigError> 
     validate_outbound_transport(outbound, index)
 }
 
-fn validate_vmess(outbound: &Outbound, index: usize) -> Result<(), ConfigError> {
+fn validate_vmess(outbound: &RawOutbound, index: usize) -> Result<(), ConfigError> {
     reject_selector_fields(outbound, index)?;
     if outbound.method.is_some() || outbound.password.is_some() || outbound.xudp {
         return Err(fail(
@@ -890,7 +890,7 @@ fn validate_outbound_tls(tls: &Tls, server: &Endpoint, index: usize) -> Result<(
     )
 }
 
-fn validate_outbound_transport(outbound: &Outbound, index: usize) -> Result<(), ConfigError> {
+fn validate_outbound_transport(outbound: &RawOutbound, index: usize) -> Result<(), ConfigError> {
     let Some(transport) = outbound.transport.as_ref() else {
         return Ok(());
     };
@@ -1033,7 +1033,7 @@ fn validate_alpn(
 }
 
 fn validate_route(
-    route: &Route, outbounds: &[Outbound], inbounds: &[Inbound],
+    route: &Route, outbounds: &[RawOutbound], inbounds: &[RawInbound],
 ) -> Result<(), ConfigError> {
     if !is_valid_route_target(&route.final_outbound, outbounds) {
         return Err(fail(
@@ -1053,7 +1053,7 @@ fn validate_route(
     Ok(())
 }
 
-fn validate_rule(rule: &Rule, index: usize, inbounds: &[Inbound]) -> Result<(), ConfigError> {
+fn validate_rule(rule: &Rule, index: usize, inbounds: &[RawInbound]) -> Result<(), ConfigError> {
     if let Some(domains) = rule.domain.as_deref() {
         for domain in domains {
             if domain.is_empty() {
@@ -1173,7 +1173,7 @@ fn validate_port_ranges(ranges: Option<&[[u16; 2]]>, rule_index: usize) -> Resul
 }
 
 fn validate_rule_inbounds(
-    tags: Option<&[String]>, rule_index: usize, inbounds: &[Inbound],
+    tags: Option<&[String]>, rule_index: usize, inbounds: &[RawInbound],
 ) -> Result<(), ConfigError> {
     let Some(tags) = tags else {
         return Ok(());
@@ -1194,11 +1194,11 @@ fn validate_rule_inbounds(
     Ok(())
 }
 
-fn is_valid_route_target(tag: &str, outbounds: &[Outbound]) -> bool {
+fn is_valid_route_target(tag: &str, outbounds: &[RawOutbound]) -> bool {
     tag == "direct" || tag == "reject" || outbounds.iter().any(|item| item.tag == tag)
 }
 
-fn reject_selector_fields(outbound: &Outbound, index: usize) -> Result<(), ConfigError> {
+fn reject_selector_fields(outbound: &RawOutbound, index: usize) -> Result<(), ConfigError> {
     if outbound.nodes.is_some() || outbound.strategy.is_some() || outbound.health_check.is_some() {
         return Err(fail(
             format!("outbounds[{index}]"),
@@ -1208,7 +1208,7 @@ fn reject_selector_fields(outbound: &Outbound, index: usize) -> Result<(), Confi
     Ok(())
 }
 
-fn reject_vless_fields(outbound: &Outbound, index: usize) -> Result<(), ConfigError> {
+fn reject_vless_fields(outbound: &RawOutbound, index: usize) -> Result<(), ConfigError> {
     if outbound.uuid.is_some()
         || outbound.tls.is_some()
         || outbound.xudp
