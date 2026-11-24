@@ -419,11 +419,12 @@ pub fn encode_udp_packet(
     let separate_cipher = aes_block_encrypt(method, psk, &separate_plain)?;
     out[..16].copy_from_slice(&separate_cipher);
 
-    let subkey = derive_subkey(method, psk, &packet.session_id);
+    let mut subkey = derive_subkey(method, psk, &packet.session_id);
     let mut nonce = [0_u8; NONCE_LENGTH];
     nonce.copy_from_slice(&separate_plain[4..16]);
-    let sealed = seal(method, &subkey, nonce, &body[..offset], &mut out[16..])?;
-    Ok(16 + sealed)
+    let sealed = seal(method, &subkey, nonce, &body[..offset], &mut out[16..]);
+    subkey.zeroize();
+    Ok(16 + sealed?)
 }
 
 /// Decodes one UDP packet into `plaintext`.
@@ -446,10 +447,12 @@ pub fn decode_udp_packet<'a>(
             .map_err(|_| SsError::MalformedPacket)?,
     );
 
-    let subkey = derive_subkey(method, psk, &session_id);
+    let mut subkey = derive_subkey(method, psk, &session_id);
     let mut nonce = [0_u8; NONCE_LENGTH];
     nonce.copy_from_slice(&separate_plain[4..16]);
-    let body_len = open(method, &subkey, nonce, &packet[16..], plaintext)?;
+    let body_len = open(method, &subkey, nonce, &packet[16..], plaintext);
+    subkey.zeroize();
+    let body_len = body_len?;
     if body_len < 11 {
         return Err(SsError::MalformedPacket);
     }
