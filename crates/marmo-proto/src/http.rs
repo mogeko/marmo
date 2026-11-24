@@ -5,6 +5,8 @@
 //! values so the parser has no lifetime coupling to the read buffer and can be
 //! fuzzed in isolation.
 
+use std::fmt;
+
 use marmo_net::Endpoint;
 use thiserror::Error;
 
@@ -16,7 +18,7 @@ pub const FORWARD_HEAD_MAX: usize = HEAD_MAX + 1024;
 pub const MAX_HEADERS: usize = 64;
 
 /// One parsed header borrowed from the request buffer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct Header<'a> {
     /// Field name as sent by the peer.
     pub name: &'a str,
@@ -24,8 +26,18 @@ pub struct Header<'a> {
     pub value: &'a [u8],
 }
 
+impl fmt::Debug for Header<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Header")
+            .field("name", &self.name)
+            .field("value_len", &self.value.len())
+            .finish()
+    }
+}
+
 /// A parsed request head borrowed from the input buffer.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct RequestHead<'a> {
     /// Request method.
     pub method: &'a str,
@@ -35,6 +47,18 @@ pub struct RequestHead<'a> {
     pub version: u8,
     headers: [Header<'a>; MAX_HEADERS],
     count: usize,
+}
+
+impl fmt::Debug for RequestHead<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RequestHead")
+            .field("method", &self.method)
+            .field("target", &self.target)
+            .field("version", &self.version)
+            .field("header_count", &self.count)
+            .finish()
+    }
 }
 
 impl<'a> RequestHead<'a> {
@@ -402,6 +426,7 @@ mod tests {
         assert_eq!(head.method, "GET");
         assert_eq!(head.version, 1);
         assert_eq!(head.headers().len(), 5);
+        assert!(!format!("{head:?}").contains("X-Test"));
 
         let target = parse_absolute(head.target).expect("target");
         assert_eq!(target.endpoint.domain(), Some("example.com"));
