@@ -26,6 +26,13 @@ const MAX_OUTPUT: u64 = 1024 * 1024;
 /// Largest handshake head.
 const MAX_HEAD: usize = 8 * 1024;
 
+fn connection_limits() -> Limits {
+    Limits::new()
+        .with_max_message(MAX_MESSAGE)
+        .with_max_frame(MAX_FRAME)
+        .with_max_output(MAX_OUTPUT)
+}
+
 /// Parameters for a WebSocket client.
 #[derive(Clone, Debug)]
 pub struct WsClientOptions {
@@ -129,7 +136,9 @@ impl WsClient {
             return Err(WsError::Subprotocol(selected.to_owned()));
         }
         let compression = verified.extensions.deflate().is_some();
-        let mut conn = handshake.connection(&verified);
+        let mut conn = handshake
+            .connection(&verified)
+            .with_limits(connection_limits());
         if consumed < buffer.len() {
             let _ = conn.feed(&buffer[consumed..]);
         }
@@ -158,12 +167,7 @@ impl WsServer {
     pub async fn accept(&self, mut inner: BoxStream) -> Result<WsConnection, WsError> {
         let mut policy = AcceptPolicy::new()
             .with_origins(OriginPolicy::any_origin())
-            .with_limits(
-                Limits::new()
-                    .with_max_message(MAX_MESSAGE)
-                    .with_max_frame(MAX_FRAME)
-                    .with_max_output(MAX_OUTPUT),
-            );
+            .with_limits(connection_limits());
         let protocols: Vec<&str> = self
             .options
             .subprotocols

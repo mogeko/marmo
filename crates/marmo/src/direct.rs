@@ -10,6 +10,9 @@ use tokio::net::TcpStream;
 
 use crate::dns::DnsRuntime;
 
+/// Maximum addresses accepted from the system resolver for one lookup.
+const MAX_SYSTEM_ADDRESSES: usize = 16;
+
 /// A direct dialer carrying the optional instance DNS resolver.
 #[derive(Clone, Default)]
 pub(crate) struct Dialer {
@@ -105,8 +108,17 @@ impl Dialer {
             return dns.resolve(domain).await.map_err(DnsRuntime::io_resolve);
         }
 
-        let addresses = tokio::net::lookup_host((domain, 0)).await?;
-        Ok(addresses.map(|address| address.ip()).collect())
+        let mut unique = Vec::new();
+        for address in tokio::net::lookup_host((domain, 0)).await? {
+            let address = address.ip();
+            if unique.len() >= MAX_SYSTEM_ADDRESSES {
+                break;
+            }
+            if !unique.contains(&address) {
+                unique.push(address);
+            }
+        }
+        Ok(Arc::from(unique))
     }
 }
 

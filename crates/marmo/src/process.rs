@@ -70,8 +70,10 @@ pub struct ProcessRequest {
 /// Looks up the local process behind a connection.
 ///
 /// The resolver is trusted embedder code and runs on a blocking thread. It
-/// must be bounded and must not panic. Returning `None` means "unknown": the
-/// process matcher does not match and routing continues.
+/// must be bounded, must not panic, and must finish on its own: a lookup
+/// timeout detaches the blocking call rather than interrupting it. Returning
+/// `None` means "unknown": the process matcher does not match and routing
+/// continues.
 pub trait ProcessResolver: Send + Sync {
     /// Returns the process identity for `request`, or `None` when unknown.
     fn resolve(&self, request: &ProcessRequest) -> Option<ProcessInfo>;

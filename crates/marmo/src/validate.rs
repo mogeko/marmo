@@ -436,10 +436,10 @@ fn validate_inbound_tls(tls: &crate::config::InboundTls, index: usize) -> Result
             "must be inline PEM (ADR-0023); file paths are not accepted",
         ));
     }
-    if tls.handshake_timeout_s == 0 {
+    if !(1..=600).contains(&tls.handshake_timeout_s) {
         return Err(fail(
             format!("inbounds[{index}].tls.handshake_timeout_s"),
-            "must be positive",
+            "must be 1..600",
         ));
     }
     Ok(())
@@ -853,10 +853,10 @@ fn validate_outbound_tls(tls: &Tls, server: &Endpoint, index: usize) -> Result<(
             "only allowed for a loopback test server; use a trusted certificate",
         ));
     }
-    if tls.handshake_timeout_s == 0 {
+    if !(1..=600).contains(&tls.handshake_timeout_s) {
         return Err(fail(
             format!("outbounds[{index}].tls.handshake_timeout_s"),
-            "must be positive",
+            "must be 1..600",
         ));
     }
     let has_certificate = tls.client_certificate.is_some();

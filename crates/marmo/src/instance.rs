@@ -801,6 +801,21 @@ impl BackgroundTasks {
             task.abort();
         }
     }
+
+    /// Waits for pool supervisors to drain, aborting any that exceed `grace`.
+    async fn shutdown(&mut self, grace: Duration) {
+        let mut tasks = std::mem::take(&mut self.0);
+        let deadline = tokio::time::Instant::now() + grace;
+        for task in &mut tasks {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if timeout(remaining, &mut *task).await.is_err() {
+                task.abort();
+            }
+        }
+        for task in tasks {
+            let _ = task.await;
+        }
+    }
 }
 
 impl Drop for BackgroundTasks {
@@ -915,9 +930,9 @@ impl BoundInstance {
             }
         }
 
-        supervisor.cancel();
-        background.abort_all();
         let grace = limits.shutdown_grace;
+        supervisor.cancel();
+        background.shutdown(grace).await;
         let drain = async { while tasks.join_next().await.is_some() {} };
         if timeout(grace, drain).await.is_err() {
             tasks.abort_all();
