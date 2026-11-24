@@ -599,7 +599,7 @@ impl MuxFrames {
         }
         let meta = marmo_proto::mux::parse_meta(&self.buffer[2..2 + meta_len]).ok()?;
         let offset = 2 + meta_len;
-        let data_len = if meta.option & marmo_proto::mux::OPTION_DATA != 0 {
+        let (data, total) = if meta.option & marmo_proto::mux::OPTION_DATA != 0 {
             if self.buffer.len() < offset + 2 {
                 return None;
             }
@@ -610,12 +610,14 @@ impl MuxFrames {
             if self.buffer.len() < offset + 2 + length {
                 return None;
             }
-            length
+            (
+                self.buffer[offset + 2..offset + 2 + length].to_vec(),
+                offset + 2 + length,
+            )
         } else {
-            0
+            (Vec::new(), offset)
         };
-        let data = self.buffer[offset + 2..offset + 2 + data_len].to_vec();
-        self.buffer.drain(..offset + 2 + data_len);
+        self.buffer.drain(..total);
         Some((meta, data))
     }
 }
@@ -785,7 +787,7 @@ async fn mux_downlink_activity_resets_idle_timeout() {
         let Ok((mut stream, _)) = target.accept().await else {
             return;
         };
-        for _ in 0..5 {
+        for _ in 0..20 {
             tokio::time::sleep(Duration::from_millis(400)).await;
             if stream.write_all(b"x").await.is_err() {
                 break;
