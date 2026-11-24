@@ -28,8 +28,8 @@ mod vless;
 mod vmess;
 
 pub use config::{
-    ClientAuth, Config, ConfigError, Dns, DnsProtocol, DnsServer, DnsTls, HealthCheck, Inbound,
-    InboundProtocol, InboundTls, Limits as ConfigLimits, MAX_CONFIG_BYTES, Outbound,
+    ClientAuth, Config, ConfigBuilder, ConfigError, Dns, DnsProtocol, DnsServer, DnsTls,
+    HealthCheck, Inbound, InboundProtocol, InboundTls, Limits, MAX_CONFIG_BYTES, Outbound,
     OutboundProtocol, Process, Route, Rule, SniffProtocol, Sniffing, Strategy, StreamNetwork,
     StreamTransport, Tls, VmessSecurity,
 };
@@ -37,7 +37,7 @@ pub use instance::{
     BindError, BoundAddr, BoundInstance, BuildError, Instance, InstanceBuilder, InstanceHandle,
     ServeError,
 };
-pub use limits::Limits;
+pub use limits::RuntimeLimits;
 pub use marmo_net::{Cidr, Endpoint, Network};
 pub use metrics::{MetricEvent, MetricsSink, MetricsSnapshot};
 pub use process::{ProcessInfo, ProcessRequest, ProcessResolver};

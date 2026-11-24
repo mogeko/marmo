@@ -38,7 +38,7 @@ use crate::deadline::Deadline;
 use crate::direct::Dialer;
 use crate::dns::DnsRuntime;
 use crate::inbound::{self, http, socks5};
-use crate::limits::Limits;
+use crate::limits::RuntimeLimits;
 use crate::metrics::{MetricEvent, Metrics, MetricsSink, MetricsSnapshot};
 use crate::outbound::{self, Outbound, datagram::BoxDatagram, http_connect};
 use crate::process::{ProcessRequest, ProcessResolver, ProcessRuntime};
@@ -52,7 +52,7 @@ use crate::vmess::ReplayFilter;
 /// A built instance; no sockets are open yet.
 pub struct Instance {
     runtime: Handle,
-    limits: Limits,
+    limits: RuntimeLimits,
     supervisor: Arc<Supervisor>,
     router: Arc<Router>,
     metrics: Arc<Metrics>,
@@ -284,7 +284,6 @@ impl InstanceBuilder {
 
     /// Validates config, compiles rules, and rejects unsupported protocols.
     pub fn build(self) -> Result<Instance, BuildError> {
-        self.config.validate()?;
         let runtime = match self.runtime {
             Some(handle) => handle,
             None => Handle::try_current().map_err(|_| BuildError::NoRuntime)?,
@@ -316,10 +315,10 @@ impl InstanceBuilder {
         }
         let process = self
             .process_resolver
-            .map(|resolver| Arc::new(ProcessRuntime::new(&self.config.process, resolver)));
+            .map(|resolver| Arc::new(ProcessRuntime::new(&self.config.raw.process, resolver)));
 
-        let mut inbounds = Vec::with_capacity(self.config.inbounds.len());
-        for inbound in &self.config.inbounds {
+        let mut inbounds = Vec::with_capacity(self.config.raw.inbounds.len());
+        for inbound in &self.config.raw.inbounds {
             let config = match inbound.protocol {
                 InboundProtocol::Socks5 => InboundConfig::Socks5,
                 InboundProtocol::Http => InboundConfig::Http,
@@ -487,8 +486,8 @@ impl InstanceBuilder {
             });
         }
 
-        let mut outbounds = Vec::with_capacity(self.config.outbounds.len());
-        for outbound in &self.config.outbounds {
+        let mut outbounds = Vec::with_capacity(self.config.raw.outbounds.len());
+        for outbound in &self.config.raw.outbounds {
             let config = match outbound.protocol {
                 OutboundProtocol::Direct => OutboundConfig::Direct,
                 OutboundProtocol::Http => {
@@ -756,7 +755,7 @@ impl InstanceBuilder {
         let metrics = Arc::new(Metrics::new(self.metrics));
         #[cfg(feature = "dns")]
         let dns = DnsRuntime::build(
-            self.config.dns.as_ref(),
+            self.config.raw.dns.as_ref(),
             self.dns_resolver,
             (*metrics).clone(),
         )
@@ -825,7 +824,7 @@ impl Drop for BackgroundTasks {
 /// A bound instance: listeners are open, no accept loop has started.
 pub struct BoundInstance {
     runtime: Handle,
-    limits: Limits,
+    limits: RuntimeLimits,
     supervisor: Arc<Supervisor>,
     router: Arc<Router>,
     metrics: Arc<Metrics>,
@@ -1006,7 +1005,7 @@ pub(crate) struct Context {
     pub(crate) direct: Arc<dyn Outbound>,
     pub(crate) dialer: Dialer,
     pub(crate) outbounds: Vec<Arc<dyn Outbound>>,
-    pub(crate) limits: Limits,
+    pub(crate) limits: RuntimeLimits,
 }
 
 impl Context {

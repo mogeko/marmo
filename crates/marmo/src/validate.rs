@@ -14,17 +14,17 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 
 use crate::config::{
-    ClientAuth, Config, ConfigError, Dns as ConfigDns, DnsProtocol, DnsServer, Inbound,
-    InboundProtocol, Limits as ConfigLimits, Outbound, OutboundProtocol, Process as ConfigProcess,
-    Route, Rule, Sniffing, StreamNetwork, StreamTransport, Tls,
+    ClientAuth, ConfigError, Dns as ConfigDns, DnsProtocol, DnsServer, Inbound, InboundProtocol,
+    Limits as ConfigLimits, Outbound, OutboundProtocol, Process as ConfigProcess, RawConfig, Route,
+    Rule, Sniffing, StreamNetwork, StreamTransport, Tls,
 };
 
-impl Config {
+impl RawConfig {
     /// Validates cross-field constraints.
     ///
-    /// [`Config::from_json`] calls this, so a parsed config is ready for
-    /// `Instance`. A programmatically built `Config` must call it explicitly.
-    pub fn validate(&self) -> Result<(), ConfigError> {
+    /// Called by `Config::from_json` and `ConfigBuilder::build`; the result is
+    /// never exposed as an unvalidated `Config`.
+    pub(crate) fn validate(&self) -> Result<(), ConfigError> {
         if self.version != 2 {
             let message = if self.version == 1 {
                 "version 1 is not supported by the Rust schema; version 2 carries inline PEM TLS credentials (ADR-0023)"
@@ -1323,6 +1323,7 @@ fn fail(path: impl Into<String>, message: impl Into<String>) -> ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
 
     fn parse(text: &str) -> Result<Config, ConfigError> {
         Config::from_json(text)

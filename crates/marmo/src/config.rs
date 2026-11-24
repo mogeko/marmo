@@ -16,25 +16,38 @@ use zeroize::Zeroize;
 /// Upper bound for a configuration document (4 MiB).
 pub const MAX_CONFIG_BYTES: usize = 4 * 1024 * 1024;
 
-/// The whole configuration document.
+/// The whole configuration document, after validation (ADR-0032).
+///
+/// The fields are private. Construct one with [`Config::from_json`] or
+/// [`ConfigBuilder`], both of which reject invalid documents before returning.
+#[derive(Clone, Default, PartialEq)]
+pub struct Config {
+    pub(crate) raw: RawConfig,
+}
+
+/// The strict JSON document.
+///
+/// This type is crate-private: it can represent an invalid configuration and is
+/// never handed to an embedder. `Config::from_json` and `ConfigBuilder` validate
+/// it before constructing a [`Config`].
 #[derive(Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct Config {
+pub(crate) struct RawConfig {
     /// Schema version; only `2` is defined today.
-    pub version: u8,
-    /// Global connection and timeout policy (`ConfigLimits`).
-    pub limits: Limits,
+    pub(crate) version: u8,
+    /// Global connection and timeout policy.
+    pub(crate) limits: Limits,
     /// Process-identity lookup bounds.
-    pub process: Process,
+    pub(crate) process: Process,
     /// Optional DNS resolver policy. `None` uses the system resolver.
     #[serde(default)]
-    pub dns: Option<Dns>,
+    pub(crate) dns: Option<Dns>,
     /// Configured inbounds.
-    pub inbounds: Vec<Inbound>,
+    pub(crate) inbounds: Vec<Inbound>,
     /// Configured outbounds.
-    pub outbounds: Vec<Outbound>,
+    pub(crate) outbounds: Vec<Outbound>,
     /// Rule list and default action.
-    pub route: Route,
+    pub(crate) route: Route,
 }
 
 impl Config {
@@ -42,14 +55,71 @@ impl Config {
     ///
     /// The document is rejected before parsing when it exceeds
     /// [`MAX_CONFIG_BYTES`]. Unknown fields, duplicate fields, bad enum tags,
-    /// and trailing data are errors carrying a JSON path.
+    /// and trailing data are errors carrying a JSON path. A parsed value is
+    /// semantically valid.
     pub fn from_json(text: &str) -> Result<Self, ConfigError> {
+        let raw = RawConfig::from_json(text)?;
+        raw.validate()?;
+        Ok(Self { raw })
+    }
+
+    /// Starts a programmatic configuration.
+    #[must_use]
+    pub fn builder() -> ConfigBuilder {
+        ConfigBuilder::new()
+    }
+
+    /// Schema version; only `2` is defined today.
+    #[must_use]
+    pub fn version(&self) -> u8 {
+        self.raw.version
+    }
+
+    /// Returns the runtime limits derived from this configuration.
+    #[must_use]
+    pub fn limits(&self) -> crate::limits::RuntimeLimits {
+        crate::limits::RuntimeLimits::from_config(&self.raw.limits)
+    }
+
+    /// Process-identity lookup bounds.
+    #[must_use]
+    pub fn process(&self) -> &Process {
+        &self.raw.process
+    }
+
+    /// Optional DNS resolver policy.
+    #[must_use]
+    pub fn dns(&self) -> Option<&Dns> {
+        self.raw.dns.as_ref()
+    }
+
+    /// Configured inbounds.
+    #[must_use]
+    pub fn inbounds(&self) -> &[Inbound] {
+        &self.raw.inbounds
+    }
+
+    /// Configured outbounds.
+    #[must_use]
+    pub fn outbounds(&self) -> &[Outbound] {
+        &self.raw.outbounds
+    }
+
+    /// Rule list and default action.
+    #[must_use]
+    pub fn route(&self) -> &Route {
+        &self.raw.route
+    }
+}
+
+impl RawConfig {
+    fn from_json(text: &str) -> Result<Self, ConfigError> {
         if text.len() > MAX_CONFIG_BYTES {
             return Err(ConfigError::TooLarge);
         }
 
         let mut deserializer = serde_json::Deserializer::from_str(text);
-        let config: Config =
+        let config: Self =
             serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
                 ConfigError::Json {
                     path: error.path().to_string(),
@@ -60,18 +130,84 @@ impl Config {
             path: ".".into(),
             source,
         })?;
-        config.validate()?;
         Ok(config)
-    }
-
-    /// Returns the runtime limits derived from this configuration.
-    #[must_use]
-    pub fn limits(&self) -> crate::Limits {
-        crate::Limits::from_config(&self.limits)
     }
 }
 
-impl Default for Config {
+/// Builds a validated [`Config`] without JSON.
+///
+/// Each call replaces or appends one section. [`ConfigBuilder::build`] runs the
+/// same semantic validation as [`Config::from_json`].
+#[derive(Clone)]
+pub struct ConfigBuilder {
+    raw: RawConfig,
+}
+
+impl ConfigBuilder {
+    /// Starts from schema defaults.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            raw: RawConfig::default(),
+        }
+    }
+
+    /// Replaces global connection and timeout limits.
+    #[must_use]
+    pub fn limits(mut self, limits: Limits) -> Self {
+        self.raw.limits = limits;
+        self
+    }
+
+    /// Replaces process-identity lookup bounds.
+    #[must_use]
+    pub fn process(mut self, process: Process) -> Self {
+        self.raw.process = process;
+        self
+    }
+
+    /// Replaces the optional DNS policy.
+    #[must_use]
+    pub fn dns(mut self, dns: Option<Dns>) -> Self {
+        self.raw.dns = dns;
+        self
+    }
+
+    /// Appends one inbound.
+    #[must_use]
+    pub fn inbound(mut self, inbound: Inbound) -> Self {
+        self.raw.inbounds.push(inbound);
+        self
+    }
+
+    /// Appends one outbound.
+    #[must_use]
+    pub fn outbound(mut self, outbound: Outbound) -> Self {
+        self.raw.outbounds.push(outbound);
+        self
+    }
+
+    /// Replaces the rule list and default action.
+    #[must_use]
+    pub fn route(mut self, route: Route) -> Self {
+        self.raw.route = route;
+        self
+    }
+
+    /// Validates the assembled configuration.
+    pub fn build(self) -> Result<Config, ConfigError> {
+        self.raw.validate()?;
+        Ok(Config { raw: self.raw })
+    }
+}
+
+impl Default for ConfigBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for RawConfig {
     fn default() -> Self {
         Self {
             version: 2,
@@ -701,18 +837,19 @@ impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Never print credentials: the config carries passwords and UUIDs.
         f.debug_struct("Config")
-            .field("version", &self.version)
-            .field("limits", &self.limits)
+            .field("version", &self.raw.version)
+            .field("limits", &self.raw.limits)
             .field(
                 "dns",
                 &self
+                    .raw
                     .dns
                     .as_ref()
                     .map(|dns| (dns.servers.len(), dns.fallback.len())),
             )
-            .field("inbounds", &self.inbounds.len())
-            .field("outbounds", &self.outbounds.len())
-            .field("route", &self.route)
+            .field("inbounds", &self.raw.inbounds.len())
+            .field("outbounds", &self.raw.outbounds.len())
+            .field("route", &self.raw.route)
             .finish()
     }
 }
@@ -781,13 +918,13 @@ mod tests {
     #[test]
     fn parses_defaults() {
         let config = Config::from_json("{}").expect("parse");
-        assert_eq!(config.version, 2);
-        assert_eq!(config.limits, Limits::default());
-        assert_eq!(config.process, Process::default());
-        assert!(config.dns.is_none());
-        assert!(config.inbounds.is_empty());
-        assert!(config.outbounds.is_empty());
-        assert_eq!(config.route.final_outbound, "direct");
+        assert_eq!(config.version(), 2);
+        assert_eq!(config.raw.limits, Limits::default());
+        assert_eq!(config.raw.process, Process::default());
+        assert!(config.raw.dns.is_none());
+        assert!(config.raw.inbounds.is_empty());
+        assert!(config.raw.outbounds.is_empty());
+        assert_eq!(config.raw.route.final_outbound, "direct");
     }
 
     #[cfg(feature = "dns")]
@@ -811,7 +948,7 @@ mod tests {
           }
         }"#;
         let config = Config::from_json(text).expect("parse");
-        let dns = config.dns.as_ref().expect("dns");
+        let dns = config.raw.dns.as_ref().expect("dns");
         assert_eq!(dns.servers.len(), 2);
         assert_eq!(dns.servers[0].protocol, DnsProtocol::Https);
         assert_eq!(dns.servers[0].path.as_deref(), Some("/dns-query"));
@@ -840,10 +977,10 @@ mod tests {
     #[test]
     fn parses_full_config() {
         let config = Config::from_json(FULL).expect("parse");
-        assert_eq!(config.limits.max_connections, 16);
-        assert_eq!(config.limits.idle_timeout_s, 0);
+        assert_eq!(config.raw.limits.max_connections, 16);
+        assert_eq!(config.raw.limits.idle_timeout_s, 0);
 
-        let inbound = &config.inbounds[0];
+        let inbound = &config.raw.inbounds[0];
         assert_eq!(inbound.tag, "in-vless");
         assert_eq!(inbound.protocol, InboundProtocol::Vless);
         assert_eq!(
@@ -862,7 +999,7 @@ mod tests {
             Some([SniffProtocol::Tls, SniffProtocol::Http2].as_slice())
         );
 
-        let selector = &config.outbounds[1];
+        let selector = &config.raw.outbounds[1];
         assert_eq!(selector.protocol, OutboundProtocol::Selector);
         assert_eq!(selector.strategy, Some(Strategy::LeastLatency));
         assert_eq!(
@@ -871,7 +1008,7 @@ mod tests {
         );
         assert_eq!(selector.health_check.as_ref().expect("health").timeout_s, 5);
 
-        let rule = &config.route.rules[0];
+        let rule = &config.raw.route.rules[0];
         assert_eq!(rule.network, Some(Network::Tcp));
         assert_eq!(rule.port.as_deref(), Some([443_u16].as_slice()));
         assert_eq!(rule.outbound, "group");
@@ -949,13 +1086,13 @@ mod tests {
     #[test]
     fn from_str_matches_from_json() {
         let config: Config = "{}".parse().expect("parse");
-        assert_eq!(config.version, 2);
+        assert_eq!(config.version(), 2);
     }
 
     #[test]
     fn round_trips() {
         let config = Config::from_json(FULL).expect("parse");
-        let encoded = serde_json::to_string(&config).expect("encode");
+        let encoded = serde_json::to_string(&config.raw).expect("encode");
         let decoded = Config::from_json(&encoded).expect("decode");
         assert_eq!(decoded, config);
     }
