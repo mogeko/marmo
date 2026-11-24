@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use marmo::{Config, Instance, InstanceHandle, ServeError};
+use marmo_proto::http::HEAD_MAX;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
@@ -297,13 +298,13 @@ async fn pipelined_request_is_relayed_as_body_bytes() {
 async fn oversized_head_returns_431() {
     let (address, handle, serve) = start(DIRECT).await;
     let mut client = TcpStream::connect(address).await.expect("connect");
-    client
-        .write_all(b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n")
-        .await
-        .expect("head start");
-    let filler = vec![b'a'; 8192];
+    let head_start = b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n";
+    client.write_all(head_start).await.expect("head start");
+    // End exactly at HEAD_MAX. Sending more leaves unread bytes that make
+    // Windows reset the connection and discard the 431 response.
+    let filler = vec![b'a'; HEAD_MAX - head_start.len()];
     // The head never terminates; the inbound must bound the read and answer.
-    let _ = client.write_all(&filler).await;
+    client.write_all(&filler).await.expect("head filler");
 
     let head = read_head(&mut client).await;
     assert!(
