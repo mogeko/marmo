@@ -9,9 +9,10 @@ owns the proxy policy around them (ADR-0018).
 - HTTP/1.0 and HTTP/1.1 request heads, origin-form and absolute-form targets,
   and CONNECT response heads.
 - Inbound `CONNECT host:port` tunnels and forward proxying. One request head is
-  parsed per connection; bytes after that head are relayed as opaque bytes.
-  Pipelined requests are not parsed or routed individually, so clients must not
-  rely on pipelining.
+  parsed and routed per connection (ADR-0034); all bytes after that head, and
+  all later client bytes, are relayed as an opaque body or tunnel. A second
+  request head on the same connection is never parsed or routed, so clients must
+  not pipeline requests to this inbound.
 - Bounds: 8 KiB request head, 64 headers, 8 KiB + 1 KiB rewritten forward head;
   control characters and invalid header names/values are rejected.
 - CONNECT requires a `host:port` target. Normally the `200 Connection
@@ -35,8 +36,11 @@ owns the proxy policy around them (ADR-0018).
 ## Known gaps
 
 - No HTTP/1.1 chunked-body decoding or trailing headers in the proxy itself;
-  bodies are relayed as opaque bytes after the head.
-- No upgrade, WebSocket-over-HTTP/1.1, or request pipelining.
+  bodies are relayed as opaque bytes after the head (P4-6).
+- No upgrade, WebSocket-over-HTTP/1.1, or request pipelining. Pipelining is an
+  explicit non-goal until P4-6 adds body framing and per-request routing.
+- The single-head policy is a scope statement, not a request-smuggling defense;
+  framing ambiguity is delegated to the origin and closed by P4-6.
 - No HTTP/2 inbound and no proxying of HTTP/2 requests as HTTP/1 for upstream.
 - Header forwarding does not canonicalize arbitrary fields beyond the
   hop-by-hop and framing checks above.
@@ -48,7 +52,8 @@ owns the proxy policy around them (ADR-0018).
   bad versions, framing ambiguity, truncation, and size limits.
 - Fuzz: `http` target over request, absolute target, and CONNECT response
   parsing; corpus seeds are spec-derived heads.
-- Integration: HTTP CONNECT, forward rewrite, hop-by-hop stripping, reject, and
+- Integration: HTTP CONNECT, forward rewrite, hop-by-hop stripping, body-prefix
+  preservation, pipelined-request relay, oversized-head rejection, reject, and
   outbound CONNECT loopback tests.
 - Local RFC conformance: curl 8.7.1 forward and proxied-CONNECT requests through
   a marmo HTTP inbound to a local HTTP server passed on 2026-11-24. The
