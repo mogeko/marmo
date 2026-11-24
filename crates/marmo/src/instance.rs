@@ -43,7 +43,7 @@ use crate::outbound::{self, Outbound, http_connect, udp::UdpOutbound};
 use crate::process::{ProcessRequest, ProcessResolver, ProcessRuntime};
 use crate::routing::{Action, Metadata, Router, RoutingError};
 use crate::ruleset::{DomainSet, IpSet, RuleSets};
-use crate::shadowsocks::credentials;
+use crate::shadowsocks::{SaltReplay, credentials};
 use crate::sniff::Policy;
 use crate::supervisor::Supervisor;
 use crate::vmess::ReplayFilter;
@@ -1100,6 +1100,7 @@ enum InboundKind {
     Shadowsocks {
         method: Method,
         key: Arc<Key>,
+        replay: Arc<Mutex<SaltReplay>>,
     },
     Trojan {
         password: Arc<PasswordHash>,
@@ -1179,7 +1180,11 @@ impl InboundConfig {
         Ok(match self {
             Self::Socks5 => InboundKind::Socks5,
             Self::Http => InboundKind::Http,
-            Self::Shadowsocks { method, key } => InboundKind::Shadowsocks { method, key },
+            Self::Shadowsocks { method, key } => InboundKind::Shadowsocks {
+                method,
+                key,
+                replay: Arc::new(Mutex::new(SaltReplay::new())),
+            },
             Self::Trojan {
                 password,
                 tls,
@@ -1535,7 +1540,7 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
     let runtime = context.runtime.clone();
 
     if let Some(socket) = inbound.udp.take()
-        && let InboundKind::Shadowsocks { method, key } = &inbound.kind
+        && let InboundKind::Shadowsocks { method, key, .. } = &inbound.kind
     {
         let udp_context = Arc::clone(&context);
         let tag = Arc::clone(&inbound.tag);
@@ -1599,13 +1604,18 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                         InboundKind::Http => {
                             http::handle(stream, task_context, tag, sniffing, deadline).await;
                         }
-                        InboundKind::Shadowsocks { method, key } => {
+                        InboundKind::Shadowsocks {
+                            method,
+                            key,
+                            replay,
+                        } => {
                             inbound::shadowsocks::handle(
                                 stream,
                                 task_context,
                                 tag,
                                 method,
                                 key,
+                                replay,
                                 sniffing,
                                 deadline,
                             )

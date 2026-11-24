@@ -1,9 +1,12 @@
 //! Shadowsocks 2022 UDP loopback tests through the public `Instance`.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use marmo::{Config, Instance, InstanceHandle, Network, ServeError};
+use marmo::{Config, Endpoint, Instance, InstanceHandle, Network, ServeError};
+use marmo_proto::shadowsocks::{
+    Direction, Key, Method, UdpPacket, decode_udp_packet, encode_udp_packet,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::task::JoinHandle;
@@ -52,6 +55,40 @@ async fn stop(handle: InstanceHandle, task: JoinHandle<Result<(), ServeError>>) 
         .expect("serve timeout")
         .expect("join")
         .expect("serve");
+}
+
+async fn start_shadowsocks(
+    json: &str,
+) -> (
+    SocketAddr,
+    SocketAddr,
+    InstanceHandle,
+    JoinHandle<Result<(), ServeError>>,
+) {
+    let config = Config::from_json(json).expect("config");
+    let instance = Instance::builder(config).build().expect("build");
+    let bound = instance.bind().await.expect("bind");
+    let addresses: Vec<_> = bound.local_addrs().collect();
+    let tcp = addresses
+        .iter()
+        .find(|address| address.network == Network::Tcp)
+        .expect("tcp")
+        .addr;
+    let udp = addresses
+        .iter()
+        .find(|address| address.network == Network::Udp)
+        .expect("udp")
+        .addr;
+    let handle = bound.handle();
+    let task = tokio::spawn(bound.serve());
+    (tcp, udp, handle, task)
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
 }
 
 async fn udp_associate(client: &mut TcpStream) -> (UdpSocket, SocketAddr) {
@@ -186,4 +223,74 @@ async fn relay_datagram(method: &str, key: &str) {
 async fn relays_shadowsocks_2022_udp() {
     relay_datagram(METHOD_128, KEY_128).await;
     relay_datagram(METHOD_256, KEY_256).await;
+}
+
+#[tokio::test]
+async fn rejects_a_stale_udp_packet() {
+    let (echo, echo_task) = udp_echo().await;
+    let json = format!(
+        r#"{{
+          "limits": {{ "handshake_timeout_s": 2, "idle_timeout_s": 5 }},
+          "inbounds": [
+            {{ "tag": "ss", "protocol": "shadowsocks", "listen": "127.0.0.1:0",
+               "method": "{METHOD_128}", "password": "{KEY_128}" }}
+          ],
+          "route": {{ "final": "direct" }}
+        }}"#
+    );
+    let (_tcp, udp, handle, task) = start_shadowsocks(&json).await;
+
+    let method = Method::Aes128Gcm;
+    let key = Key::parse(method, KEY_128).expect("key");
+    let destination = Endpoint::from(echo);
+    let session_id = *b"stale-01";
+    let mut encoded = vec![0_u8; 1024];
+    let stale = UdpPacket {
+        direction: Direction::ClientToServer,
+        session_id,
+        packet_id: 1,
+        client_session_id: None,
+        destination: &destination,
+        payload: b"stale",
+        padding_len: 0,
+        timestamp: unix_now().saturating_sub(31),
+    };
+    let length = encode_udp_packet(method, key.as_bytes(), &stale, &mut encoded).expect("encode");
+    let socket = UdpSocket::bind(("127.0.0.1", 0)).await.expect("bind");
+    socket.send_to(&encoded[..length], udp).await.expect("send");
+
+    let mut buffer = [0_u8; 256];
+    assert!(
+        timeout(Duration::from_millis(300), socket.recv_from(&mut buffer))
+            .await
+            .is_err(),
+        "stale UDP packet was accepted"
+    );
+
+    // The same session with a fresh timestamp must still work.
+    let fresh = UdpPacket {
+        timestamp: unix_now(),
+        packet_id: 2,
+        ..stale
+    };
+    let length = encode_udp_packet(method, key.as_bytes(), &fresh, &mut encoded).expect("encode");
+    socket.send_to(&encoded[..length], udp).await.expect("send");
+    let (length, _) = timeout(Duration::from_secs(2), socket.recv_from(&mut buffer))
+        .await
+        .expect("fresh timeout")
+        .expect("fresh recv");
+    let mut plain = [0_u8; 256];
+    let decoded = decode_udp_packet(
+        method,
+        key.as_bytes(),
+        &buffer[..length],
+        Direction::ServerToClient,
+        Some(session_id),
+        &mut plain,
+    )
+    .expect("reply");
+    assert_eq!(decoded.payload, b"stale");
+
+    stop(handle, task).await;
+    echo_task.abort();
 }

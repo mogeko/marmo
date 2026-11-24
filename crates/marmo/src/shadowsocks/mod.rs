@@ -5,6 +5,7 @@
 //! read is bounded by the fixed chunk length (at most `u16::MAX`) and every
 //! write is capped at one chunk.
 
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -19,10 +20,60 @@ use marmo_proto::shadowsocks::{
     seal_chunk,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use zeroize::Zeroize;
 
 mod udp;
 
 pub(crate) use udp::SsUdpClient;
+
+/// Accepted Shadowsocks request salts retained for the replay window.
+const SALT_REPLAY_CAPACITY: usize = 4_096;
+/// SIP022 requires remembering a request salt for at least the NAT timeout.
+const SALT_REPLAY_TTL_S: u64 = 60;
+
+/// Bounded replay filter for Shadowsocks 2022 request salts.
+///
+/// SIP022 derives a request subkey from the salt, so replaying the same
+/// request bytes recreates a valid request. The filter rejects a salt seen in
+/// the last [`SALT_REPLAY_TTL_S`] seconds and evicts the oldest entry when the
+/// table is full.
+pub(crate) struct SaltReplay {
+    entries: HashMap<[u8; 32], u64>,
+    order: VecDeque<([u8; 32], u64)>,
+}
+
+impl SaltReplay {
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    /// Inserts `salt` and returns false when it was already present.
+    pub(crate) fn check_and_insert(&mut self, salt: [u8; 32], now: u64) -> bool {
+        while let Some((old, time)) = self.order.front() {
+            if now.saturating_sub(*time) > SALT_REPLAY_TTL_S {
+                let old = *old;
+                self.entries.remove(&old);
+                self.order.pop_front();
+            } else {
+                break;
+            }
+        }
+        if self.entries.contains_key(&salt) {
+            return false;
+        }
+        if self.entries.len() >= SALT_REPLAY_CAPACITY
+            && let Some((old, _)) = self.order.pop_front()
+        {
+            self.entries.remove(&old);
+        }
+        self.entries.insert(salt, now);
+        self.order.push_back((salt, now));
+        true
+    }
+}
 
 /// Length of the fixed header before encryption.
 const FIXED_HEADER: usize = 11;
@@ -166,6 +217,11 @@ where
             write_accepted: 0,
         };
         Ok((stream, target))
+    }
+
+    /// Returns the request salt used to derive the request subkey.
+    pub(crate) fn request_salt(&self) -> &[u8; 32] {
+        &self.request_salt
     }
 
     fn header_len(&self) -> usize {
@@ -468,6 +524,17 @@ where
     }
 }
 
+impl<S> Drop for SsStream<S> {
+    fn drop(&mut self) {
+        self.request_salt.zeroize();
+        self.send_key.zeroize();
+        self.recv_key.zeroize();
+        self.read_buf.zeroize();
+        self.plain.zeroize();
+        self.write_buf.zeroize();
+    }
+}
+
 /// Resolves a configured method and base64 password into a key.
 pub(crate) fn credentials(
     method: Option<&str>, password: Option<&str>,
@@ -509,4 +576,29 @@ fn invalid(message: &str) -> io::Error {
 
 fn missing_header() -> io::Error {
     invalid("missing shadowsocks response header")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn salt_replay_rejects_duplicates_and_expires() {
+        let mut replay = SaltReplay::new();
+        let salt = [7_u8; 32];
+        assert!(replay.check_and_insert(salt, 100));
+        assert!(!replay.check_and_insert(salt, 100));
+        assert!(replay.check_and_insert(salt, 100 + SALT_REPLAY_TTL_S + 1));
+    }
+
+    #[test]
+    fn salt_replay_is_bounded() {
+        let mut replay = SaltReplay::new();
+        for index in 0..=SALT_REPLAY_CAPACITY {
+            let mut salt = [0_u8; 32];
+            salt[..8].copy_from_slice(&(index as u64).to_be_bytes());
+            replay.check_and_insert(salt, 1_000);
+        }
+        assert_eq!(replay.entries.len(), SALT_REPLAY_CAPACITY);
+    }
 }

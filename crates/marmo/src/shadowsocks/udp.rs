@@ -7,7 +7,7 @@ use std::sync::Arc;
 use marmo_net::Endpoint;
 use marmo_proto::shadowsocks::{
     Direction, Key, Method, SsError, UdpPacket, Window, decode_udp_packet, encode_udp_packet,
-    next_counter,
+    next_counter, validate_timestamp,
 };
 use tokio::net::UdpSocket;
 
@@ -100,8 +100,8 @@ impl SsUdpClient {
                 Some(self.session_id),
                 &mut self.plain_scratch,
             ) {
-                Ok(decoded) => decoded,
-                Err(_) => continue,
+                Ok(decoded) if validate_timestamp(decoded.timestamp, unix_now()) => decoded,
+                Ok(_) | Err(_) => continue,
             };
             match self.server_session_id {
                 Some(session) if session != decoded.session_id => {

@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use marmo_net::{Endpoint, Network};
 use marmo_proto::shadowsocks::{
     Direction, Key, Method, UdpPacket, Window, decode_udp_packet, encode_udp_packet, next_counter,
+    validate_timestamp,
 };
 use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
@@ -35,11 +36,17 @@ pub(crate) async fn serve(
     let mut packet = vec![0_u8; MAX_PAYLOAD];
     let mut plain = vec![0_u8; MAX_PAYLOAD];
     let mut reap = interval(Duration::from_secs(1));
+    // SIP022 requires remembering a relay session for at least the NAT
+    // timeout so a short configured idle period cannot reopen a replay window.
+    let idle = context
+        .limits
+        .idle_timeout
+        .map(|idle| idle.max(Duration::from_secs(60)));
 
     loop {
         tokio::select! {
             _ = token.cancelled() => break,
-            _ = reap.tick() => reap_sessions(&mut sessions, context.limits.idle_timeout),
+            _ = reap.tick() => reap_sessions(&mut sessions, idle),
             received = listener.recv_from(&mut packet) => {
                 let Ok((length, source)) = received else {
                     continue;
@@ -54,6 +61,9 @@ pub(crate) async fn serve(
                 ) else {
                     continue;
                 };
+                if !validate_timestamp(decoded.timestamp, unix_now()) {
+                    continue;
+                }
 
                 let client_session = decoded.session_id;
                 if sessions
@@ -63,7 +73,7 @@ pub(crate) async fn serve(
                         session.task.abort();
                     }
                 if !sessions.contains_key(&client_session) {
-                    reap_sessions(&mut sessions, context.limits.idle_timeout);
+                    reap_sessions(&mut sessions, idle);
                     if sessions.len() >= MAX_SESSIONS {
                         continue;
                     }
