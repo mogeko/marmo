@@ -716,6 +716,146 @@ async fn terminates_vless_mux_tcp_and_udp_sessions() {
 }
 
 #[tokio::test]
+async fn mux_session_budget_is_separate_from_connections() {
+    let (echo, echo_task) = echo_server().await;
+    let proxy = format!(
+        r#"{{
+          "limits": {{ "max_connections": 1, "handshake_timeout_s": 5, "idle_timeout_s": 5 }},
+          "inbounds": [ {} ],
+          "outbounds": [ {{ "tag": "direct", "protocol": "direct" }} ],
+          "route": {{ "final": "direct" }}
+        }}"#,
+        vless_inbound()
+    );
+    let (proxy_address, proxy_handle, proxy_task) = start(&proxy).await;
+
+    let uuid = marmo_proto::vless::Uuid::parse(UUID).expect("uuid");
+    let tcp = TcpStream::connect(proxy_address).await.expect("connect");
+    let tls = TlsClient::new(&TlsClientOptions {
+        server_name: "localhost",
+        alpn: &[],
+        required_alpn: None,
+        insecure: true,
+        client_certificate: None,
+        client_private_key: None,
+        handshake_timeout: Some(Duration::from_secs(5)),
+    })
+    .expect("tls client");
+    let mut client = tls.wrap(Box::new(tcp)).await.expect("tls handshake");
+    let mut header = [0_u8; 64];
+    let length = marmo_proto::vless::encode_mux_request(&uuid, &mut header).expect("mux");
+    client.write_all(&header[..length]).await.expect("header");
+    let mut response = [0_u8; 2];
+    client.read_exact(&mut response).await.expect("response");
+    assert_eq!(response, [0, 0]);
+
+    let target = marmo_net::Endpoint::from(echo);
+    client
+        .write_all(&mux_new(1, &target, marmo_proto::mux::NETWORK_TCP, b"one"))
+        .await
+        .expect("first new");
+    client
+        .write_all(&mux_new(2, &target, marmo_proto::mux::NETWORK_TCP, b"two"))
+        .await
+        .expect("second new");
+
+    let mut frames = MuxFrames::default();
+    let rejected = timeout(Duration::from_secs(2), async {
+        loop {
+            let (meta, data) = frames.next(&mut client).await;
+            if meta.session == 2 && meta.status == marmo_proto::mux::STATUS_END {
+                return data;
+            }
+        }
+    })
+    .await
+    .expect("second session was not rejected");
+    assert_eq!(rejected, b"session limit");
+
+    drop(client);
+    stop(proxy_handle, proxy_task).await;
+    echo_task.abort();
+}
+
+#[tokio::test]
+async fn mux_downlink_activity_resets_idle_timeout() {
+    let target = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+    let target_addr = target.local_addr().expect("target addr");
+    let target_task = tokio::spawn(async move {
+        let Ok((mut stream, _)) = target.accept().await else {
+            return;
+        };
+        for _ in 0..5 {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            if stream.write_all(b"x").await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let proxy = format!(
+        r#"{{
+          "limits": {{ "handshake_timeout_s": 5, "idle_timeout_s": 1 }},
+          "inbounds": [ {} ],
+          "outbounds": [ {{ "tag": "direct", "protocol": "direct" }} ],
+          "route": {{ "final": "direct" }}
+        }}"#,
+        vless_inbound()
+    );
+    let (proxy_address, proxy_handle, proxy_task) = start(&proxy).await;
+
+    let uuid = marmo_proto::vless::Uuid::parse(UUID).expect("uuid");
+    let tcp = TcpStream::connect(proxy_address).await.expect("connect");
+    let tls = TlsClient::new(&TlsClientOptions {
+        server_name: "localhost",
+        alpn: &[],
+        required_alpn: None,
+        insecure: true,
+        client_certificate: None,
+        client_private_key: None,
+        handshake_timeout: Some(Duration::from_secs(5)),
+    })
+    .expect("tls client");
+    let mut client = tls.wrap(Box::new(tcp)).await.expect("tls handshake");
+    let mut header = [0_u8; 64];
+    let length = marmo_proto::vless::encode_mux_request(&uuid, &mut header).expect("mux");
+    client.write_all(&header[..length]).await.expect("header");
+    let mut response = [0_u8; 2];
+    client.read_exact(&mut response).await.expect("response");
+    assert_eq!(response, [0, 0]);
+
+    client
+        .write_all(&mux_new(
+            1,
+            &marmo_net::Endpoint::from(target_addr),
+            marmo_proto::mux::NETWORK_TCP,
+            b"open",
+        ))
+        .await
+        .expect("tcp new");
+
+    let mut frames = MuxFrames::default();
+    let collect = async {
+        let mut received = Vec::new();
+        while received.len() < 5 {
+            let (meta, data) = frames.next(&mut client).await;
+            if meta.session == 1 && !data.is_empty() {
+                received.extend_from_slice(&data);
+            }
+        }
+        received
+    };
+    let received = timeout(Duration::from_secs(4), collect)
+        .await
+        .expect("downlink activity did not reset the idle timer");
+    assert_eq!(received, b"xxxxx");
+
+    drop(client);
+    stop(proxy_handle, proxy_task).await;
+    target_task.abort();
+}
+
+#[tokio::test]
 async fn relays_through_vless_mux_tcp() {
     let (echo, echo_task) = echo_server().await;
     let proxy = format!(
