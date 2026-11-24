@@ -69,7 +69,7 @@ pub struct Metadata<'a> {
     pub destination: Endpoint,
     /// Domain from the inbound protocol or the sniffer, if known.
     pub domain: Option<&'a str>,
-    /// Inbound tag, reserved for the future inbound matcher.
+    /// Inbound tag used by the `inbound` matcher.
     pub inbound: Option<&'a str>,
     /// Local process identity, when a resolver supplied one.
     pub process: Option<ProcessInfo>,
