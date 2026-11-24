@@ -113,7 +113,9 @@ Rules:
   cancels the root and awaits the task sets with a grace timeout.
 - **Every task is owned.** Listeners use a `JoinSet`, outbound Mux pools use a
   `TaskTracker`, and other background work holds its `JoinHandle` or abort
-  handle explicitly. No task is detached without an owner.
+  handle explicitly. The one exception is a blocking provider call
+  (`ProcessResolver`): a timeout detaches it because a blocking thread cannot
+  be interrupted; the provider contract requires it to bound itself.
 - **Timeouts are local.** Handshake, idle, and half-close deadlines use
   `tokio::time::timeout` or `Sleep` inside `select!`. A small per-listener
   reaper expires Shadowsocks UDP sessions; there is no global connection or
