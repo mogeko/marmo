@@ -4,7 +4,7 @@ members = ["crates/*"]
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.0.3"
+version = "0.0.4"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -13,9 +13,9 @@ authors = ["Zheng Junyi"]
 
 [workspace.dependencies]
 aho-corasick = "1"
-marmo-net = { path = "crates/marmo-net", version = "=0.0.3" }
-marmo-proto = { path = "crates/marmo-proto", version = "=0.0.3" }
-marmo-transport = { path = "crates/marmo-transport", version = "=0.0.3" }
+marmo-net = { path = "crates/marmo-net", version = "=0.0.4" }
+marmo-proto = { path = "crates/marmo-proto", version = "=0.0.4" }
+marmo-transport = { path = "crates/marmo-transport", version = "=0.0.4" }
 rustls = { version = "0.23", default-features = false, features = [
     "aws_lc_rs",
     "logging",
@@ -40,6 +40,7 @@ hickory-resolver = { version = "0.26.3", default-features = false, features = [
 ] }
 hmac = { version = "0.12", default-features = false }
 http = "1"
+idna = "1"
 httparse = "1.10"
 md-5 = { version = "0.10", default-features = false }
 serde = { version = "1.0", features = ["derive"] }

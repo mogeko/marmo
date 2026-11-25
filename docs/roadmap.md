@@ -1,6 +1,6 @@
 # Roadmap
 
-- Status: current release `0.0.3`.
+- Status: current release `0.0.4`.
 - Source: ADR-0002 (scope and phases), re-expressed for the Rust tree by
   ADR-0017 through ADR-0023.
 - This document is the dependency-ordered work list. ADRs remain the decision
@@ -14,7 +14,7 @@
 | 1 | Minimal usable proxy | Complete |
 | 2 | Full protocol/transport set, routing depth, selectors, DNS | Complete |
 | 3 | QUIC, TUIC, Hysteria2, gRPC, XHTTP | Not started |
-| 4 | TUN/transparent, platform hardening, external audit | Not started |
+| 4 | TUN/transparent, platform hardening, production-readiness review | Not started |
 
 Phase 2 is closed; Phase 3 is the only remaining implementation phase before
 platform hardening and audit. The original Phase 3 "in-tree QUIC" clause is
@@ -105,15 +105,15 @@ controller trait, or the design needs an ADR before implementation.
 
 **Status: not started.** Windows is already a CI target; this phase is about
 packet-level ingress, platform behavior, HTTP/1 framing hardening, and the
-external audit.
+production-readiness review; an external audit is optional under the current 0.x policy.
 
 | ID | Item | Status | Depends on | Exit criteria | Estimate |
 | --- | --- | --- | --- | --- | --- |
 | P4-1 | TUN inbound | Planned | P1-2, P2-9 | Bounded packet queues, Linux/macOS loopback, no stream reshaping | 5–8 d |
 | P4-2 | Transparent proxying (`iptables`/TPROXY) | Planned | P4-1 | Linux-only, documented privileges, routing tests | 3–5 d |
 | P4-3 | Platform hardening | Planned | P2-10, P4-1 | Windows/macOS/Linux behavior documented and tested | 2–3 d |
-| P4-4 | External security audit | Planned | P2, P3, P4-1 | Independent review of codecs, config, relay, cancellation | External |
-| P4-5 | Production-readiness claim | Planned | P4-4 | Audit findings closed; no open critical/high risks | — |
+| P4-4 | Production-readiness review | Planned | P2, P3, P4-1 | Close critical/high findings; external audit only if required for 1.0 or an embedder | — |
+| P4-5 | Production-readiness claim | Planned | P4-4 | Review findings closed; no open critical/high risks | — |
 | P4-6 | HTTP/1 message framing and safe pipelining | Planned | P1-4, ADR-0034 | Content-Length/chunked/trailers, per-request routing, bounding and smuggling tests, fuzz | 2–4 d |
 
 ## Dependency graph
@@ -142,7 +142,7 @@ P1 core (net, config, relay, limits)
   |
   +--> P4-1 TUN --> P4-2 transparent --> P4-3 platform hardening
   |
-  +--> P4-4 external audit --> P4-5 production readiness
+  +--> P4-4 production-readiness review --> P4-5 readiness claim
 ```
 
 ## Critical path
@@ -151,8 +151,8 @@ P1 core (net, config, relay, limits)
 2. Build P3-2 QUIC, then P3-3 TUIC and P3-4 Hysteria2.
 3. P3-5 gRPC and P3-6 XHTTP can run in parallel once H2 is stable; XHTTP `h3`
    follows P3-2.
-4. Phase 4 TUN/transparent depends on routing and platform work; external audit
-   is last.
+4. Phase 4 TUN/transparent depends on routing and platform work; production-readiness review
+   is last; an external audit is optional under the current 0.x policy.
 
 ## Post-1.0 backlog
 
@@ -176,7 +176,7 @@ criteria. They are tracked here so they do not disappear from the docs.
 ## Release packaging order
 
 All four crates take their version from `[workspace.package]`, and path
-dependencies pin that version exactly (`=0.0.3`). Bump the workspace version
+dependencies pin that version exactly (`=0.0.4`). Bump the workspace version
 once, then publish in dependency order, because a crate must be visible in the
 crates.io index before anything that depends on it.
 

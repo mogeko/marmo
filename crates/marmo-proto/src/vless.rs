@@ -18,7 +18,11 @@ pub const UUID_LEN: usize = 16;
 /// Maximum addon bytes.
 pub const ADDON_LEN_MAX: usize = 255;
 /// Maximum request header: version, UUID, addons, command, port, address.
-pub const REQUEST_HEADER_MAX: usize = 1 + UUID_LEN + 1 + 1 + 2 + 1 + MAX_DOMAIN_LEN;
+///
+/// Includes the largest protocol-valid addon block. The address length byte
+/// and the maximum domain are counted separately.
+pub const REQUEST_HEADER_MAX: usize =
+    1 + UUID_LEN + 1 + ADDON_LEN_MAX + 1 + 2 + 1 + 1 + MAX_DOMAIN_LEN;
 /// Maximum response header: version and addons.
 pub const RESPONSE_HEADER_MAX: usize = 2 + ADDON_LEN_MAX;
 /// TCP command.
@@ -498,6 +502,41 @@ mod tests {
                 assert!(request.uuid.matches(uuid().as_bytes()));
             }
         }
+    }
+
+    #[test]
+    fn request_header_bound_covers_maximum_addons() {
+        let mut buffer = vec![0_u8; REQUEST_HEADER_MAX];
+        buffer[0] = VERSION;
+        buffer[1..1 + UUID_LEN].copy_from_slice(uuid().as_bytes());
+        buffer[1 + UUID_LEN] = ADDON_LEN_MAX as u8;
+        let mut offset = 1 + UUID_LEN + 1 + ADDON_LEN_MAX;
+        buffer[offset] = COMMAND_TCP;
+        offset += 1;
+        buffer[offset..offset + 2].copy_from_slice(&443_u16.to_be_bytes());
+        offset += 2;
+        buffer[offset] = ATYP_DOMAIN;
+        offset += 1;
+        // `DomainName` accepts at most 253 bytes and each label at most 63.
+        let domain = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61)
+        );
+        let domain_len = domain.len();
+        buffer[offset] = domain_len as u8;
+        offset += 1;
+        buffer[offset..offset + domain_len].copy_from_slice(domain.as_bytes());
+        offset += domain_len;
+
+        assert!(offset <= REQUEST_HEADER_MAX);
+        let progress = request_progress(&buffer[..offset]);
+        let RequestProgress::Complete(request) = progress else {
+            panic!("expected a complete request, got {progress:?}");
+        };
+        assert_eq!(request.target.domain().map(str::len), Some(domain_len));
     }
 
     #[test]

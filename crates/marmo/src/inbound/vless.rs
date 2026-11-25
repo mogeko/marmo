@@ -9,7 +9,7 @@ use marmo_proto::vless::{
     is_mux_target, request_progress,
 };
 use marmo_transport::h2::H2ServerOptions;
-use marmo_transport::{BoxFuture, BoxStream, Layer};
+use marmo_transport::{AcceptedStream, BoxFuture, BoxStream, Layer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::{Notify, mpsc};
@@ -21,6 +21,7 @@ use crate::outbound::datagram::{BoxDatagram, DatagramError};
 use crate::routing::{Action, Metadata};
 use crate::sniff::{self, Policy};
 use crate::vless::{UotReader, write_udp_frame};
+use zeroize::Zeroizing;
 
 /// Bounded queue between the frame reader and the outbound reply task.
 const UDP_QUEUE: usize = 16;
@@ -102,15 +103,21 @@ struct Prepared {
 async fn prepare(
     client: TcpStream, layers: &[Arc<dyn Layer>], uuid: &Uuid,
 ) -> io::Result<Prepared> {
-    let mut stream: BoxStream = Box::new(client);
+    let mut stream = AcceptedStream {
+        stream: Box::new(client),
+        alpn: None,
+    };
     for layer in layers {
-        stream = layer.accept(stream).await.map_err(io::Error::other)?;
+        stream = layer
+            .accept_stream(stream)
+            .await
+            .map_err(io::Error::other)?;
     }
-    prepare_stream(stream, uuid).await
+    prepare_stream(stream.stream, uuid).await
 }
 
 async fn prepare_stream(mut stream: BoxStream, uuid: &Uuid) -> io::Result<Prepared> {
-    let mut buffer = [0_u8; REQUEST_HEADER_MAX];
+    let mut buffer = Zeroizing::new([0_u8; REQUEST_HEADER_MAX]);
     let mut filled = 0;
     loop {
         match request_progress(&buffer[..filled]) {
@@ -263,7 +270,7 @@ async fn handle_udp(
     };
     let activity = Arc::new(Notify::new());
     let (sender, receiver) = mpsc::channel(UDP_QUEUE);
-    let reply = tokio::spawn(reply_loop(
+    let mut reply = tokio::spawn(reply_loop(
         writer,
         receiver,
         outbound,
@@ -289,12 +296,24 @@ async fn handle_udp(
         if payload.is_empty() {
             continue;
         }
-        if sender.send(payload).await.is_err() {
-            break;
+        // A slow client must not block this loop while the bounded reply
+        // queue is full; dropping one datagram is preferable to pinning the
+        // connection permit indefinitely.
+        match sender.try_send(payload) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => continue,
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
         }
     }
     drop(sender);
-    let _ = reply.await;
+    let drain = context
+        .limits
+        .idle_timeout
+        .unwrap_or(context.limits.handshake_timeout);
+    if tokio::time::timeout(drain, &mut reply).await.is_err() {
+        reply.abort();
+        let _ = reply.await;
+    }
 }
 
 async fn handle_mux(

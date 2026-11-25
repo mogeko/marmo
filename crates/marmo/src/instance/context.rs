@@ -527,6 +527,7 @@ pub(super) fn server_transport(
                     path: transport.path.clone(),
                     subprotocols: transport.subprotocols.clone().unwrap_or_default(),
                     compression: transport.compression,
+                    origins: transport.origins.clone().unwrap_or_default(),
                 }),
                 None,
             )
@@ -567,6 +568,7 @@ pub(super) fn client_transport(
             Some(H2ClientOptions {
                 host: transport_host(transport, tls, server, tag, "h2")?,
                 path: transport.path.clone(),
+                tls: tls.is_some(),
             }),
         )),
     }

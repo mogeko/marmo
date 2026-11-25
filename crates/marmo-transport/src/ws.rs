@@ -12,7 +12,7 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use ws_net::{
     AcceptPolicy, Acceptor, ClientHandshake, Connection, DeflateConfig, Event, HeadReader, Limits,
-    OriginPolicy,
+    OriginPolicy, WsError as WsNetError,
 };
 
 use crate::BoxStream;
@@ -46,6 +46,20 @@ pub struct WsClientOptions {
     pub compression: bool,
 }
 
+/// Validates a configured WebSocket origin allowlist.
+pub fn validate_origins(origins: &[String]) -> Result<(), String> {
+    if origins.is_empty() {
+        return Err("must not be empty; omit the list to allow any origin".into());
+    }
+    if origins.len() > 16 {
+        return Err("too many origins".into());
+    }
+    let values: Vec<&str> = origins.iter().map(String::as_str).collect();
+    OriginPolicy::allow(&values)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 /// Parameters for a WebSocket server.
 #[derive(Clone, Debug)]
 pub struct WsServerOptions {
@@ -55,6 +69,8 @@ pub struct WsServerOptions {
     pub subprotocols: Vec<String>,
     /// Accept permessage-deflate.
     pub compression: bool,
+    /// Allowed browser origins; empty keeps the compatibility `Any` policy.
+    pub origins: Vec<String>,
 }
 
 /// A connected WebSocket stream and its negotiated parameters.
@@ -165,8 +181,14 @@ impl WsServer {
 
     /// Performs the opening handshake over `inner`.
     pub async fn accept(&self, mut inner: BoxStream) -> Result<WsConnection, WsError> {
+        let origins = if self.options.origins.is_empty() {
+            OriginPolicy::any_origin()
+        } else {
+            let values: Vec<&str> = self.options.origins.iter().map(String::as_str).collect();
+            OriginPolicy::allow(&values).map_err(|error| WsError::Handshake(error.to_string()))?
+        };
         let mut policy = AcceptPolicy::new()
-            .with_origins(OriginPolicy::any_origin())
+            .with_origins(origins)
             .with_limits(connection_limits());
         let protocols: Vec<&str> = self
             .options
@@ -266,6 +288,9 @@ struct WsStream<S> {
     read_pos: usize,
     flush: Vec<u8>,
     flush_pos: usize,
+    /// Plaintext bytes already encoded into `conn` but not yet reported as
+    /// accepted because flushing the frame returned `Pending`.
+    pending_write: usize,
     eof: bool,
 }
 
@@ -278,6 +303,7 @@ impl<S> WsStream<S> {
             read_pos: 0,
             flush: Vec::new(),
             flush_pos: 0,
+            pending_write: 0,
             eof: false,
         }
     }
@@ -369,14 +395,30 @@ where
                         Poll::Ready(Ok(())) => {
                             let filled = bound.filled().len();
                             if filled == 0 {
-                                me.conn.feed_eof();
-                            } else {
-                                let _ = me.conn.feed(&chunk[..filled]);
+                                // WebSocket has no TCP-style half-close. Do
+                                // not feed EOF into the ws-net connection:
+                                // that fails its writer, and the response
+                                // direction would be silently truncated. The
+                                // adapter reports EOF for reads and keeps the
+                                // connection writable until shutdown.
+                                me.eof = true;
+                                let _ = me.poll_flush_output(cx);
+                                return Poll::Ready(Ok(()));
                             }
+                            let _ = me.conn.feed(&chunk[..filled]);
                         }
                         Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                         Poll::Pending => return Poll::Pending,
                     }
+                }
+                Err(WsNetError::UnexpectedEof) => {
+                    // A TCP FIN without a Close frame is a clean transport
+                    // EOF, not a malformed WebSocket stream. Let the relay
+                    // apply its half-close grace instead of discarding the
+                    // opposite direction.
+                    me.eof = true;
+                    let _ = me.poll_flush_output(cx);
+                    return Poll::Ready(Ok(()));
                 }
                 Err(error) => {
                     return Poll::Ready(Err(io::Error::new(
@@ -401,13 +443,46 @@ where
             return Poll::Ready(Ok(0));
         }
         let me = self.get_mut();
+
+        // A previous write queued its frame but could not flush it. Keep the
+        // task registered on the socket and report the original byte count
+        // once the queued output drains. Re-encoding `buf` here would make
+        // `write_all` transmit the same plaintext again on every retry.
+        if me.pending_write > 0 {
+            return match me.poll_flush_output(cx) {
+                Poll::Ready(Ok(())) => {
+                    let accepted = me.pending_write;
+                    me.pending_write = 0;
+                    Poll::Ready(Ok(accepted))
+                }
+                Poll::Ready(Err(error)) => {
+                    me.pending_write = 0;
+                    Poll::Ready(Err(error))
+                }
+                Poll::Pending => Poll::Pending,
+            };
+        }
+
         ready!(me.poll_flush_output(cx))?;
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
         let length = buf.len().min(MAX_FRAME as usize);
         me.conn
             .send_binary(&buf[..length])
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
-        ready!(me.poll_flush_output(cx))?;
-        Poll::Ready(Ok(length))
+        me.pending_write = length;
+        match me.poll_flush_output(cx) {
+            Poll::Ready(Ok(())) => {
+                me.pending_write = 0;
+                Poll::Ready(Ok(length))
+            }
+            Poll::Ready(Err(error)) => {
+                me.pending_write = 0;
+                Poll::Ready(Err(error))
+            }
+            Poll::Pending => Poll::Pending,
+        }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
@@ -441,7 +516,92 @@ mod tests {
             path: path.into(),
             subprotocols: protocols.iter().map(|value| value.to_string()).collect(),
             compression,
+            origins: Vec::new(),
         })
+    }
+
+    #[test]
+    fn validates_origin_allowlist() {
+        assert!(validate_origins(&["https://app.example".into()]).is_ok());
+        assert!(validate_origins(&["https://app.example/".into()]).is_err());
+        assert!(validate_origins(&["app.example".into()]).is_err());
+        assert!(validate_origins(&[]).is_err());
+    }
+
+    #[tokio::test]
+    async fn backpressure_does_not_duplicate_stream_bytes() {
+        use std::time::Duration;
+
+        let (client_io, server_io) = duplex(1024);
+        let (go_tx, go_rx) = tokio::sync::oneshot::channel();
+        let server_task = tokio::spawn(async move {
+            let connection = server("/ws", &[], false)
+                .accept(Box::new(server_io))
+                .await
+                .expect("accept");
+            let mut stream = connection.stream;
+            go_rx.await.expect("go");
+            let mut total = 0_usize;
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = stream.read(&mut buffer).await.expect("read");
+                if read == 0 {
+                    break;
+                }
+                total += read;
+            }
+            total
+        });
+
+        let connection = client("/ws", &[], false)
+            .connect(Box::new(client_io))
+            .await
+            .expect("connect");
+        let mut stream = connection.stream;
+        let payload = vec![0x5a_u8; 256 * 1024];
+        let expected = payload.len();
+        let writer = tokio::spawn(async move {
+            stream.write_all(&payload).await.expect("write");
+            stream.shutdown().await.expect("shutdown");
+        });
+        // Let the writer fill the small duplex pipe and hit backpressure
+        // before the server starts draining it.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        go_tx.send(()).expect("signal");
+        tokio::time::timeout(Duration::from_secs(5), writer)
+            .await
+            .expect("writer timeout")
+            .expect("writer");
+        let total = tokio::time::timeout(Duration::from_secs(5), server_task)
+            .await
+            .expect("server timeout")
+            .expect("server");
+        assert_eq!(total, expected, "backpressure duplicated stream bytes");
+    }
+
+    #[tokio::test]
+    async fn tcp_eof_without_a_close_frame_is_a_clean_eof() {
+        let (client_io, server_io) = duplex(64 * 1024);
+        let server_task = tokio::spawn(async move {
+            let connection = server("/ws", &[], false)
+                .accept(Box::new(server_io))
+                .await
+                .expect("accept");
+            let mut stream = connection.stream;
+            let mut buffer = [0_u8; 1];
+            stream.read(&mut buffer).await.expect("read")
+        });
+
+        let connection = client("/ws", &[], false)
+            .connect(Box::new(client_io))
+            .await
+            .expect("connect");
+        drop(connection);
+        let read = tokio::time::timeout(std::time::Duration::from_secs(1), server_task)
+            .await
+            .expect("server timeout")
+            .expect("server");
+        assert_eq!(read, 0);
     }
 
     #[tokio::test]

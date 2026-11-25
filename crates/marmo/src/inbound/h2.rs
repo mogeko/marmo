@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use marmo_net::Endpoint;
 use marmo_transport::h2::{H2Error, H2Server, H2ServerConnection, H2ServerOptions};
-use marmo_transport::{BoxFuture, BoxStream, Layer};
+use marmo_transport::{AcceptedStream, BoxFuture, BoxStream, Layer};
 use tokio::net::TcpStream;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -44,8 +44,23 @@ pub(crate) async fn serve(
     let connection_token = token.child_token();
     let mut tasks = JoinSet::new();
     loop {
+        while let Some(result) = tasks.try_join_next() {
+            if let Err(error) = result
+                && !error.is_cancelled()
+            {
+                context.metrics.record(MetricEvent::TaskPanicked);
+            }
+        }
         let next = tokio::select! {
             _ = token.cancelled() => break,
+            Some(result) = tasks.join_next(), if !tasks.is_empty() => {
+                if let Err(error) = result
+                    && !error.is_cancelled()
+                {
+                    context.metrics.record(MetricEvent::TaskPanicked);
+                }
+                continue;
+            }
             next = connection.accept_stream() => next,
         };
         let Some(result) = next else {
@@ -88,12 +103,24 @@ pub(crate) async fn serve(
 async fn handshake(
     client: TcpStream, layers: &[Arc<dyn Layer>], options: H2ServerOptions,
 ) -> io::Result<H2ServerConnection> {
-    let mut stream: BoxStream = Box::new(client);
+    let mut stream = AcceptedStream {
+        stream: Box::new(client),
+        alpn: None,
+    };
     for layer in layers {
-        stream = layer.accept(stream).await.map_err(io::Error::other)?;
+        stream = layer
+            .accept_stream(stream)
+            .await
+            .map_err(io::Error::other)?;
+    }
+    if stream.alpn.as_deref() != Some(b"h2") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "HTTP/2 inbound requires the h2 ALPN protocol",
+        ));
     }
     H2Server::new(options)
-        .accept_connection(stream)
+        .accept_connection(stream.stream)
         .await
         .map_err(|error| io::Error::other(error.to_string()))
 }

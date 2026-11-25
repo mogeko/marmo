@@ -750,6 +750,7 @@ async fn h2_client(server: SocketAddr) -> marmo_transport::H2ClientConnection {
     H2Client::new(H2ClientOptions {
         host: "localhost".into(),
         path: "/h2".into(),
+        tls: true,
     })
     .handshake(stream)
     .await

@@ -57,7 +57,7 @@ impl fmt::Debug for ProcessInfo {
 }
 
 /// The connection facts passed to a [`ProcessResolver`].
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ProcessRequest {
     /// Transport network.
     pub network: Network,
@@ -65,6 +65,28 @@ pub struct ProcessRequest {
     pub source: Endpoint,
     /// Requested destination.
     pub destination: Endpoint,
+}
+
+struct RedactedEndpoint<'a>(&'a Endpoint);
+
+impl fmt::Debug for RedactedEndpoint<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0.ip() {
+            Some(address) => write!(formatter, "{address}:{}", self.0.port()),
+            None => write!(formatter, "<domain>:{}", self.0.port()),
+        }
+    }
+}
+
+impl fmt::Debug for ProcessRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProcessRequest")
+            .field("network", &self.network)
+            .field("source", &RedactedEndpoint(&self.source))
+            .field("destination", &RedactedEndpoint(&self.destination))
+            .finish()
+    }
 }
 
 /// Looks up the local process behind a connection.
@@ -149,10 +171,11 @@ impl ProcessRuntime {
     }
 
     fn cache_get(&self, key: Key) -> Option<Option<ProcessInfo>> {
-        let mut cache = self.cache.lock().unwrap_or_else(|error| error.into_inner());
+        let cache = self.cache.lock().unwrap_or_else(|error| error.into_inner());
         let entry = cache.entries.get(&key)?;
         if entry.expires <= Instant::now() {
-            cache.entries.remove(&key);
+            // Keep the stale entry in `entries` until eviction or overwrite so
+            // the FIFO `order` retains one key per entry and stays bounded.
             return None;
         }
         Some(entry.info.clone())
@@ -252,6 +275,15 @@ mod tests {
     }
 
     #[test]
+    fn debug_redacts_the_destination_domain() {
+        let mut request = request(1000);
+        request.destination = Endpoint::from_domain("secret.example", 443).expect("domain");
+        let text = format!("{request:?}");
+        assert!(!text.contains("secret.example"));
+        assert!(text.contains("<domain>"));
+    }
+
+    #[test]
     fn debug_redacts_process_identity() {
         let info = ProcessInfo::new(Some(Arc::from("curl")), Some(Arc::from("/usr/bin/curl")));
         let text = format!("{info:?}");
@@ -338,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn expired_entries_are_removed() {
+    fn expired_entries_are_not_hits_and_the_order_stays_bounded() {
         let runtime = ProcessRuntime::new(&config(5, 8, 50), FakeResolver::new(Some("curl")));
         let key = Key {
             network: Network::Tcp,
@@ -357,14 +389,9 @@ mod tests {
             cache.order.push_back(key);
         }
         assert!(runtime.cache_get(key).is_none());
-        assert!(
-            !runtime
-                .cache
-                .lock()
-                .expect("cache lock")
-                .entries
-                .contains_key(&key)
-        );
+        let cache = runtime.cache.lock().expect("cache lock");
+        assert!(cache.entries.len() <= 8);
+        assert!(cache.order.len() <= 8);
     }
 
     #[tokio::test]

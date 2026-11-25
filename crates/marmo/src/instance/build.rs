@@ -1,5 +1,6 @@
 //! Pure build steps: configuration compilation and listener binding.
 
+use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -75,31 +76,66 @@ impl Instance {
         let mut bound = Vec::with_capacity(inbounds.len());
         for spec in inbounds {
             let kind = spec.config.build(&spec.tag, &metrics)?;
-            let listener =
-                TcpListener::bind(spec.listen)
-                    .await
-                    .map_err(|source| BindError::Inbound {
-                        inbound: spec.tag.to_string(),
-                        address: spec.listen.to_string(),
-                        source,
-                    })?;
-            let local_addr = listener.local_addr().map_err(|source| BindError::Inbound {
-                inbound: spec.tag.to_string(),
-                address: spec.listen.to_string(),
-                source,
-            })?;
-            let udp = if matches!(kind, InboundKind::Shadowsocks { .. }) {
-                let socket =
-                    UdpSocket::bind(local_addr)
-                        .await
-                        .map_err(|source| BindError::Inbound {
+            // A `:0` listener needs a port free for both TCP and, for
+            // Shadowsocks, UDP. Another process can take the ephemeral port
+            // between the two binds, so retry a bounded number of times.
+            let attempts = if spec.listen.port() == 0 { 8 } else { 1 };
+            let mut pair = None;
+            let mut last_error = None;
+            for _ in 0..attempts {
+                let listener = match TcpListener::bind(spec.listen).await {
+                    Ok(listener) => listener,
+                    Err(source) if attempts > 1 && source.kind() == io::ErrorKind::AddrInUse => {
+                        last_error = Some(source);
+                        continue;
+                    }
+                    Err(source) => {
+                        return Err(BindError::Inbound {
                             inbound: spec.tag.to_string(),
-                            address: local_addr.to_string(),
+                            address: spec.listen.to_string(),
                             source,
-                        })?;
-                Some(socket)
-            } else {
-                None
+                        });
+                    }
+                };
+                let local_addr = listener.local_addr().map_err(|source| BindError::Inbound {
+                    inbound: spec.tag.to_string(),
+                    address: spec.listen.to_string(),
+                    source,
+                })?;
+                let udp = if matches!(kind, InboundKind::Shadowsocks { .. }) {
+                    match UdpSocket::bind(local_addr).await {
+                        Ok(socket) => Some(socket),
+                        Err(source)
+                            if attempts > 1 && source.kind() == io::ErrorKind::AddrInUse =>
+                        {
+                            last_error = Some(source);
+                            continue;
+                        }
+                        Err(source) => {
+                            return Err(BindError::Inbound {
+                                inbound: spec.tag.to_string(),
+                                address: local_addr.to_string(),
+                                source,
+                            });
+                        }
+                    }
+                } else {
+                    None
+                };
+                pair = Some((listener, local_addr, udp));
+                break;
+            }
+            let Some((listener, local_addr, udp)) = pair else {
+                return Err(BindError::Inbound {
+                    inbound: spec.tag.to_string(),
+                    address: spec.listen.to_string(),
+                    source: last_error.unwrap_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::AddrInUse,
+                            "could not bind a free TCP/UDP port pair",
+                        )
+                    }),
+                });
             };
             bound.push(BoundInbound {
                 tag: spec.tag,
@@ -260,8 +296,12 @@ impl InstanceBuilder {
                 } => {
                     let (ws, h2) = server_transport(transport.as_ref());
                     let mut tls = InboundTlsConfig::new(tls);
-                    if h2.is_some() && tls.alpn.is_empty() {
-                        tls.alpn.push("h2".into());
+                    if tls.alpn.is_empty() {
+                        if h2.is_some() {
+                            tls.alpn.push("h2".into());
+                        } else if ws.is_some() {
+                            tls.alpn.push("http/1.1".into());
+                        }
                     }
                     InboundConfig::Vless {
                         uuid: Arc::new(uuid.clone()),
@@ -279,8 +319,12 @@ impl InstanceBuilder {
                     let (ws, h2) = server_transport(transport.as_ref());
                     let tls = tls.as_ref().map(|tls| {
                         let mut tls = InboundTlsConfig::new(tls);
-                        if h2.is_some() && tls.alpn.is_empty() {
-                            tls.alpn.push("h2".into());
+                        if tls.alpn.is_empty() {
+                            if h2.is_some() {
+                                tls.alpn.push("h2".into());
+                            } else if ws.is_some() {
+                                tls.alpn.push("http/1.1".into());
+                            }
                         }
                         tls
                     });

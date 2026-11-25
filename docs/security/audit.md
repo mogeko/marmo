@@ -1,8 +1,10 @@
 # Security audit
 
-- Status: current Rust implementation. No external audit yet.
-- Scope: threat model, implemented controls, open obligations, and the plan
-  before a production-readiness claim.
+- Status: current Rust implementation, internally audited. No external
+  independent audit is planned for the 0.x line; that is an accepted risk
+  (§3.1, §4). The release must not claim independent security assurance.
+- Scope: threat model, implemented controls, open obligations, accepted
+  security-assurance decisions, and the remaining release checks.
 - Related: ADR-0009 (clean-room), ADR-0018 (dependencies and crypto),
   ADR-0020 (license), ADR-0028 (injected rule sets), ADR-0029 (process
   identity injection), ADR-0030 (DNS resolver).
@@ -55,27 +57,37 @@ not implemented in this revision (QUIC, TUIC, Hysteria2).
   constant time. No payload, credential, or SNI is logged by the library.
 - **Configuration.** Strict JSON schema version 2; unknown and duplicate fields
   are errors. TLS credentials are inline PEM; file paths are rejected
-  (ADR-0023). `tls.insecure` is accepted only for a loopback server.
+  (ADR-0023). `tls.insecure` is accepted only for a literal loopback IP
+  address; a name such as `localhost` is resolved later and is rejected.
+  Message domains are canonicalized to ASCII/punycode with IDNA before routing
+  and resolution.
 - **Dependency surface.** `Cargo.lock` is committed and CI uses `--locked`;
   CI rejects GPL/AGPL/MPL and runs `cargo-audit` when dependencies change.
 - **Fuzzing.** Every decoder in `marmo-proto`, including HTTP/1 and Mux.Cool
   metadata, has a fuzz target. Wire-format fixtures cover the encoder-backed
   codecs; the Mux.Cool frame reader is covered by unit tests rather than a
   separate target. Corpus provenance is recorded in
-  `fuzz/corpus/README.md`; the deterministic corpus runs in CI and long runs
-  are manual.
+  `fuzz/corpus/README.md`; CI runs a short bounded smoke for every target on
+  relevant pull requests and on manual dispatch. The SS2022 and VMess targets
+  feed raw ciphertext, so mutations mostly stop at the AEAD open; only the
+  encoder-produced seed corpus reaches post-auth parsing. Authenticated-input
+  fuzzing remains future work and is not claimed as coverage. A 24-hour soak is
+  no longer a release gate.
 - **VMess AEAD.** Only the AEAD header is accepted; legacy MD5/CFB and body
   None/Zero are rejected. Auth IDs are verified by AES decryption, CRC32, and a
   120-second window, then inserted into a bounded 4,096-entry replay filter.
   The 16-bit chunk counter is capped at 65,536 per direction to prevent GCM
   nonce reuse. MD5 appears only where the protocol mandates it: CmdKey
-  derivation and the ChaCha20-Poly1305 key expansion.
+  derivation and the ChaCha20-Poly1305 key expansion. Both replay filters
+  reject new entries when full instead of evicting an active entry.
 - **Mux.Cool.** The VMess and VLESS inbounds share one dispatcher bounded to 128
   sessions per physical connection, a 16-frame queue per session, 64 KiB
-  frames, 512-byte metadata, the instance idle timeout, and a per-instance
-  logical-session permit. Sessions own one task and are aborted with the
-  physical connection; a session dial has the standard handshake deadline.
-  Downlink writes notify the physical connection's activity deadline.
+  frames, 512-byte metadata, the instance idle timeout, a per-instance
+  logical-session permit, and a 1,024-permit (about 64 MiB) frame-memory budget.
+  Sessions own one task and are aborted with the physical connection; a session
+  dial has the standard handshake deadline. Downlink writes notify the physical
+  connection's activity deadline. A session that cannot acquire frame memory is
+  closed rather than blocking other connections.
 - **Mux.Cool outbound.** The client pool is bounded to four physical
   connections, 128 sessions per connection, 16 queued frames per session, and a
   4 MiB in-flight downlink budget. TCP downlink applies backpressure; UDP drops
@@ -105,8 +117,7 @@ not implemented in this revision (QUIC, TUIC, Hysteria2).
 
 | Area | Obligation |
 | --- | --- |
-| External audit | Commission an independent review before any production-readiness claim. |
-| Fuzzing | Run a 24-hour soak per decoder target on the final tree. |
+| Fuzzing | Keep the short bounded CI smoke for every decoder target and maintain the committed corpus. |
 | Interop | Keep reference-server interop outside CI and record results in `docs/protocols/`. |
 | TLS | Re-check `rustls` verification, TLS 1.3 floor, ALPN, and mTLS on dependency upgrades. |
 | HTTP/1 | Keep the request/forward/CONNECT parser fuzzed and bounded as it evolves. |
@@ -118,9 +129,25 @@ not implemented in this revision (QUIC, TUIC, Hysteria2).
 | Secrets | Keep redaction and zeroization tests for every new credential-bearing type. |
 | Supply chain | Review new build scripts, proc macros, and `unsafe`; keep the lockfile and audit gate current. |
 
+### 3.1 Accepted security-assurance decision (2026-11-25)
+
+- **External independent audit: not required for the current 0.x line.** The
+  cost is accepted as a residual risk. Revisit before a 1.0 production-readiness
+  claim, a regulated deployment, or an embedder contract that requires
+  independent assurance. Until then, documentation and release notes must say
+  "internal audit only, no external audit".
+- **Fuzzing: CI short runs instead of a 24-hour soak.** Every decoder target
+  runs the bounded CI smoke (`-runs=1000 -max_len=4096 -timeout=25`) on relevant
+  pull requests and manual dispatch. A long soak is optional local work, not a
+  release gate.
+- These decisions do not reduce the other obligations: dependency audit,
+  copyleft check, interop records, cancellation review, resource-bound review,
+  and secret-handling tests remain required.
+
 ## 4. Residual risks
 
-- No external audit of the Rust tree exists yet.
+- No external independent audit of the Rust tree exists. This is an accepted
+  risk for the 0.x line, not evidence of absence of unknown defects; see §3.1.
 - `rustls`, `h2`, `ws-net`, `tokio`, and `aws-lc-rs` are external trust
   anchors; their advisories are covered by Dependabot and `cargo-audit`.
 - Side channels were not measured.
@@ -128,6 +155,11 @@ not implemented in this revision (QUIC, TUIC, Hysteria2).
   an attacker able to spoof an allowed source IP/port can still inject a reply.
   This is a property of unauthenticated UDP, not something the library can
   fully prevent.
+- `ip_cidr` and `geoip` match literal destination IPs only. A domain
+  destination is resolved after routing, so CIDR rules are not an egress
+  firewall: a domain that resolves into a blocked range can bypass them. An
+  unauthenticated SOCKS5/HTTP listener with a direct final route is an open
+  proxy/SSRF surface by configuration.
 - The `aws-lc-rs` provider requires a C toolchain; a platform that cannot build
   it needs an ADR, not a silent backend switch.
 - The library is a proxy: a configuration mistake can expose a listener or
@@ -142,7 +174,8 @@ not implemented in this revision (QUIC, TUIC, Hysteria2).
 
 1. Re-run the config, HTTP/1, codec, and cancellation regression tests on the
    release candidate.
-2. Fuzz every decoder for 24 hours per target with the committed corpus.
+2. Run the short bounded CI fuzz smoke for every decoder target with the
+   committed corpus; a longer local run is optional.
 3. Re-run reference interop for SOCKS5, HTTP, Shadowsocks 2022, Trojan, VLESS
    TCP/UoT/XUDP/WS/H2.
 4. Review the `rustls` configuration: verification, TLS 1.3 floor, ALPN, mTLS,
@@ -151,5 +184,5 @@ not implemented in this revision (QUIC, TUIC, Hysteria2).
    deadline, fallback policy, and the absence of query names in logs.
 6. Run `cargo audit` and the copyleft check; record the dependency tree and
    provider version.
-7. Commission the external review; scope it to codecs, config, relay, DNS,
-   cancellation paths, and dependency boundaries.
+7. Confirm the release text says "internal audit only; no external audit" and
+   record any new accepted risk in §3.1.

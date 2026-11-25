@@ -269,14 +269,21 @@ pub trait Layer: Send + Sync {
 
     fn accept<'a>(&'a self, inner: BoxStream)
         -> BoxFuture<'a, Result<BoxStream, LayerError>>;
+
+    fn accept_stream<'a>(&'a self, inner: AcceptedStream)
+        -> BoxFuture<'a, Result<AcceptedStream, LayerError>>;
 }
 ```
 
 Layers are compiled from config into a `Vec<Arc<dyn Layer>>` in spec order (for
 example VLESS → TLS → WebSocket → TCP). Transport parameters (SNI, ALPN,
-`Host`, path, subprotocols) are bound when the layer is built, never read from
-globals. Inbound stacks mirror the same order. `accept` defaults to
-`LayerError::Unsupported` for client-only layers.
+`Host`, path, subprotocols, WebSocket origin allowlist) are bound when the
+layer is built, never read from globals. The origin allowlist is the opt-in
+configuration recorded in the 2026-11-25 amendment to
+[ADR-0021](decisions/0021-websocket-backend.md). Inbound stacks mirror the same
+order. `accept` defaults to `LayerError::Unsupported` for client-only layers.
+`accept_stream` carries the TLS-selected ALPN through later layers; the HTTP/2
+inbound requires `h2`.
 
 ### 8.4 Inbound and metadata
 
@@ -473,6 +480,11 @@ Matchers in the current set:
 | `process_name` | exact executable name from an injected `ProcessResolver` |
 | `process_path` | exact executable path from an injected `ProcessResolver` |
 
+Domain names are canonicalized to ASCII/punycode with IDNA at `Endpoint` parse,
+and exact/suffix domain rules are compiled in the same form, so a Unicode name
+and its punycode representation match the same rule. `domain_keyword` values
+must be ASCII/punycode; validation rejects non-ASCII keywords.
+
 `domain_set` and `geoip` do not have a library-owned file format. The embedder
 registers an `Arc<dyn DomainSet>` or `Arc<dyn IpSet>` at build time; the data
 may live in a tree, a sorted array, a SQLite snapshot, or another store. The
@@ -549,6 +561,7 @@ the same inbound stream budget and outbound HTTP/2 pool as VLESS (ADR-0031).
 | HTTP/2 | `h2` | framing, HPACK, flow control, 1xx, trailers |
 | WebSocket | `ws-net` | RFC 6455, permessage-deflate, subprotocols |
 | HTTP/1.1 | `httparse` (+ `hyper` only if needed) | the inbound is minimal; no general server |
+| IDN | `idna` | RFC 3492/UTS-46 canonical form for domains and rules |
 | VMess crypto | `md-5`, `sha3`, `hmac`, `chacha20poly1305` | CmdKey, SHAKE128 masks, HMAC KDF, ChaCha body |
 | QUIC (post-1.0) | `quinn` | streams, datagrams, custom congestion control |
 | DNS (`dns` feature) | `hickory-resolver` | UDP, TCP, DoT, DoH, TTL cache |
@@ -850,8 +863,10 @@ Module boundaries inside `marmo` are enforced by review, not by the compiler.
   `cargo-fuzz` covers every `marmo-proto` decoder, including Mux.Cool metadata
   (nightly only); the Mux.Cool frame reader is covered by unit tests rather
   than a separate fuzz target. Malformed input returns a typed error, never
-  panics. The DNS wire decoder is hickory's, so the feature adds config tests
-  rather than a new fuzz target.
+  panics. The CI fuzz workflow runs a short bounded smoke per target on
+  relevant pull requests; longer runs are optional local work. The DNS wire
+  decoder is hickory's, so the feature adds config tests rather than a new fuzz
+  target.
 - Interop runs against self-hosted reference binaries outside CI. No GPL code
   is linked, ported, or distributed.
 - CI matrix: Linux x86_64, macOS arm64, Windows x86_64; `cargo fmt --check`,
@@ -866,10 +881,10 @@ Module boundaries inside `marmo` are enforced by review, not by the compiler.
 - The library does not install a tracing subscriber and has no `tracing`
   dependency. Per-connection spans and structured logs are planned as P5-4.
 - Counters currently cover accepted/active/rejected/closed connections,
-  HTTP/2 stream accepted/active/rejected/closed, bytes per direction, handshake
-  and relay timeouts, UDP sessions, health probes/failures, and DNS
-  queries/cache hits/fallbacks/failures. Rule-hit and dropped-datagram counters
-  are planned with P5-4.
+  task panics, HTTP/2 stream accepted/active/rejected/closed, bytes per
+  direction, handshake and relay timeouts, UDP sessions, health
+  probes/failures, and DNS queries/cache hits/fallbacks/failures. Rule-hit and
+  dropped-datagram counters are planned with P5-4.
 - Optional `MetricsSink` for embedders; no Prometheus dependency in the core.
 - The library records no payloads, credentials, SNI, or DNS query names. A
   `MetricsSink` implementation is trusted embedder code and must preserve the
@@ -903,7 +918,7 @@ Module boundaries inside `marmo` are enforced by review, not by the compiler.
 
 ## 19. Roadmap
 
-The current release line is `0.0.3`. The dependency-ordered work list is in
+The current release line is `0.0.4`. The dependency-ordered work list is in
 [`roadmap.md`](roadmap.md); the summary is:
 
 | Item | Enabled by |
@@ -927,7 +942,7 @@ The current release line is `0.0.3`. The dependency-ordered work list is in
 | Tokio lock-in | accepted in ADR-0017; codecs and policy remain runtime-free |
 | Ecosystem churn in `rustls`/`quinn`/`h2` | adapters isolate versions; pin minor ranges |
 | DNS dependency churn and MSRV | `hickory-resolver` 0.26.3 is pinned and feature-gated; ADR-0030 records the MSRV bump and review |
-| External audit | not yet commissioned; required before a production-readiness claim |
+| External audit | accepted risk for the 0.x line; revisit before a 1.0 production-readiness claim or an embedder requirement |
 
 Open questions:
 
@@ -948,7 +963,7 @@ initial implementation are ADR-0001 through ADR-0016 and remain in
 | [0018](decisions/0018-dependencies-and-crypto.md) | Dependencies and crypto backend | Accepted |
 | [0019](decisions/0019-workspace-and-packaging.md) | Workspace layout and packaging | Accepted |
 | [0020](decisions/0020-license.md) | License change | Accepted |
-| [0021](decisions/0021-websocket-backend.md) | WebSocket backend and permessage-deflate | Accepted |
+| [0021](decisions/0021-websocket-backend.md) | WebSocket backend and permessage-deflate | Accepted; amended |
 | [0022](decisions/0022-vless-http2-method.md) | VLESS HTTP/2 transport method | Accepted |
 | [0023](decisions/0023-tls-credentials-inline.md) | TLS credentials as inline configuration | Accepted |
 | [0024](decisions/0024-drop-testkit.md) | Drop the unused testkit crate | Accepted |

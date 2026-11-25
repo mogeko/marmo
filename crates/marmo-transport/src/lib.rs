@@ -43,6 +43,14 @@ pub type BoxStream = Box<dyn AsyncStream>;
 /// A boxed future used by the object-safe layer boundary.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+/// An accepted stream plus transport metadata that later layers preserve.
+pub struct AcceptedStream {
+    /// The wrapped stream.
+    pub stream: BoxStream,
+    /// ALPN selected by the transport, if any.
+    pub alpn: Option<Vec<u8>>,
+}
+
 /// One transport layer wrapped around a stream.
 ///
 /// Layers are built from config at startup and applied in order, so the hot
@@ -55,6 +63,21 @@ pub trait Layer: Send + Sync {
     /// [`LayerError::Unsupported`].
     fn accept<'a>(&'a self, _inner: BoxStream) -> BoxFuture<'a, Result<BoxStream, LayerError>> {
         Box::pin(async { Err(LayerError::Unsupported) })
+    }
+
+    /// Wraps an inbound stream while preserving transport metadata.
+    ///
+    /// Layers that do not inspect metadata use this default, which keeps the
+    /// ALPN selected by an inner TLS layer.
+    fn accept_stream<'a>(
+        &'a self, inner: AcceptedStream,
+    ) -> BoxFuture<'a, Result<AcceptedStream, LayerError>> {
+        let alpn = inner.alpn;
+        Box::pin(async move {
+            self.accept(inner.stream)
+                .await
+                .map(|stream| AcceptedStream { stream, alpn })
+        })
     }
 }
 
@@ -89,6 +112,20 @@ impl Layer for TlsServer {
             self.accept(inner)
                 .await
                 .map(|accepted| accepted.stream)
+                .map_err(LayerError::Tls)
+        })
+    }
+
+    fn accept_stream<'a>(
+        &'a self, inner: AcceptedStream,
+    ) -> BoxFuture<'a, Result<AcceptedStream, LayerError>> {
+        Box::pin(async move {
+            self.accept(inner.stream)
+                .await
+                .map(|accepted| AcceptedStream {
+                    stream: accepted.stream,
+                    alpn: accepted.alpn,
+                })
                 .map_err(LayerError::Tls)
         })
     }

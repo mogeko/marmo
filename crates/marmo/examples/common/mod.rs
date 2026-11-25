@@ -20,12 +20,12 @@ pub fn read(path: &str) -> Result<String, Box<dyn Error>> {
     Ok(std::fs::read_to_string(path)?)
 }
 
-/// Returns true for a loopback server endpoint (`127.0.0.0/8`, `::1`, or
-/// `localhost`).
+/// Returns true for a literal loopback server endpoint (`127.0.0.0/8` or
+/// `::1`). A name such as `localhost` is not accepted by config validation for
+/// `tls.insecure`.
 pub fn is_loopback(server: &str) -> bool {
-    marmo::Endpoint::parse(server).is_ok_and(|endpoint| {
-        endpoint.ip().is_some_and(|ip| ip.is_loopback()) || endpoint.domain() == Some("localhost")
-    })
+    marmo::Endpoint::parse(server)
+        .is_ok_and(|endpoint| endpoint.ip().is_some_and(|ip| ip.is_loopback()))
 }
 
 /// Escapes a string for embedding in a JSON document.

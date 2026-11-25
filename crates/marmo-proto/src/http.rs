@@ -234,6 +234,18 @@ pub fn build_forward_head(
     if !is_token(method) || version > 1 {
         return Err(HttpError::BadRequest);
     }
+    // `AbsoluteTarget` has public fields. Reject control characters here so a
+    // caller cannot turn the request line or Host header into an injection.
+    if target.authority.is_empty()
+        || target.path.is_empty()
+        || target
+            .authority
+            .bytes()
+            .any(|byte| byte <= 0x20 || byte == 0x7f)
+        || target.path.bytes().any(|byte| byte <= 0x20 || byte == 0x7f)
+    {
+        return Err(HttpError::BadRequest);
+    }
     let mut head = Vec::with_capacity(FORWARD_HEAD_MAX);
     head.extend_from_slice(method.as_bytes());
     head.push(b' ');
@@ -271,6 +283,15 @@ pub fn build_forward_head(
             has_content_length = true;
         }
         if header.name.eq_ignore_ascii_case("transfer-encoding") {
+            if has_transfer_encoding {
+                return Err(HttpError::BadRequest);
+            }
+            let Ok(value) = std::str::from_utf8(header.value) else {
+                return Err(HttpError::BadRequest);
+            };
+            if !value.is_ascii() || !value.trim().eq_ignore_ascii_case("chunked") {
+                return Err(HttpError::BadRequest);
+            }
             has_transfer_encoding = true;
         }
         if has_content_length && has_transfer_encoding {
@@ -475,6 +496,67 @@ mod tests {
         ];
         assert!(matches!(
             build_forward_head("POST", 1, &target, &headers),
+            Err(HttpError::BadRequest)
+        ));
+
+        for value in [b"chunked".as_slice(), b"identity".as_slice()] {
+            let headers = [
+                Header {
+                    name: "Transfer-Encoding",
+                    value: b"chunked",
+                },
+                Header {
+                    name: "Transfer-Encoding",
+                    value,
+                },
+            ];
+            assert!(matches!(
+                build_forward_head("POST", 1, &target, &headers),
+                Err(HttpError::BadRequest)
+            ));
+        }
+
+        let headers = [Header {
+            name: "Transfer-Encoding",
+            value: b"gzip, chunked",
+        }];
+        assert!(matches!(
+            build_forward_head("POST", 1, &target, &headers),
+            Err(HttpError::BadRequest)
+        ));
+
+        let headers = [Header {
+            name: "Transfer-Encoding",
+            value: "\u{a0}chunked".as_bytes(),
+        }];
+        assert!(matches!(
+            build_forward_head("POST", 1, &target, &headers),
+            Err(HttpError::BadRequest)
+        ));
+    }
+
+    #[test]
+    fn rejects_crafted_absolute_target_controls() {
+        let endpoint = Endpoint::from_domain("example.com", 80).expect("domain");
+        let injected = AbsoluteTarget {
+            endpoint: endpoint.clone(),
+            authority: "example.com\r\nX-Injected: yes",
+            path: "/",
+            needs_slash: false,
+        };
+        assert!(matches!(
+            build_forward_head("GET", 1, &injected, &[]),
+            Err(HttpError::BadRequest)
+        ));
+
+        let split = AbsoluteTarget {
+            endpoint: endpoint.clone(),
+            authority: "example.com",
+            path: "/ HTTP/1.1\r\nX-Injected: yes",
+            needs_slash: false,
+        };
+        assert!(matches!(
+            build_forward_head("GET", 1, &split, &[]),
             Err(HttpError::BadRequest)
         ));
     }

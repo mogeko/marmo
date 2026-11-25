@@ -10,7 +10,7 @@ use marmo_proto::trojan::{
 use marmo_transport::BoxStream;
 use marmo_transport::tls::TlsClient;
 use tokio::io::AsyncWriteExt;
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 use crate::direct::Dialer;
 use crate::trojan::{FrameReader, write_frame};
@@ -23,12 +23,10 @@ pub(crate) async fn connect(
     let bound = inner.local_addr().ok();
     let mut stream = tls.connect(Box::new(inner)).await.map_err(tls_error)?;
 
-    let mut header = [0_u8; REQUEST_HEADER_MAX];
-    let length = encode_request_header(password, target, COMMAND_CONNECT, &mut header)
+    let mut header = Zeroizing::new([0_u8; REQUEST_HEADER_MAX]);
+    let length = encode_request_header(password, target, COMMAND_CONNECT, &mut header[..])
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    let written = stream.write_all(&header[..length]).await;
-    header.zeroize();
-    written?;
+    stream.write_all(&header[..length]).await?;
     Ok((stream, bound))
 }
 
@@ -114,12 +112,10 @@ pub(crate) async fn connect_udp(
 ) -> io::Result<TrojanUdpClient> {
     let inner = dialer.connect(server).await?;
     let mut stream = tls.connect(Box::new(inner)).await.map_err(tls_error)?;
-    let mut header = [0_u8; REQUEST_HEADER_MAX];
-    let length = encode_request_header(password, target, COMMAND_UDP_ASSOCIATE, &mut header)
+    let mut header = Zeroizing::new([0_u8; REQUEST_HEADER_MAX]);
+    let length = encode_request_header(password, target, COMMAND_UDP_ASSOCIATE, &mut header[..])
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    let written = stream.write_all(&header[..length]).await;
-    header.zeroize();
-    written?;
+    stream.write_all(&header[..length]).await?;
     Ok(TrojanUdpClient {
         stream,
         frames: FrameReader::new(&[])?,

@@ -700,14 +700,14 @@ impl ChunkDecoder {
         let body_len = ciphertext_len - TAG_LEN;
         let nonce = chunk_nonce(self.counter, &self.iv);
         let mut data = vec![0_u8; body_len];
-        if body_len > 0 {
-            self.cipher.open(
-                &nonce,
-                &bytes[2..2 + body_len],
-                &bytes[2 + body_len..2 + ciphertext_len],
-                &mut data,
-            )?;
-        }
+        // Verify the tag even for an empty chunk. Skipping the AEAD call here
+        // would accept an arbitrary 16-byte tag and advance the nonce counter.
+        self.cipher.open(
+            &nonce,
+            &bytes[2..2 + body_len],
+            &bytes[2 + body_len..2 + ciphertext_len],
+            &mut data,
+        )?;
         self.pending = None;
         self.chunks += 1;
         self.counter = self.counter.wrapping_add(1);
@@ -1288,6 +1288,25 @@ mod tests {
             wire[2] ^= 1;
             assert!(decoder.progress(&wire).is_err());
         }
+    }
+
+    #[test]
+    fn empty_chunk_still_verifies_the_tag() {
+        let key = [0x22_u8; 16];
+        let iv = [0x11_u8; 16];
+        let option = OPTION_STREAM;
+        let mut encoder = ChunkEncoder::new(Security::Aes128Gcm, &key, &iv, option, [0; 64]);
+        let mut decoder = ChunkDecoder::new(Security::Aes128Gcm, &key, &iv, option);
+        let mut wire = Vec::new();
+        encoder.encode(&[], &mut wire).expect("encode");
+        let mut valid = ChunkDecoder::new(Security::Aes128Gcm, &key, &iv, option);
+        let ChunkProgress::Complete { data, .. } = valid.progress(&wire).expect("empty chunk")
+        else {
+            panic!("expected an empty chunk");
+        };
+        assert!(data.is_empty());
+        wire[2] ^= 1;
+        assert!(decoder.progress(&wire).is_err());
     }
 
     #[test]

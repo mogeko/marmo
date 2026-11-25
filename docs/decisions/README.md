@@ -44,7 +44,7 @@ ADR-0017 onward.
 | [0018](0018-dependencies-and-crypto.md) | Dependencies and crypto backend | Accepted; amended | `rustls` + `aws-lc-rs` |
 | [0019](0019-workspace-and-packaging.md) | Workspace layout and packaging | Accepted; fifth crate superseded by ADR-0024 | four published crates |
 | [0020](0020-license.md) | License change | Accepted; amended | MIT OR Apache-2.0 |
-| [0021](0021-websocket-backend.md) | WebSocket backend and permessage-deflate | Accepted | `ws-net` + tokio pump |
+| [0021](0021-websocket-backend.md) | WebSocket backend and permessage-deflate | Accepted; amended (2026-11-25) | `ws-net` + tokio pump; opt-in origin allowlist |
 | [0022](0022-vless-http2-method.md) | VLESS HTTP/2 transport method | Accepted | `PUT` client, no content type |
 | [0023](0023-tls-credentials-inline.md) | TLS credentials as inline configuration | Accepted | inline PEM; schema v2 |
 | [0024](0024-drop-testkit.md) | Drop the unused testkit crate | Accepted (2026-11-21) | four published crates |

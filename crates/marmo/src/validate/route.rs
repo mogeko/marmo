@@ -1,5 +1,7 @@
 //! Route and rule validation.
 
+use marmo_net::DomainName;
+
 use super::*;
 
 pub(super) fn validate_route(
@@ -27,18 +29,38 @@ pub(super) fn validate_rule(
     rule: &Rule, index: usize, inbounds: &[RawInbound],
 ) -> Result<(), ConfigError> {
     if let Some(domains) = rule.domain.as_deref() {
-        for domain in domains {
+        for (domain_index, domain) in domains.iter().enumerate() {
             if domain.is_empty() {
                 return Err(fail(format!("route.rules[{index}].domain"), "empty value"));
             }
+            validate_domain_rule(
+                domain,
+                &format!("route.rules[{index}].domain[{domain_index}]"),
+                false,
+            )?;
         }
     }
     if let Some(suffixes) = rule.domain_suffix.as_deref() {
-        for suffix in suffixes {
+        for (suffix_index, suffix) in suffixes.iter().enumerate() {
             if suffix.is_empty() {
                 return Err(fail(
                     format!("route.rules[{index}].domain_suffix"),
                     "empty value",
+                ));
+            }
+            validate_domain_rule(
+                suffix,
+                &format!("route.rules[{index}].domain_suffix[{suffix_index}]"),
+                true,
+            )?;
+        }
+    }
+    if let Some(keywords) = rule.domain_keyword.as_deref() {
+        for (keyword_index, keyword) in keywords.iter().enumerate() {
+            if !keyword.is_ascii() {
+                return Err(fail(
+                    format!("route.rules[{index}].domain_keyword[{keyword_index}]"),
+                    "must be ASCII/punycode; domain keywords match the canonical name",
                 ));
             }
         }
@@ -89,6 +111,22 @@ pub(super) fn validate_rule(
         Some(4096),
     )?;
     Ok(())
+}
+
+fn validate_domain_rule(
+    value: &str, path: &str, allow_leading_dot: bool,
+) -> Result<(), ConfigError> {
+    let body = if allow_leading_dot {
+        value.strip_prefix('.').unwrap_or(value)
+    } else {
+        value
+    };
+    if body.is_empty() {
+        return Err(fail(path, "empty value"));
+    }
+    DomainName::parse(body)
+        .map(|_| ())
+        .map_err(|_| fail(path, format!("invalid domain '{value}'")))
 }
 
 pub(super) fn validate_rule_values(

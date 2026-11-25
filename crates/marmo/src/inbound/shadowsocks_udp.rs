@@ -150,6 +150,15 @@ struct Session {
     task: JoinHandle<()>,
 }
 
+impl Drop for Session {
+    fn drop(&mut self) {
+        // The reply task is detached from the listener task. Abort it even when
+        // the session table is dropped by cancellation or unwinding, not only
+        // by the explicit reap path.
+        self.task.abort();
+    }
+}
+
 impl Session {
     async fn create(
         listener: &Arc<UdpSocket>, method: Method, key: &Arc<Key>, client_session_id: [u8; 8],

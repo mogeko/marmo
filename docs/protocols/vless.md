@@ -76,7 +76,7 @@ uses `rustls` for both TLS roles, `ws-net` for WebSocket, and `h2` for HTTP/2
   - SNI and hostname verification use `tls.sni`, or the server domain name when
     `sni` is absent. The client verifies with the platform verifier.
   - `tls.insecure = true` skips certificate and hostname verification. It is
-    accepted only for a loopback test server; validation rejects it for any
+    accepted only for a literal loopback IP address; validation rejects it for any
     other server.
   - Config secrets are redacted from `Debug` and zeroized on drop.
   - `close_notify` handling belongs to `rustls`; the old
@@ -170,7 +170,7 @@ with `mux`.
   TCP/WS it keeps one stream per connection and one association per UDP
   target. `xudp` is the single-target UDP subset.
 - No custom CA file or pinning is exposed by the root config; verification uses
-  the platform bundle. `tls.insecure` is restricted to loopback test servers.
+  the platform bundle. `tls.insecure` is restricted to literal loopback IP addresses.
 - TLS state, including read/write keys and `KeyUpdate`, is owned by `rustls`.
 - No anti-probing or replay behavior beyond what TLS provides.
 

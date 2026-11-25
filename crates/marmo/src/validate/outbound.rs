@@ -390,6 +390,12 @@ pub(super) fn validate_outbound_transport(
     };
     let base = format!("outbounds[{index}].transport");
     validate_transport_shape(transport, &base)?;
+    if transport.origins.is_some() {
+        return Err(fail(
+            format!("{base}.origins"),
+            "only applies to a WebSocket inbound",
+        ));
+    }
 
     match transport.network {
         StreamNetwork::Ws => {

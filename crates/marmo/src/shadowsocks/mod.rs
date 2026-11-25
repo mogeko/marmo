@@ -35,8 +35,9 @@ const SALT_REPLAY_TTL_S: u64 = 60;
 ///
 /// SIP022 derives a request subkey from the salt, so replaying the same
 /// request bytes recreates a valid request. The filter rejects a salt seen in
-/// the last [`SALT_REPLAY_TTL_S`] seconds and evicts the oldest entry when the
-/// table is full.
+/// the last [`SALT_REPLAY_TTL_S`] seconds. When the table is full it rejects
+/// new salts until an entry expires; it does not evict an active entry, since
+/// eviction would reopen the replay window under authenticated load.
 pub(crate) struct SaltReplay {
     entries: HashMap<[u8; 32], u64>,
     order: VecDeque<([u8; 32], u64)>,
@@ -64,10 +65,8 @@ impl SaltReplay {
         if self.entries.contains_key(&salt) {
             return false;
         }
-        if self.entries.len() >= SALT_REPLAY_CAPACITY
-            && let Some((old, _)) = self.order.pop_front()
-        {
-            self.entries.remove(&old);
+        if self.entries.len() >= SALT_REPLAY_CAPACITY {
+            return false;
         }
         self.entries.insert(salt, now);
         self.order.push_back((salt, now));
@@ -600,5 +599,12 @@ mod tests {
             replay.check_and_insert(salt, 1_000);
         }
         assert_eq!(replay.entries.len(), SALT_REPLAY_CAPACITY);
+
+        let mut extra = [0_u8; 32];
+        extra[..8].copy_from_slice(&u64::MAX.to_be_bytes());
+        assert!(!replay.check_and_insert(extra, 1_000));
+        assert_eq!(replay.entries.len(), SALT_REPLAY_CAPACITY);
+        assert!(replay.check_and_insert(extra, 1_000 + SALT_REPLAY_TTL_S + 1));
+        assert_eq!(replay.entries.len(), 1);
     }
 }

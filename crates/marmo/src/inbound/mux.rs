@@ -35,6 +35,7 @@ type Writer = Arc<Mutex<MuxWriter<WriteHalf<BoxStream>>>>;
 struct Uplink {
     target: Option<Endpoint>,
     data: Vec<u8>,
+    _memory: OwnedSemaphorePermit,
 }
 
 struct Session {
@@ -194,9 +195,23 @@ impl State {
             },
         );
         if !frame.data.is_empty() {
+            let Some(memory) = self.context.supervisor.try_acquire_mux_memory() else {
+                let _ = self
+                    .writer
+                    .lock()
+                    .await
+                    .end_error(id, b"mux memory limit")
+                    .await;
+                if let Some(session) = self.sessions.remove(&id) {
+                    session.cancel.cancel();
+                    session.abort.abort();
+                }
+                return true;
+            };
             let _ = uplink.try_send(Uplink {
                 target: None,
                 data: frame.data.clone(),
+                _memory: memory,
             });
         }
         true
@@ -210,11 +225,25 @@ impl State {
         if frame.data.is_empty() {
             return true;
         }
+        let Some(memory) = self.context.supervisor.try_acquire_mux_memory() else {
+            if let Some(session) = self.sessions.remove(&id) {
+                session.cancel.cancel();
+                session.abort.abort();
+            }
+            let _ = self
+                .writer
+                .lock()
+                .await
+                .end_error(id, b"mux memory limit")
+                .await;
+            return true;
+        };
         if session
             .uplink
             .try_send(Uplink {
                 target: frame.meta.target,
                 data: frame.data,
+                _memory: memory,
             })
             .is_err()
         {
@@ -352,6 +381,28 @@ async fn run_udp(session: SessionContext, mut receiver: mpsc::Receiver<Uplink>) 
                         break;
                     };
                     let destination = message.target.as_ref().unwrap_or(&session.target);
+                    // Keep frames may carry a per-packet destination. The
+                    // outbound was chosen for the session's first target, so
+                    // re-route every different target and keep only those that
+                    // select the same action. Otherwise a Mux client could use
+                    // an allowed first target to reach a destination a rule
+                    // would reject or send elsewhere.
+                    if destination != &session.target {
+                        let Some(next) = route(
+                            &session.context,
+                            &session.inbound,
+                            &session.source,
+                            destination,
+                            Network::Udp,
+                        )
+                        .await
+                        else {
+                            continue;
+                        };
+                        if next != action {
+                            continue;
+                        }
+                    }
                     if outbound.send_to(destination, &message.data).await.is_err() {
                         break;
                     }

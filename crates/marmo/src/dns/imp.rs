@@ -316,14 +316,16 @@ impl DnsRuntime {
     }
 
     fn cache_get(&self, key: &str) -> Option<Cached> {
-        let mut cache = self.cache.lock().unwrap_or_else(|error| error.into_inner());
+        let cache = self.cache.lock().unwrap_or_else(|error| error.into_inner());
         if cache.capacity == 0 {
             return None;
         }
         let now = Instant::now();
         let entry = cache.entries.get(key)?;
         if entry.expires <= now {
-            cache.entries.remove(key);
+            // Keep the stale entry in `entries` until eviction or overwrite.
+            // Removing it here would leave its key in the FIFO `order` forever,
+            // and the order queue would grow without bound under TTL churn.
             return None;
         }
         Some(entry.value.clone())
@@ -672,6 +674,35 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         runtime.resolve("example.com").await.expect("second");
         assert_eq!(fake.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn ttl_churn_keeps_the_eviction_queue_bounded() {
+        let mut answers = Vec::new();
+        for _ in 0..6 {
+            answers.push(Ok(DnsAnswer::new(
+                vec![IpAddr::from([127, 0, 0, 1])],
+                Duration::from_millis(1),
+            )));
+        }
+        let fake = Fake::new(answers);
+        let runtime = runtime(
+            injected(Arc::clone(&fake) as Arc<dyn DnsResolver>),
+            policy(100, 2, 4),
+        );
+
+        for _ in 0..3 {
+            runtime.resolve("a.test").await.expect("a");
+            runtime.resolve("b.test").await.expect("b");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        let cache = runtime
+            .cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert!(cache.entries.len() <= 2);
+        assert!(cache.order.len() <= 2);
     }
 
     #[tokio::test]

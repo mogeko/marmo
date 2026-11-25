@@ -29,6 +29,7 @@ pub(crate) struct Frame {
 pub(crate) struct MuxReader<R> {
     inner: R,
     buffer: Vec<u8>,
+    start: usize,
     filled: usize,
 }
 
@@ -41,6 +42,7 @@ impl<R: AsyncRead + Unpin> MuxReader<R> {
         Ok(Self {
             inner,
             buffer: prefix.to_vec(),
+            start: 0,
             filled: prefix.len(),
         })
     }
@@ -51,32 +53,36 @@ impl<R: AsyncRead + Unpin> MuxReader<R> {
             return Ok(None);
         }
         self.ensure(2).await?;
-        let meta_len = usize::from(u16::from_be_bytes([self.buffer[0], self.buffer[1]]));
+        let meta_len = usize::from(u16::from_be_bytes([
+            self.buffer[self.start],
+            self.buffer[self.start + 1],
+        ]));
         if !(4..=MAX_META_LEN).contains(&meta_len) {
             return Err(invalid("invalid Mux.Cool metadata length"));
         }
         self.ensure(2 + meta_len).await?;
-        let meta = parse_meta(&self.buffer[2..2 + meta_len])
+        let meta = parse_meta(&self.buffer[self.start + 2..self.start + 2 + meta_len])
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
 
         let mut offset = 2 + meta_len;
         let data = if meta.option & marmo_proto::mux::OPTION_DATA != 0 {
             self.ensure(offset + 2).await?;
             let data_len = usize::from(u16::from_be_bytes([
-                self.buffer[offset],
-                self.buffer[offset + 1],
+                self.buffer[self.start + offset],
+                self.buffer[self.start + offset + 1],
             ]));
             offset += 2;
             self.ensure(offset + data_len).await?;
-            let data = self.buffer[offset..offset + data_len].to_vec();
+            let data = self.buffer[self.start + offset..self.start + offset + data_len].to_vec();
             offset += data_len;
             data
         } else {
             Vec::new()
         };
 
-        self.buffer.drain(..offset);
+        self.start += offset;
         self.filled -= offset;
+        self.compact();
         Ok(Some(Frame { meta, data }))
     }
 
@@ -89,14 +95,29 @@ impl<R: AsyncRead + Unpin> MuxReader<R> {
         Ok(())
     }
 
+    fn compact(&mut self) {
+        if self.start == 0 {
+            return;
+        }
+        if self.start >= READ_CHUNK || self.start * 2 >= self.buffer.len() {
+            self.buffer.drain(..self.start);
+            self.start = 0;
+        }
+    }
+
     async fn read_more(&mut self) -> io::Result<bool> {
         if self.filled >= MAX_BUFFER {
             return Err(invalid("Mux.Cool frame buffer is full"));
         }
-        let end = (self.filled + READ_CHUNK).min(MAX_BUFFER);
-        self.buffer.resize(end, 0);
-        let read = self.inner.read(&mut self.buffer[self.filled..end]).await?;
-        self.buffer.truncate(self.filled + read);
+        let end = self.start + (self.filled + READ_CHUNK).min(MAX_BUFFER);
+        if self.buffer.len() < end {
+            self.buffer.resize(end, 0);
+        }
+        let read = self
+            .inner
+            .read(&mut self.buffer[self.start + self.filled..end])
+            .await?;
+        self.buffer.truncate(self.start + self.filled + read);
         self.filled += read;
         Ok(read != 0)
     }

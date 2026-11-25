@@ -18,6 +18,8 @@ pub struct MetricsSnapshot {
     pub connections_active: u64,
     /// TCP streams rejected by `max_connections`.
     pub connections_rejected: u64,
+    /// Connection or shared-listener tasks that panicked.
+    pub task_panics: u64,
     /// TCP streams whose handler finished.
     pub connections_closed: u64,
     /// HTTP/2 streams accepted after stream admission.
@@ -62,6 +64,8 @@ pub enum MetricEvent<'a> {
     ConnectionClosed,
     /// Admission control rejected a TCP stream.
     ConnectionRejected,
+    /// A connection or shared listener task panicked.
+    TaskPanicked,
     /// An HTTP/2 stream passed stream admission.
     H2StreamAccepted,
     /// An HTTP/2 stream handler finished.
@@ -111,6 +115,7 @@ struct Inner {
     sink: Option<Arc<dyn MetricsSink>>,
     accepted: AtomicU64,
     rejected: AtomicU64,
+    task_panics: AtomicU64,
     closed: AtomicU64,
     h2_accepted: AtomicU64,
     h2_rejected: AtomicU64,
@@ -135,6 +140,7 @@ impl Metrics {
                 sink,
                 accepted: AtomicU64::new(0),
                 rejected: AtomicU64::new(0),
+                task_panics: AtomicU64::new(0),
                 closed: AtomicU64::new(0),
                 h2_accepted: AtomicU64::new(0),
                 h2_rejected: AtomicU64::new(0),
@@ -164,6 +170,9 @@ impl Metrics {
             }
             MetricEvent::ConnectionRejected => {
                 self.inner.rejected.fetch_add(1, Ordering::Relaxed);
+            }
+            MetricEvent::TaskPanicked => {
+                self.inner.task_panics.fetch_add(1, Ordering::Relaxed);
             }
             MetricEvent::H2StreamAccepted => {
                 self.inner.h2_accepted.fetch_add(1, Ordering::Relaxed);
@@ -235,6 +244,7 @@ impl Metrics {
             connections_accepted: accepted,
             connections_active: accepted.saturating_sub(closed),
             connections_rejected: self.inner.rejected.load(Ordering::Relaxed),
+            task_panics: self.inner.task_panics.load(Ordering::Relaxed),
             connections_closed: closed,
             h2_streams_accepted: h2_accepted,
             h2_streams_active: h2_accepted.saturating_sub(h2_closed),
@@ -295,6 +305,7 @@ mod tests {
         metrics.record(MetricEvent::ConnectionAccepted);
         metrics.record(MetricEvent::ConnectionClosed);
         metrics.record(MetricEvent::ConnectionRejected);
+        metrics.record(MetricEvent::TaskPanicked);
         metrics.record(MetricEvent::H2StreamAccepted);
         metrics.record(MetricEvent::H2StreamAccepted);
         metrics.record(MetricEvent::H2StreamClosed);
@@ -318,6 +329,7 @@ mod tests {
         assert_eq!(snapshot.connections_accepted, 2);
         assert_eq!(snapshot.connections_active, 1);
         assert_eq!(snapshot.connections_rejected, 1);
+        assert_eq!(snapshot.task_panics, 1);
         assert_eq!(snapshot.h2_streams_accepted, 2);
         assert_eq!(snapshot.h2_streams_active, 1);
         assert_eq!(snapshot.h2_streams_rejected, 1);
@@ -331,6 +343,6 @@ mod tests {
         assert_eq!(snapshot.health_failures, 1);
         assert_eq!(snapshot.dns_fallbacks, 1);
         assert_eq!(snapshot.dns_failures, 1);
-        assert_eq!(sink.0.load(Ordering::Relaxed), 15);
+        assert_eq!(sink.0.load(Ordering::Relaxed), 16);
     }
 }

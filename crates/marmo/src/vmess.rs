@@ -394,8 +394,9 @@ impl ReplayFilter {
 
     /// Inserts `auth_id` and returns false when it was already present.
     ///
-    /// Entries older than the timestamp window are evicted first; when the
-    /// table is full the oldest entry is dropped.
+    /// Entries older than the timestamp window are evicted first. When the
+    /// table is still full, new auth IDs are rejected until an entry expires;
+    /// evicting an active entry would reopen the replay window.
     pub(crate) fn check_and_insert(&mut self, auth_id: [u8; AUTH_ID_LEN], now: u64) -> bool {
         while let Some((old, time)) = self.order.front() {
             if now.saturating_sub(*time) > TIMESTAMP_WINDOW_S {
@@ -409,10 +410,8 @@ impl ReplayFilter {
         if self.entries.contains_key(&auth_id) {
             return false;
         }
-        if self.entries.len() >= REPLAY_CAPACITY
-            && let Some((old, _)) = self.order.pop_front()
-        {
-            self.entries.remove(&old);
+        if self.entries.len() >= REPLAY_CAPACITY {
+            return false;
         }
         self.entries.insert(auth_id, now);
         self.order.push_back((auth_id, now));
@@ -535,7 +534,13 @@ mod tests {
             next[1] = (index >> 8) as u8;
             assert!(filter.check_and_insert(next, 1000));
         }
-        assert!(filter.entries.len() <= REPLAY_CAPACITY);
+        assert_eq!(filter.entries.len(), REPLAY_CAPACITY);
+
+        let extra = [0xff_u8; AUTH_ID_LEN];
+        assert!(!filter.check_and_insert(extra, 1000));
+        assert_eq!(filter.entries.len(), REPLAY_CAPACITY);
+        assert!(filter.check_and_insert(extra, 1000 + TIMESTAMP_WINDOW_S + 1));
+        assert_eq!(filter.entries.len(), 1);
     }
 
     #[tokio::test]
