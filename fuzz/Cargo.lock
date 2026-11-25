@@ -461,7 +461,7 @@ dependencies = [
 
 [[package]]
 name = "marmo-net"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "idna",
  "thiserror",
@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "marmo-proto"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "aes",
  "aes-gcm",

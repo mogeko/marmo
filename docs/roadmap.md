@@ -1,6 +1,6 @@
 # Roadmap
 
-- Status: current release `0.0.3`.
+- Status: current release `0.0.4`.
 - Source: ADR-0002 (scope and phases), re-expressed for the Rust tree by
   ADR-0017 through ADR-0023.
 - This document is the dependency-ordered work list. ADRs remain the decision
@@ -176,7 +176,7 @@ criteria. They are tracked here so they do not disappear from the docs.
 ## Release packaging order
 
 All four crates take their version from `[workspace.package]`, and path
-dependencies pin that version exactly (`=0.0.3`). Bump the workspace version
+dependencies pin that version exactly (`=0.0.4`). Bump the workspace version
 once, then publish in dependency order, because a crate must be visible in the
 crates.io index before anything that depends on it.
 

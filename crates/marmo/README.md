@@ -8,7 +8,7 @@ is the composition root: build, bind, serve, then shut down. The library never
 creates or shuts down a runtime and never installs process-level signal
 handlers; you supply the tokio context.
 
-**Version 0.0.3.** The API may change between minor versions while the crate is
+**Version 0.0.4.** The API may change between minor versions while the crate is
 pre-1.0.
 
 ## Features

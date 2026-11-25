@@ -3,9 +3,27 @@
 All notable changes to marmo are recorded here. The project is pre-1.0; APIs
 and behavior may change between minor releases.
 
-## Unreleased
+## 0.0.4 - 2026-11-25
 
-- Security hardening from the internal audit: Shadowsocks 2022 UDP
+- Second internal security audit hardening: fixed a remote UTF-8 suffix-slice
+  panic, a WebSocket backpressure write-amplification path, an unbounded DNS
+  and process cache FIFO, Mux.Cool UDP routing bypass, H2 `JoinSet` retention
+  and outbound dial storms, and several protocol/encoding bounds.
+- IDNA canonicalization now covers `Endpoint` domains and exact/suffix rules;
+  post-IDNA output is restricted to host characters, empty labels, leading
+  dots, and over-long labels are rejected, and rule values are validated
+  instead of silently becoming dead rules.
+- SS2022 and VMess replay filters reject new entries when full instead of
+  evicting active entries; SS2022 response salts and UDP server session IDs
+  must differ from the client side. VMess empty chunks are authenticated.
+- WebSocket adds an opt-in `transport.origins` allowlist (ADR-0021 amendment),
+  h2 inbound enforces ALPN, and h2/wss report negotiated ALPN through
+  `AcceptedStream`. SOCKS5 CONNECT no longer exports BND.ADDR, and
+  `tls.insecure` accepts only literal loopback IPs.
+- Security-assurance policy: external independent audit is an accepted risk
+  for the 0.x line, and the 24-hour fuzz soak is replaced by the short bounded
+  CI fuzz smoke.
+- Security hardening from the earlier internal audit: Shadowsocks 2022 UDP
   timestamps are validated in both directions, TCP request salts are rejected
   for 60 seconds, and SS UDP sessions last at least 60 seconds.
 - Direct UDP replies are filtered against a bounded set of destinations the
@@ -47,8 +65,9 @@ and behavior may change between minor releases.
 - Injected process identity through `ProcessResolver`, `process_name` and
   `process_path` matchers, a bounded cache, lookup timeout, in-flight limit,
   and fail-open unknown handling (ADR-0029).
-- Domain names are canonicalized to ASCII lowercase at parse time; routing
-  comparisons are case-insensitive.
+- Domain names are canonicalized to ASCII/punycode with IDNA at parse time;
+  exact/suffix rules use the same form and routing comparisons are
+  case-insensitive.
 - `aho-corasick` is a new `marmo` dependency for inline keyword matching.
 - VMess AEAD inbound and outbound: TCP, direct UDP, inbound Mux.Cool
   termination, AES-128-GCM and ChaCha20-Poly1305, bounded auth-ID replay

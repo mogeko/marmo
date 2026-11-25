@@ -918,7 +918,7 @@ Module boundaries inside `marmo` are enforced by review, not by the compiler.
 
 ## 19. Roadmap
 
-The current release line is `0.0.3`. The dependency-ordered work list is in
+The current release line is `0.0.4`. The dependency-ordered work list is in
 [`roadmap.md`](roadmap.md); the summary is:
 
 | Item | Enabled by |

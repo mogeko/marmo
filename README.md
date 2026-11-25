@@ -3,7 +3,7 @@
 An embeddable Rust library for TCP/UDP proxying: L4/L7 inbounds, multiple
 proxy protocols, rule-based routing, and latency-aware outbound selection.
 
-**Version:** 0.0.3 (unreleased; API may change between minor versions.)
+**Version:** 0.0.4 (unreleased; API may change between minor versions.)
 
 ## Features
 
