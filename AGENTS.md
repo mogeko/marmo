@@ -48,8 +48,10 @@ selection.
   `assert` is removed in release builds; never rely on it for security.
 - Functions should stay under 70 lines and lines under 100 columns; `cargo
   fmt` decides layout. Use four-space indentation.
-- Files `snake_case.rs`; types `CamelCase`; functions, variables, and fields
-  `snake_case`. Avoid abbreviations except common I/O and protocol terms.
+- Files `snake_case.rs`; a module with submodules uses `module/mod.rs`, while
+  a single-file module stays `module.rs`. Types `CamelCase`; functions,
+  variables, and fields `snake_case`. Avoid abbreviations except common I/O
+  and protocol terms.
 - Public items need documentation. Errors are `thiserror` enums,
   `#[non_exhaustive]`; `anyhow` stays in examples and tests.
 - No recursion on untrusted input. Bound every loop, queue, buffer, cache, and

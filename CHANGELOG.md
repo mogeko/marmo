@@ -10,16 +10,24 @@ and behavior may change between minor releases.
   for 60 seconds, and SS UDP sessions last at least 60 seconds.
 - Direct UDP replies are filtered against a bounded set of destinations the
   association actually contacted, closing a wildcard-socket injection path.
+  UDP outbounds now share an internal `Datagram` boundary (ADR-0033); replies
+  from unknown sources report non-fatal `DatagramError::NoReply` instead of
+  closing the association.
 - Inbound Mux.Cool sessions now take a per-instance session permit, run under
   the handshake deadline, and count downlink traffic against the physical idle
   timer.
 - Domain names drop a trailing DNS root dot before routing; exact and suffix
   matching are ASCII-case-insensitive.
-- HTTP forward requests strip fields nominated by `Connection:` and redact
-  parsed header values in `Debug`.
-- `Config` now re-exports every schema type (`ConfigLimits`, `Inbound`,
-  `Outbound`, `Route`, `Rule`, TLS/transport/sniffing types), so a config can
-  be built programmatically.
+- HTTP forward requests strip fields nominated by `Connection:`, keep framing
+  headers, and treat every byte after the single parsed head as an opaque body
+  or tunnel; pipelining is an explicit non-goal until P4-6 (ADR-0034).
+- `Config` is now validated by construction (ADR-0032): the serde document is
+  private, `Config::from_json` and `ConfigBuilder` share one validation pass,
+  and read-only accessors replace public fields. `Inbound` and `Outbound` are
+  protocol-tagged enums carrying parsed endpoints, UUIDs, and zeroizing
+  `SecretString` credentials. The JSON `Limits` type is separate from the
+  runtime `RuntimeLimits`, and the `ConfigLimits` alias is removed. `Config`
+  is input-only: JSON parsing and the builder are the supported constructors.
 - Shadowsocks request/response state has redacted `Debug` output and zeroizes
   retained subkeys; VMess body ciphers keep a zeroized raw-key copy.
 - The fuzz smoke job now runs the Mux.Cool target; the docs/CI matrix covers

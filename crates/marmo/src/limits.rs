@@ -4,7 +4,7 @@ use std::time::Duration;
 
 /// Limits applied to every connection owned by an instance.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Limits {
+pub struct RuntimeLimits {
     /// Maximum accepted TCP streams; `0` rejects every connection.
     pub max_connections: u32,
     /// Absolute deadline from accept through the outbound connect.
@@ -19,7 +19,7 @@ pub struct Limits {
     pub shutdown_grace: Duration,
 }
 
-impl Limits {
+impl RuntimeLimits {
     pub(crate) fn from_config(config: &crate::config::Limits) -> Self {
         Self {
             max_connections: config.max_connections,
@@ -33,7 +33,7 @@ impl Limits {
     }
 }
 
-impl Default for Limits {
+impl Default for RuntimeLimits {
     fn default() -> Self {
         Self {
             max_connections: 1024,
@@ -64,7 +64,7 @@ mod tests {
         .parse()
         .expect("parse");
 
-        let limits = Limits::from_config(&config.limits);
+        let limits = RuntimeLimits::from_config(&config.inner.limits);
         assert_eq!(limits.max_connections, 7);
         assert_eq!(limits.handshake_timeout, Duration::from_secs(2));
         assert_eq!(limits.idle_timeout, None);
@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn maps_nonzero_idle() {
         let config: crate::Config = r#"{"limits":{"idle_timeout_s":5}}"#.parse().expect("parse");
-        let limits = Limits::from_config(&config.limits);
+        let limits = RuntimeLimits::from_config(&config.inner.limits);
         assert_eq!(limits.idle_timeout, Some(Duration::from_secs(5)));
     }
 }

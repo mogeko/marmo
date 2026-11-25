@@ -68,7 +68,7 @@ impl crate::outbound::Outbound for VmessOutbound {
 
     fn connect_datagram<'a>(
         &'a self, target: &'a Endpoint, _ipv4: bool,
-    ) -> BoxFuture<'a, io::Result<Option<crate::outbound::udp::UdpOutbound>>> {
+    ) -> BoxFuture<'a, io::Result<Option<crate::outbound::datagram::BoxDatagram>>> {
         Box::pin(async move {
             if self.mux {
                 let Some(pool) = self.pool.get() else {
@@ -78,9 +78,9 @@ impl crate::outbound::Outbound for VmessOutbound {
                     ));
                 };
                 let datagram = pool.open_udp(target).await?;
-                return Ok(Some(crate::outbound::udp::UdpOutbound::Mux(Box::new(
-                    datagram,
-                ))));
+                return Ok(Some(
+                    Box::new(datagram) as crate::outbound::datagram::BoxDatagram
+                ));
             }
             let (mut stream, _bound) = self.open_base().await?;
             let request = write_request(
@@ -108,13 +108,12 @@ impl crate::outbound::Outbound for VmessOutbound {
                 padding,
             );
             let (reader, writer) = tokio::io::split(stream);
-            Ok(Some(crate::outbound::udp::UdpOutbound::Vmess(Box::new(
-                VmessUdpClient {
-                    reader: ChunkReader::with_response(reader, decoder, &[], request),
-                    writer: ChunkWriter::new(writer, encoder),
-                    target: target.clone(),
-                },
-            ))))
+            Ok(Some(Box::new(VmessUdpClient {
+                reader: ChunkReader::with_response(reader, decoder, &[], request),
+                writer: ChunkWriter::new(writer, encoder),
+                target: target.clone(),
+            })
+                as crate::outbound::datagram::BoxDatagram))
         })
     }
 

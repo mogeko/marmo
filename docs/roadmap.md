@@ -104,7 +104,8 @@ controller trait, or the design needs an ADR before implementation.
 ## Phase 4 — TUN, platforms, production readiness
 
 **Status: not started.** Windows is already a CI target; this phase is about
-packet-level ingress, platform behavior, and the external audit.
+packet-level ingress, platform behavior, HTTP/1 framing hardening, and the
+external audit.
 
 | ID | Item | Status | Depends on | Exit criteria | Estimate |
 | --- | --- | --- | --- | --- | --- |
@@ -113,6 +114,7 @@ packet-level ingress, platform behavior, and the external audit.
 | P4-3 | Platform hardening | Planned | P2-10, P4-1 | Windows/macOS/Linux behavior documented and tested | 2–3 d |
 | P4-4 | External security audit | Planned | P2, P3, P4-1 | Independent review of codecs, config, relay, cancellation | External |
 | P4-5 | Production-readiness claim | Planned | P4-4 | Audit findings closed; no open critical/high risks | — |
+| P4-6 | HTTP/1 message framing and safe pipelining | Planned | P1-4, ADR-0034 | Content-Length/chunked/trailers, per-request routing, bounding and smuggling tests, fuzz | 2–4 d |
 
 ## Dependency graph
 
@@ -121,7 +123,7 @@ P0 decisions/workspace/CI
   |
   v
 P1 core (net, config, relay, limits)
-  |-- P1 SOCKS5/HTTP/SS2022/direct/routing
+  |-- P1 SOCKS5/HTTP/SS2022/direct/routing --> P4-6 HTTP/1 framing
   |
   +--> P2-1 VLESS --+
   +--> P2-2 Trojan --+

@@ -11,7 +11,6 @@ use marmo_net::{Endpoint, Network};
 use marmo_proto::mux::{
     NETWORK_TCP, NETWORK_UDP, STATUS_END, STATUS_KEEP, STATUS_KEEPALIVE, STATUS_NEW,
 };
-use marmo_proto::vless::MAX_UDP_PAYLOAD;
 use marmo_transport::BoxStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, mpsc};
@@ -21,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 use crate::deadline::{Deadline, wait_for_activity};
 use crate::instance::Context;
 use crate::mux::{Frame, MuxReader, MuxWriter};
+use crate::outbound::datagram::DatagramError;
 use crate::routing::{Action, Metadata};
 
 /// Maximum sessions on one physical connection.
@@ -343,7 +343,7 @@ async fn run_udp(session: SessionContext, mut receiver: mpsc::Receiver<Uplink>) 
                 .await;
             return;
         };
-        let mut buffer = vec![0_u8; MAX_UDP_PAYLOAD];
+        let mut buffer = vec![0_u8; outbound.max_datagram_size()];
         loop {
             tokio::select! {
                 _ = session.token.cancelled() => break,
@@ -357,8 +357,10 @@ async fn run_udp(session: SessionContext, mut receiver: mpsc::Receiver<Uplink>) 
                     }
                 }
                 received = outbound.recv_from(&mut buffer) => {
-                    let Ok((length, from)) = received else {
-                        break;
+                    let (length, from) = match received {
+                        Ok(reply) => reply,
+                        Err(DatagramError::NoReply) => continue,
+                        Err(DatagramError::Io(_)) => break,
                     };
                     if session
                         .writer

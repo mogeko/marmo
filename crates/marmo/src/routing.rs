@@ -105,15 +105,15 @@ impl Router {
 
     /// Compiles every rule against the supplied rule-set registry.
     pub fn compile_with_sets(config: &Config, sets: &RuleSets) -> Result<Self, RoutingError> {
-        let mut outbounds = HashMap::with_capacity(config.outbounds.len());
-        for (index, outbound) in config.outbounds.iter().enumerate() {
+        let mut outbounds = HashMap::with_capacity(config.outbounds().len());
+        for (index, outbound) in config.outbounds().iter().enumerate() {
             let index = u32::try_from(index).map_err(|_| RoutingError::TooManyOutbounds)?;
-            outbounds.insert(outbound.tag.as_str(), OutboundId::from_index(index));
+            outbounds.insert(outbound.tag(), OutboundId::from_index(index));
         }
 
-        let mut rules = Vec::with_capacity(config.route.rules.len());
+        let mut rules = Vec::with_capacity(config.inner.route.rules.len());
         let mut needs_process = false;
-        for (index, rule) in config.route.rules.iter().enumerate() {
+        for (index, rule) in config.inner.route.rules.iter().enumerate() {
             let path = format!("route.rules[{index}]");
             let cidrs = compile_cidrs(rule.ip_cidr.as_deref(), &path)?;
             let process_names = compile_values(rule.process_name.as_deref());
@@ -140,7 +140,7 @@ impl Router {
         }
 
         let final_action = compile_action(
-            &config.route.final_outbound,
+            &config.inner.route.final_outbound,
             "route.final".into(),
             &outbounds,
         )?;
@@ -707,7 +707,7 @@ mod tests {
     #[test]
     fn rejects_unknown_targets_and_cidrs() {
         let mut config = Config::from_json(ROUTES).expect("config");
-        config.route.rules[0].outbound = "missing".into();
+        config.inner.route.rules[0].outbound = "missing".into();
         match Router::compile(&config) {
             Err(RoutingError::UnknownOutbound { path, tag }) => {
                 assert_eq!(path, "route.rules[0].outbound");
@@ -717,7 +717,7 @@ mod tests {
         }
 
         let mut config = Config::from_json(ROUTES).expect("config");
-        config.route.rules[2].ip_cidr = Some(vec!["nope".into()]);
+        config.inner.route.rules[2].ip_cidr = Some(vec!["nope".into()]);
         match Router::compile(&config) {
             Err(RoutingError::InvalidCidr { path, value }) => {
                 assert_eq!(path, "route.rules[2].ip_cidr[0]");

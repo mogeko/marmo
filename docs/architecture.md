@@ -232,12 +232,14 @@ Contract:
 - Ownership is explicit: the connection task owns both streams and every
   buffer they borrow.
 
-Datagrams currently use the internal `UdpOutbound` enum in
-`outbound/udp.rs`: a wildcard direct socket with a bounded destination set, or
-a protocol-owned channel (Shadowsocks, Trojan, VLESS/XUDP, VMess, Mux.Cool).
-Each implementation bounds its queues and drops or rejects datagrams under
-pressure. A transport-neutral `Datagram` trait is part of the P3-1 QUIC work;
-it is not part of the current API.
+Datagrams use the internal object-safe `Datagram` boundary in
+`outbound/datagram.rs` (ADR-0033): `send_to`/`recv_from` return a
+`DatagramError`, and `BoxDatagram` mirrors `BoxStream`. Implementations cover a
+direct socket with a bounded destination set, or a protocol-owned association
+(Shadowsocks, Trojan, VLESS/XUDP, VMess, Mux.Cool). Each bounds its queues and
+drops or rejects datagrams under pressure. Replies from unknown sources are not
+an I/O error: a direct association reports `DatagramError::NoReply`, which
+inbound UDP loops treat as "keep waiting" rather than closing the association.
 
 ### 8.3 Transport composition
 
@@ -304,7 +306,7 @@ pub(crate) trait Outbound: Send + Sync {
         -> BoxFuture<'a, io::Result<Connected>>;
 
     fn connect_datagram<'a>(&'a self, target: &'a Endpoint, ipv4: bool)
-        -> BoxFuture<'a, io::Result<Option<UdpOutbound>>>;
+        -> BoxFuture<'a, io::Result<Option<BoxDatagram>>>;
 
     fn is_direct(&self) -> bool;
     fn udp_direct(&self) -> bool;
@@ -589,7 +591,7 @@ construction, a future for running, and a cloneable handle for control. Hyper
 separates protocol construction (`Builder`) from connection driving
 (`serve_connection`); marmo separates instance construction (`InstanceBuilder`)
 from listener driving (`bind`/`serve`). Hyper's `Service` is per request; the
-per-connection equivalent here is `Inbound`/`Outbound`.
+per-connection equivalent here is the internal `Outbound` trait.
 
 | Idiom (hyper / axum / tokio) | marmo |
 | --- | --- |
@@ -600,7 +602,7 @@ per-connection equivalent here is `Inbound`/`Outbound`.
 | `hyper_util::server::graceful::GracefulShutdown` | `InstanceHandle::shutdown()` + drain |
 | `TcpListener::bind(addr).await` | `Instance::bind().await` |
 | `tokio::spawn(task)` | `handle()` then spawn `serve()` |
-| `tower::Service` | `Inbound` / `Outbound` traits (internal) |
+| `tower::Service` | internal `Outbound` trait |
 
 Design rules:
 
@@ -663,17 +665,45 @@ future cancels it but does not wait.
 ### 14.3 Types
 
 ```rust
-pub struct Config { /* owned; no borrows */ }
+pub struct Config { /* validated; fields private (ADR-0032) */ }
 
 impl Config {
     /// Strict JSON, version 2. Unknown fields and duplicate keys are errors.
     pub fn from_json(text: &str) -> Result<Self, ConfigError>;
+    pub fn builder() -> ConfigBuilder;
+
+    pub fn version(&self) -> u8;
+    pub fn limits(&self) -> RuntimeLimits;
+    pub fn process(&self) -> &Process;
+    pub fn dns(&self) -> Option<&Dns>;
+    pub fn inbounds(&self) -> &[Inbound];
+    pub fn outbounds(&self) -> &[Outbound];
+    pub fn route(&self) -> &Route;
 }
 
 impl std::str::FromStr for Config {
     type Err = ConfigError;
     fn from_str(text: &str) -> Result<Self, Self::Err> { Self::from_json(text) }
 }
+
+pub struct ConfigBuilder { /* private */ }
+
+impl ConfigBuilder {
+    pub fn new() -> Self;
+    pub fn limits(self, limits: Limits) -> Self;
+    pub fn process(self, process: Process) -> Self;
+    pub fn dns(self, dns: Option<Dns>) -> Self;
+    pub fn inbound(self, inbound: Inbound) -> Self;
+    pub fn outbound(self, outbound: Outbound) -> Self;
+    pub fn route(self, route: Route) -> Self;
+    pub fn build(self) -> Result<Config, ConfigError>;
+}
+
+// Protocol-tagged, validated configuration values. Each variant carries only
+// the fields that protocol uses; endpoints and UUIDs are parsed, and secrets
+// are `SecretString`.
+pub enum Inbound { Socks5 { .. }, Http { .. }, Shadowsocks { .. }, Trojan { .. }, Vless { .. }, Vmess { .. } }
+pub enum Outbound { Direct { .. }, Http { .. }, Selector { .. }, Shadowsocks { .. }, Trojan { .. }, Vless { .. }, Vmess { .. } }
 
 pub struct Instance { /* Arc<Inner> */ }        // Send + Sync + 'static
 
@@ -744,7 +774,8 @@ Errors:
 `Config` implements `FromStr`, so `text.parse()?` is equivalent to
 `Config::from_json(text)`. There is no `tower::Service` at the facade: a
 proxy's unit of work is a connection, not a request. `Inbound` and `Outbound`
-are the runtime-chosen traits, and `tower` compatibility is not promised.
+are the validated configuration types; the runtime `Outbound` trait is
+crate-private. `tower` compatibility is not promised.
 
 ### 14.4 Configuration and secrets
 
@@ -753,8 +784,8 @@ are the runtime-chosen traits, and `tower` compatibility is not promised.
   configuration (ADR-0023), so a version 1 document with file paths is
   rejected explicitly rather than parsed as DER.
 - Global `limits` (`max_connections`, `handshake_timeout_s`,
-  `idle_timeout_s`, `uplink_only_s`, `downlink_only_s`) are validated in
-  `build()`. UDP session caps remain per-inbound fixed bounds. HTTP/2 streams
+  `idle_timeout_s`, `uplink_only_s`, `downlink_only_s`) are validated when the
+  `Config` is built and exposed as `RuntimeLimits` with `Duration` values. UDP session caps remain per-inbound fixed bounds. HTTP/2 streams
   use a separate in-memory budget of the same size as `max_connections`
   (ADR-0031); the pool's 4/16/64 bounds are fixed, not configurable.
 - A top-level `dns` object is optional. It is accepted only when the `dns`

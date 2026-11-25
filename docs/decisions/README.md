@@ -55,6 +55,9 @@ ADR-0017 onward.
 | [0029](0029-process-identity.md) | Process identity injection | Accepted (2026-11-22) | injected resolver; no OS lookup in the library |
 | [0030](0030-dns-resolver.md) | DNS cache and DoH/DoT resolver | Accepted (2026-11-22) | `dns` feature; built-in + injected resolver; MSRV 1.88 |
 | [0031](0031-root-http2-multiplexing.md) | Root-level HTTP/2 multiplexing and pooling | Accepted (2026-11-23) | root H2 managers; fixed 4/16/64 outbound bounds; inbound stream budget |
+| [0032](0032-validated-config-api.md) | Validated configuration and runtime limits | Accepted (2026-11-24) | opaque `Config`; `ConfigBuilder`; typed schema; `Limits`/`RuntimeLimits` split |
+| [0033](0033-datagram-boundary.md) | Datagram boundary for UDP outbounds | Accepted (2026-11-24) | `Datagram`/`BoxDatagram`; `DatagramError::NoReply`; remove `UdpOutbound` |
+| [0034](0034-http1-single-request-policy.md) | HTTP/1 single-request forwarding policy | Accepted (2026-11-24) | one routed head; opaque remainder now; full framing as P4-6 |
 
 ADR-0001, 0003, 0007, 0010, 0013, and 0014 are superseded. ADR-0009 is
 superseded only in its license half; its clean-room protocol rule remains in

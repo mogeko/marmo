@@ -1,9 +1,11 @@
 //! HTTP/1.1 inbound: CONNECT tunnels and forward proxying.
 //!
-//! One request per connection. Forward requests are rewritten from
-//! absolute-form to origin-form, hop-by-hop headers are stripped, and the
-//! upstream is forced to `Connection: close`. The request body (if any) is
-//! relayed after the rewritten head.
+//! Exactly one request head is parsed and routed per connection. Forward
+//! requests are rewritten from absolute-form to origin-form, hop-by-hop headers
+//! are stripped, and the upstream is forced to `Connection: close`. Every byte
+//! after the head, and every later client byte, is relayed as an opaque body
+//! or tunnel: a second request head is never parsed. Pipelining is not
+//! supported (ADR-0034).
 
 use std::io;
 use std::sync::Arc;
@@ -69,25 +71,27 @@ async fn prepare(
         }
     };
 
-    let leftover = buffer[head_len..].to_vec();
+    // Bytes that followed the parsed head. They are body or tunnel data, never
+    // a second request head; do not parse them again.
+    let body_prefix = buffer[head_len..].to_vec();
     if request.method.eq_ignore_ascii_case("CONNECT") {
         return connect_tunnel(
             client,
             context,
             inbound,
             request.target,
-            leftover,
+            body_prefix,
             sniffing,
             deadline,
         )
         .await;
     }
-    forward(client, context, inbound, &request, leftover).await
+    forward(client, context, inbound, &request, body_prefix).await
 }
 
 async fn connect_tunnel(
-    mut client: TcpStream, context: &Context, inbound: &str, target_text: &str, leftover: Vec<u8>,
-    sniffing: Option<Policy>, deadline: &Deadline,
+    mut client: TcpStream, context: &Context, inbound: &str, target_text: &str,
+    body_prefix: Vec<u8>, sniffing: Option<Policy>, deadline: &Deadline,
 ) -> io::Result<Option<(BoxStream, BoxStream)>> {
     let Ok(destination) = Endpoint::parse(target_text) else {
         let _ = respond(&mut client, "400 Bad Request").await;
@@ -96,7 +100,8 @@ async fn connect_tunnel(
     let source: Endpoint = client.peer_addr()?.into();
     let mut domain = destination.domain().map(str::to_owned);
     let mut stream: BoxStream = Box::new(client);
-    let mut leftover = leftover;
+    // Bytes that followed the CONNECT head; they belong to the tunnel.
+    let mut body_prefix = body_prefix;
     let mut replied = false;
 
     if let (Some(policy), None) = (sniffing, domain.as_deref()) {
@@ -109,14 +114,14 @@ async fn connect_tunnel(
         }
         replied = true;
         let Ok(sniffed) = deadline
-            .run(sniff::sniff_stream(stream, leftover, policy))
+            .run(sniff::sniff_stream(stream, body_prefix, policy))
             .await
         else {
             return Ok(None);
         };
         domain = sniffed.domain;
         stream = sniffed.stream;
-        leftover = Vec::new();
+        body_prefix = Vec::new();
     }
 
     let action = route(context, inbound, source, &destination, domain.as_deref()).await;
@@ -144,7 +149,7 @@ async fn connect_tunnel(
         {
             return Ok(None);
         }
-        if !leftover.is_empty() && remote.write_all(&leftover).await.is_err() {
+        if !body_prefix.is_empty() && remote.write_all(&body_prefix).await.is_err() {
             return Ok(None);
         }
     }
@@ -153,7 +158,7 @@ async fn connect_tunnel(
 
 async fn forward(
     mut client: TcpStream, context: &Context, inbound: &str, request: &RequestHead<'_>,
-    leftover: Vec<u8>,
+    body_prefix: Vec<u8>,
 ) -> io::Result<Option<(BoxStream, BoxStream)>> {
     let target = match parse_absolute(request.target) {
         Ok(target) => target,
@@ -201,8 +206,8 @@ async fn forward(
     };
 
     remote.write_all(&head).await?;
-    if !leftover.is_empty() {
-        remote.write_all(&leftover).await?;
+    if !body_prefix.is_empty() {
+        remote.write_all(&body_prefix).await?;
     }
     Ok(Some((Box::new(client) as BoxStream, remote)))
 }

@@ -116,6 +116,18 @@ impl PartialEq for Uuid {
 
 impl Eq for Uuid {}
 
+impl fmt::Display for Uuid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, byte) in self.0.iter().enumerate() {
+            if matches!(index, 4 | 6 | 8 | 10) {
+                f.write_str("-")?;
+            }
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
 impl fmt::Debug for Uuid {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Uuid(<redacted>)")
@@ -433,6 +445,13 @@ mod tests {
 
     fn endpoint(port: u16) -> Endpoint {
         Endpoint::from_ip(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), port)
+    }
+
+    #[test]
+    fn formats_uuids_canonically() {
+        assert_eq!(uuid().to_string(), "00112233-4455-6677-8899-aabbccddeeff");
+        let compact = Uuid::parse("00112233445566778899aabbccddeeff").expect("uuid");
+        assert_eq!(compact.to_string(), uuid().to_string());
     }
 
     #[test]

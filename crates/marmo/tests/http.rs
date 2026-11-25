@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use marmo::{Config, Instance, InstanceHandle, ServeError};
+use marmo_proto::http::HEAD_MAX;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
@@ -103,7 +104,7 @@ async fn read_head(stream: &mut TcpStream) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn connect_tunnels_and_forwards_leftover_bytes() {
+async fn connect_tunnels_and_forwards_body_prefix() {
     let (echo, echo_task) = echo_server().await;
     let (address, handle, serve) = start(DIRECT).await;
 
@@ -183,6 +184,135 @@ async fn forward_rewrites_absolute_form_and_strips_hop_headers() {
 
     stop(handle, serve).await;
     server.abort();
+}
+
+#[tokio::test]
+async fn forward_preserves_body_prefix_and_framing_headers() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+    let upstream = listener.local_addr().expect("addr");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let head = read_head(&mut stream).await;
+        let text = String::from_utf8_lossy(&head).to_ascii_lowercase();
+        assert!(
+            text.starts_with("post /form http/1.1\r\n"),
+            "unexpected request line: {text}"
+        );
+        assert!(
+            text.contains("content-length: 5"),
+            "framing header dropped: {text}"
+        );
+        assert!(
+            !text.contains("x-drop-me"),
+            "connection-nominated header forwarded: {text}"
+        );
+        let mut body = [0_u8; 5];
+        stream.read_exact(&mut body).await.expect("body prefix");
+        assert_eq!(&body, b"hello");
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
+            .await
+            .expect("response");
+        let _ = stream.shutdown().await;
+    });
+
+    let (address, handle, serve) = start(DIRECT).await;
+    let mut client = TcpStream::connect(address).await.expect("connect");
+    let request = format!(
+        "POST http://127.0.0.1:{}/form HTTP/1.1\r\nHost: ignored\r\n\
+         Connection: close, X-Drop-Me\r\nX-Drop-Me: secret\r\nContent-Length: 5\r\n\r\nhello",
+        upstream.port()
+    );
+    client.write_all(request.as_bytes()).await.expect("request");
+
+    let head = read_head(&mut client).await;
+    assert!(
+        head.starts_with(b"HTTP/1.1 204"),
+        "unexpected head: {}",
+        String::from_utf8_lossy(&head)
+    );
+
+    stop(handle, serve).await;
+    server.await.expect("server");
+}
+
+#[tokio::test]
+async fn pipelined_request_is_relayed_as_body_bytes() {
+    let first = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+    let first_upstream = first.local_addr().expect("addr");
+    let second = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+    let second_upstream = second.local_addr().expect("addr");
+
+    let pipelined = format!(
+        "GET http://127.0.0.1:{}/second HTTP/1.1\r\nHost: other\r\n\r\n",
+        second_upstream.port()
+    );
+    let expected = pipelined.clone();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = first.accept().await.expect("accept");
+        let head = read_head(&mut stream).await;
+        let text = String::from_utf8_lossy(&head).to_ascii_lowercase();
+        assert!(
+            text.starts_with("post /first http/1.1\r\n"),
+            "unexpected request line: {text}"
+        );
+        let mut body = vec![0_u8; expected.len()];
+        stream.read_exact(&mut body).await.expect("body prefix");
+        assert_eq!(String::from_utf8_lossy(&body), expected);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            .await
+            .expect("response");
+        let _ = stream.shutdown().await;
+    });
+
+    let (address, handle, serve) = start(DIRECT).await;
+    let mut client = TcpStream::connect(address).await.expect("connect");
+    let request = format!(
+        "POST http://127.0.0.1:{}/first HTTP/1.1\r\nHost: ignored\r\n\
+         Content-Length: {}\r\n\r\n{}",
+        first_upstream.port(),
+        pipelined.len(),
+        pipelined
+    );
+    client.write_all(request.as_bytes()).await.expect("request");
+
+    let head = read_head(&mut client).await;
+    assert!(
+        head.starts_with(b"HTTP/1.1 200"),
+        "unexpected head: {}",
+        String::from_utf8_lossy(&head)
+    );
+    assert!(
+        timeout(Duration::from_millis(200), second.accept())
+            .await
+            .is_err(),
+        "pipelined request was routed as a second request"
+    );
+
+    stop(handle, serve).await;
+    server.await.expect("server");
+}
+
+#[tokio::test]
+async fn oversized_head_returns_431() {
+    let (address, handle, serve) = start(DIRECT).await;
+    let mut client = TcpStream::connect(address).await.expect("connect");
+    let head_start = b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n";
+    client.write_all(head_start).await.expect("head start");
+    // End exactly at HEAD_MAX. Sending more leaves unread bytes that make
+    // Windows reset the connection and discard the 431 response.
+    let filler = vec![b'a'; HEAD_MAX - head_start.len()];
+    // The head never terminates; the inbound must bound the read and answer.
+    client.write_all(&filler).await.expect("head filler");
+
+    let head = read_head(&mut client).await;
+    assert!(
+        head.starts_with(b"HTTP/1.1 431"),
+        "unexpected head: {}",
+        String::from_utf8_lossy(&head)
+    );
+    stop(handle, serve).await;
 }
 
 #[tokio::test]
