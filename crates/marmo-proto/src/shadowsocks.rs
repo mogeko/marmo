@@ -395,6 +395,11 @@ pub fn encode_udp_packet(
     if packet.padding_len as usize > MAX_PADDING {
         return Err(SsError::NoSpace);
     }
+    if packet.direction == Direction::ServerToClient
+        && packet.client_session_id == Some(packet.session_id)
+    {
+        return Err(SsError::ProtocolViolation);
+    }
 
     let mut body = [0_u8; MAX_PAYLOAD];
     let mut offset = 0;
@@ -783,6 +788,9 @@ pub fn encode_client_request(
     if salt.len() != method.salt_len() || psk.len() < method.key_len() {
         return Err(SsError::InvalidKey);
     }
+    if padding.len() > MAX_PADDING {
+        return Err(SsError::ProtocolViolation);
+    }
 
     let mut variable = [0_u8; MAX_PAYLOAD];
     let mut offset = 0;
@@ -1013,6 +1021,9 @@ pub fn encode_server_response(
         || first_payload.is_empty()
     {
         return Err(SsError::InvalidKey);
+    }
+    if salt == request_salt {
+        return Err(SsError::ProtocolViolation);
     }
     let fixed_len = 11 + request_salt.len();
     let total = salt.len() + fixed_len + TAG_LENGTH + first_payload.len() + TAG_LENGTH;
@@ -1331,17 +1342,8 @@ mod tests {
             timestamp: 100,
         };
         let mut encoded = [0_u8; 256];
-        let length = encode_udp_packet(method, &key, &packet, &mut encoded).expect("encode");
-        let mut plaintext = [0_u8; 256];
         assert_eq!(
-            decode_udp_packet(
-                method,
-                &key,
-                &encoded[..length],
-                Direction::ServerToClient,
-                Some(session_id),
-                &mut plaintext,
-            ),
+            encode_udp_packet(method, &key, &packet, &mut encoded),
             Err(SsError::ProtocolViolation)
         );
     }
@@ -1601,19 +1603,8 @@ mod tests {
         let psk = key(method);
         let salt = [4_u8; 16];
         let mut encoded = [0_u8; 512];
-        let length =
-            encode_server_response(method, &psk, &salt, &salt, 1_000, b"first", &mut encoded)
-                .expect("encode");
-        let mut plaintext = [0_u8; 512];
         assert_eq!(
-            decode_server_response(
-                method,
-                &psk,
-                &salt,
-                &encoded[..length],
-                &mut plaintext,
-                1_000,
-            ),
+            encode_server_response(method, &psk, &salt, &salt, 1_000, b"first", &mut encoded),
             Err(SsError::ProtocolViolation)
         );
     }

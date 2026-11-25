@@ -14,7 +14,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 use crate::direct::Dialer;
 use crate::mux::{MuxReader, MuxWriter};
@@ -177,8 +177,8 @@ impl MuxDialer for VlessDialer {
             };
             let (mut stream, _) =
                 dial_base(&self.dialer, &self.server, &self.layers, h2_pool).await?;
-            let mut header = [0_u8; 1 + 16 + 1 + 1];
-            let length = encode_mux_request(&self.uuid, &mut header)
+            let mut header = Zeroizing::new([0_u8; 1 + 16 + 1 + 1]);
+            let length = encode_mux_request(&self.uuid, &mut header[..])
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
             stream.write_all(&header[..length]).await?;
             Ok(stream)
@@ -362,8 +362,8 @@ pub(crate) async fn connect_xudp(
     h2_pool: Option<&Arc<H2Pool>>,
 ) -> io::Result<VlessXudpClient> {
     let (mut stream, _bound) = dial_base(dialer, server, layers, h2_pool).await?;
-    let mut header = [0_u8; 1 + 16 + 1 + 1];
-    let length = encode_mux_request(uuid, &mut header)
+    let mut header = Zeroizing::new([0_u8; 1 + 16 + 1 + 1]);
+    let length = encode_mux_request(uuid, &mut header[..])
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     stream.write_all(&header[..length]).await?;
     let (read_half, write_half) = tokio::io::split(stream);
@@ -408,12 +408,10 @@ async fn open_stream(
 async fn write_request(
     stream: &mut BoxStream, uuid: &Uuid, target: &Endpoint, command: u8,
 ) -> io::Result<usize> {
-    let mut header = [0_u8; REQUEST_HEADER_MAX];
-    let length = encode_request(uuid, target, command, &mut header)
+    let mut header = Zeroizing::new([0_u8; REQUEST_HEADER_MAX]);
+    let length = encode_request(uuid, target, command, &mut header[..])
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    let written = stream.write_all(&header[..length]).await;
-    header.zeroize();
-    written?;
+    stream.write_all(&header[..length]).await?;
     Ok(length)
 }
 

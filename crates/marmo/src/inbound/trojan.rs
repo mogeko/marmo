@@ -242,8 +242,10 @@ async fn handle_udp(
         // A slow client must not block this loop while the bounded reply
         // queue is full; dropping one datagram is preferable to pinning the
         // connection permit indefinitely.
-        if sender.try_send((action, destination, payload)).is_err() {
-            break;
+        match sender.try_send((action, destination, payload)) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => continue,
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
         }
     }
     drop(sender);

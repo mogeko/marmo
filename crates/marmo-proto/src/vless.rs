@@ -517,12 +517,18 @@ mod tests {
         offset += 2;
         buffer[offset] = ATYP_DOMAIN;
         offset += 1;
-        // `DomainName` accepts at most 253 bytes; the protocol length byte can
-        // carry up to 255.
-        let domain_len = 253;
+        // `DomainName` accepts at most 253 bytes and each label at most 63.
+        let domain = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61)
+        );
+        let domain_len = domain.len();
         buffer[offset] = domain_len as u8;
         offset += 1;
-        buffer[offset..offset + domain_len].fill(b'a');
+        buffer[offset..offset + domain_len].copy_from_slice(domain.as_bytes());
         offset += domain_len;
 
         assert!(offset <= REQUEST_HEADER_MAX);

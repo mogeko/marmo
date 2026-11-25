@@ -183,7 +183,10 @@ pub fn encode_end_meta(session: u16, out: &mut [u8]) -> Result<usize, MuxError> 
 /// Encodes a keep-alive frame metadata.
 pub const KEEPALIVE_META: [u8; 4] = [0, 0, STATUS_KEEPALIVE, 0];
 
-/// Encodes `meta length | meta | data length`.
+/// Encodes `meta length | meta [| data length when OPTION_DATA is set]`.
+///
+/// The data-length field is present only when `meta[3]` has [`OPTION_DATA`];
+/// this mirrors the reader in `marmo::mux`.
 pub fn encode_header(meta: &[u8], data_len: usize, out: &mut [u8]) -> Result<usize, MuxError> {
     if meta.len() < 4 || meta.len() > MAX_META_LEN {
         return Err(MuxError::Invalid);
@@ -191,15 +194,21 @@ pub fn encode_header(meta: &[u8], data_len: usize, out: &mut [u8]) -> Result<usi
     if data_len > MAX_DATA_LEN {
         return Err(MuxError::MessageTooBig);
     }
-    let total = 2 + meta.len() + 2;
+    let has_data = meta[3] & OPTION_DATA != 0;
+    if !has_data && data_len != 0 {
+        return Err(MuxError::Invalid);
+    }
+    let total = 2 + meta.len() + if has_data { 2 } else { 0 };
     if out.len() < total {
         return Err(MuxError::NoSpace);
     }
     let meta_len = u16::try_from(meta.len()).map_err(|_| MuxError::Invalid)?;
-    let data_len = u16::try_from(data_len).map_err(|_| MuxError::MessageTooBig)?;
     out[..2].copy_from_slice(&meta_len.to_be_bytes());
     out[2..2 + meta.len()].copy_from_slice(meta);
-    out[2 + meta.len()..total].copy_from_slice(&data_len.to_be_bytes());
+    if has_data {
+        let data_len = u16::try_from(data_len).map_err(|_| MuxError::MessageTooBig)?;
+        out[2 + meta.len()..total].copy_from_slice(&data_len.to_be_bytes());
+    }
     Ok(total)
 }
 
@@ -293,12 +302,21 @@ mod tests {
     #[test]
     fn encodes_frame_headers() {
         let mut out = [0_u8; 600];
-        let length = encode_header(&KEEPALIVE_META, 3, &mut out).expect("header");
-        assert_eq!(length, 8);
+        let length = encode_header(&KEEPALIVE_META, 0, &mut out).expect("header");
+        assert_eq!(length, 6);
         assert_eq!(&out[..2], &4_u16.to_be_bytes());
-        assert_eq!(&out[6..8], &3_u16.to_be_bytes());
         assert!(matches!(
-            encode_header(&KEEPALIVE_META, MAX_DATA_LEN + 1, &mut out),
+            encode_header(&KEEPALIVE_META, 3, &mut out),
+            Err(MuxError::Invalid)
+        ));
+
+        let mut meta = [0_u8; MAX_META_LEN];
+        let meta_len = encode_new_meta(1, &target(), NETWORK_TCP, &mut meta).expect("new");
+        let length = encode_header(&meta[..meta_len], 3, &mut out).expect("data header");
+        assert_eq!(length, 2 + meta_len + 2);
+        assert_eq!(&out[length - 2..length], &3_u16.to_be_bytes());
+        assert!(matches!(
+            encode_header(&meta[..length], MAX_DATA_LEN + 1, &mut out),
             Err(MuxError::MessageTooBig)
         ));
     }

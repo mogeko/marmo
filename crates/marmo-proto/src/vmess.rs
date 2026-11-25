@@ -1299,6 +1299,12 @@ mod tests {
         let mut decoder = ChunkDecoder::new(Security::Aes128Gcm, &key, &iv, option);
         let mut wire = Vec::new();
         encoder.encode(&[], &mut wire).expect("encode");
+        let mut valid = ChunkDecoder::new(Security::Aes128Gcm, &key, &iv, option);
+        let ChunkProgress::Complete { data, .. } = valid.progress(&wire).expect("empty chunk")
+        else {
+            panic!("expected an empty chunk");
+        };
+        assert!(data.is_empty());
         wire[2] ^= 1;
         assert!(decoder.progress(&wire).is_err());
     }

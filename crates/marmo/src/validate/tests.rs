@@ -464,6 +464,22 @@ fn validates_route() {
         "route.rules[0].domain",
     );
     assert_path(
+        error(r#"{"route":{"rules":[{"domain_keyword":["例"],"outbound":"direct"}]}}"#),
+        "route.rules[0].domain_keyword[0]",
+    );
+    assert_path(
+        error(r#"{"route":{"rules":[{"domain":["*.example.com"],"outbound":"direct"}]}}"#),
+        "route.rules[0].domain[0]",
+    );
+    assert_path(
+        error(r#"{"route":{"rules":[{"domain_suffix":["example.com:443"],"outbound":"direct"}]}}"#),
+        "route.rules[0].domain_suffix[0]",
+    );
+    assert!(
+        parse(r#"{"route":{"rules":[{"domain_suffix":[".example.com"],"outbound":"direct"}]}}"#)
+            .is_ok()
+    );
+    assert_path(
         error(r#"{"route":{"rules":[{"port":[],"outbound":"direct"}]}}"#),
         "route.rules[0].port",
     );

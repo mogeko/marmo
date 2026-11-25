@@ -15,7 +15,7 @@ use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 use crate::direct::Dialer;
 use crate::outbound::Connected;
@@ -294,7 +294,7 @@ async fn write_request(
     };
     let padding = random::<16>().map_err(|_| io::Error::other("random source unavailable"))?;
     let padding_len = usize::from(padding[0] & 0x0f);
-    let mut header = [0_u8; REQUEST_HEADER_MAX];
+    let mut header = Zeroizing::new([0_u8; REQUEST_HEADER_MAX]);
     let length = encode_request(
         cmd_key,
         &RequestSpec {
@@ -305,17 +305,12 @@ async fn write_request(
             padding: &padding[1..1 + padding_len],
             secrets: &secrets,
         },
-        &mut header,
+        &mut header[..],
     )
     .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     stream.write_all(&header[..length]).await?;
-    let request = match request_progress(&header[..length], cmd_key, now) {
-        RequestProgress::Complete(request) => request,
-        _ => {
-            header.zeroize();
-            return Err(io::Error::other("VMess request did not decode"));
-        }
-    };
-    header.zeroize();
-    Ok(request)
+    match request_progress(&header[..length], cmd_key, now) {
+        RequestProgress::Complete(request) => Ok(request),
+        _ => Err(io::Error::other("VMess request did not decode")),
+    }
 }

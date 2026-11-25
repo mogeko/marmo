@@ -289,7 +289,7 @@ pub fn build_forward_head(
             let Ok(value) = std::str::from_utf8(header.value) else {
                 return Err(HttpError::BadRequest);
             };
-            if !value.trim().eq_ignore_ascii_case("chunked") {
+            if !value.is_ascii() || !value.trim().eq_ignore_ascii_case("chunked") {
                 return Err(HttpError::BadRequest);
             }
             has_transfer_encoding = true;
@@ -519,6 +519,15 @@ mod tests {
         let headers = [Header {
             name: "Transfer-Encoding",
             value: b"gzip, chunked",
+        }];
+        assert!(matches!(
+            build_forward_head("POST", 1, &target, &headers),
+            Err(HttpError::BadRequest)
+        ));
+
+        let headers = [Header {
+            name: "Transfer-Encoding",
+            value: "\u{a0}chunked".as_bytes(),
         }];
         assert!(matches!(
             build_forward_head("POST", 1, &target, &headers),

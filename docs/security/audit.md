@@ -68,8 +68,11 @@ not implemented in this revision (QUIC, TUIC, Hysteria2).
   codecs; the Mux.Cool frame reader is covered by unit tests rather than a
   separate target. Corpus provenance is recorded in
   `fuzz/corpus/README.md`; CI runs a short bounded smoke for every target on
-  relevant pull requests and on manual dispatch. A 24-hour soak is no longer a
-  release gate.
+  relevant pull requests and on manual dispatch. The SS2022 and VMess targets
+  feed raw ciphertext, so mutations mostly stop at the AEAD open; only the
+  encoder-produced seed corpus reaches post-auth parsing. Authenticated-input
+  fuzzing remains future work and is not claimed as coverage. A 24-hour soak is
+  no longer a release gate.
 - **VMess AEAD.** Only the AEAD header is accepted; legacy MD5/CFB and body
   None/Zero are rejected. Auth IDs are verified by AES decryption, CRC32, and a
   120-second window, then inserted into a bounded 4,096-entry replay filter.
@@ -79,10 +82,12 @@ not implemented in this revision (QUIC, TUIC, Hysteria2).
   reject new entries when full instead of evicting an active entry.
 - **Mux.Cool.** The VMess and VLESS inbounds share one dispatcher bounded to 128
   sessions per physical connection, a 16-frame queue per session, 64 KiB
-  frames, 512-byte metadata, the instance idle timeout, and a per-instance
-  logical-session permit. Sessions own one task and are aborted with the
-  physical connection; a session dial has the standard handshake deadline.
-  Downlink writes notify the physical connection's activity deadline.
+  frames, 512-byte metadata, the instance idle timeout, a per-instance
+  logical-session permit, and a 1,024-permit (about 64 MiB) frame-memory budget.
+  Sessions own one task and are aborted with the physical connection; a session
+  dial has the standard handshake deadline. Downlink writes notify the physical
+  connection's activity deadline. A session that cannot acquire frame memory is
+  closed rather than blocking other connections.
 - **Mux.Cool outbound.** The client pool is bounded to four physical
   connections, 128 sessions per connection, 16 queued frames per session, and a
   4 MiB in-flight downlink budget. TCP downlink applies backpressure; UDP drops

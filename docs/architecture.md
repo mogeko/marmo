@@ -478,8 +478,9 @@ Matchers in the current set:
 | `process_path` | exact executable path from an injected `ProcessResolver` |
 
 Domain names are canonicalized to ASCII/punycode with IDNA at `Endpoint` parse,
-and domain rules are compiled in the same form, so a Unicode name and its
-punycode representation match the same rule.
+and exact/suffix domain rules are compiled in the same form, so a Unicode name
+and its punycode representation match the same rule. `domain_keyword` values
+must be ASCII/punycode; validation rejects non-ASCII keywords.
 
 `domain_set` and `geoip` do not have a library-owned file format. The embedder
 registers an `Arc<dyn DomainSet>` or `Arc<dyn IpSet>` at build time; the data

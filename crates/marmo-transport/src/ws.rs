@@ -48,6 +48,9 @@ pub struct WsClientOptions {
 
 /// Validates a configured WebSocket origin allowlist.
 pub fn validate_origins(origins: &[String]) -> Result<(), String> {
+    if origins.is_empty() {
+        return Err("must not be empty; omit the list to allow any origin".into());
+    }
     if origins.len() > 16 {
         return Err("too many origins".into());
     }
@@ -392,10 +395,17 @@ where
                         Poll::Ready(Ok(())) => {
                             let filled = bound.filled().len();
                             if filled == 0 {
-                                me.conn.feed_eof();
-                            } else {
-                                let _ = me.conn.feed(&chunk[..filled]);
+                                // WebSocket has no TCP-style half-close. Do
+                                // not feed EOF into the ws-net connection:
+                                // that fails its writer, and the response
+                                // direction would be silently truncated. The
+                                // adapter reports EOF for reads and keeps the
+                                // connection writable until shutdown.
+                                me.eof = true;
+                                let _ = me.poll_flush_output(cx);
+                                return Poll::Ready(Ok(()));
                             }
+                            let _ = me.conn.feed(&chunk[..filled]);
                         }
                         Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                         Poll::Pending => return Poll::Pending,
@@ -515,6 +525,7 @@ mod tests {
         assert!(validate_origins(&["https://app.example".into()]).is_ok());
         assert!(validate_origins(&["https://app.example/".into()]).is_err());
         assert!(validate_origins(&["app.example".into()]).is_err());
+        assert!(validate_origins(&[]).is_err());
     }
 
     #[tokio::test]

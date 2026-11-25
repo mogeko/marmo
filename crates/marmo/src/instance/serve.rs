@@ -224,7 +224,7 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
                 if token.is_cancelled() {
                     break;
                 }
-                context.metrics.record(MetricEvent::TaskPanicked);
+                record_task_result(&result, &context.metrics);
                 fatal = Some(ServeError::Task(match result {
                     Ok(()) => "shared UDP listener stopped".into(),
                     Err(error) => error.to_string(),
@@ -378,9 +378,7 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
 
     shared.abort_all();
     while let Some(result) = shared.join_next().await {
-        if result.is_err() {
-            context.metrics.record(MetricEvent::TaskPanicked);
-        }
+        record_task_result(&result, &context.metrics);
     }
 
     let grace = context.limits.shutdown_grace;
@@ -397,8 +395,14 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
 
 fn reap_finished(tasks: &mut JoinSet<()>, metrics: &Metrics) {
     while let Some(result) = tasks.try_join_next() {
-        if result.is_err() {
-            metrics.record(MetricEvent::TaskPanicked);
-        }
+        record_task_result(&result, metrics);
+    }
+}
+
+fn record_task_result(result: &Result<(), tokio::task::JoinError>, metrics: &Metrics) {
+    if let Err(error) = result
+        && !error.is_cancelled()
+    {
+        metrics.record(MetricEvent::TaskPanicked);
     }
 }

@@ -21,6 +21,7 @@ use crate::outbound::datagram::{BoxDatagram, DatagramError};
 use crate::routing::{Action, Metadata};
 use crate::sniff::{self, Policy};
 use crate::vmess::{ChunkReader, ChunkStream, ChunkWriter, ReplayFilter, now_unix, random};
+use zeroize::Zeroizing;
 
 /// Bounded queue between the chunk reader and the outbound reply task.
 const UDP_QUEUE: usize = 16;
@@ -121,7 +122,7 @@ async fn prepare(
 async fn prepare_stream(
     mut stream: BoxStream, cmd_key: &CmdKey, replay: &Mutex<ReplayFilter>,
 ) -> io::Result<Prepared> {
-    let mut buffer = [0_u8; REQUEST_HEADER_MAX];
+    let mut buffer = Zeroizing::new([0_u8; REQUEST_HEADER_MAX]);
     let mut filled = 0;
     let now = now_unix();
     loop {
@@ -340,8 +341,10 @@ async fn handle_udp(
         // A slow client must not block this loop while the bounded reply
         // queue is full; dropping one datagram is preferable to pinning the
         // connection permit indefinitely.
-        if sender.try_send(payload).is_err() {
-            break;
+        match sender.try_send(payload) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => continue,
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
         }
     }
     drop(sender);

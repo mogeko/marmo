@@ -296,8 +296,12 @@ impl InstanceBuilder {
                 } => {
                     let (ws, h2) = server_transport(transport.as_ref());
                     let mut tls = InboundTlsConfig::new(tls);
-                    if h2.is_some() && tls.alpn.is_empty() {
-                        tls.alpn.push("h2".into());
+                    if tls.alpn.is_empty() {
+                        if h2.is_some() {
+                            tls.alpn.push("h2".into());
+                        } else if ws.is_some() {
+                            tls.alpn.push("http/1.1".into());
+                        }
                     }
                     InboundConfig::Vless {
                         uuid: Arc::new(uuid.clone()),
@@ -315,8 +319,12 @@ impl InstanceBuilder {
                     let (ws, h2) = server_transport(transport.as_ref());
                     let tls = tls.as_ref().map(|tls| {
                         let mut tls = InboundTlsConfig::new(tls);
-                        if h2.is_some() && tls.alpn.is_empty() {
-                            tls.alpn.push("h2".into());
+                        if tls.alpn.is_empty() {
+                            if h2.is_some() {
+                                tls.alpn.push("h2".into());
+                            } else if ws.is_some() {
+                                tls.alpn.push("http/1.1".into());
+                            }
                         }
                         tls
                     });

@@ -215,7 +215,13 @@ impl H2Server {
                 tokio::select! {
                     _ = &mut stopped => {
                         connection.graceful_shutdown();
-                        while connection.accept().await.is_some() {}
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_secs(1),
+                            async {
+                                while connection.accept().await.is_some() {}
+                            },
+                        )
+                        .await;
                         break;
                     }
                     accepted = connection.accept() => {

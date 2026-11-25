@@ -59,9 +59,11 @@ Source: [SIP022 AEAD-2022 Ciphers](https://github.com/shadowsocks/shadowsocks-or
   in both directions; the harness is intentionally not committed.
 - Golden SS2022 TCP/UDP fixtures live in
   `crates/marmo-proto/tests/fixtures/shadowsocks/`; synthetic malformed request
-  and datagram bytes live in `fuzz/corpus/ss2022_*`. The fuzz targets construct
-  authenticated inputs so address, padding, and length parsing is reached after
-  AEAD.
+  and datagram bytes live in `fuzz/corpus/ss2022_*`. The mutation targets feed
+  raw ciphertext, so most mutations stop at the AEAD open; the encoder-produced
+  seeds reach the post-auth address/padding/length parsers. Authenticated-input
+  fuzzing remains future work and the encoders/decoders also have unit and
+  fixture round-trip tests.
 - Differential results against shadowsocks-rust are recorded in
   [`interop.md`](interop.md).
 - Fuzz targets: `ss2022_tcp` and `ss2022_udp` under `cargo +nightly fuzz run`.

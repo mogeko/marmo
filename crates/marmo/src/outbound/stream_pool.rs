@@ -103,6 +103,7 @@ impl<C: StreamConnection> StreamPool<C> {
     pub(crate) async fn open(&self) -> io::Result<BoxStream> {
         let pool_permit = self.acquire_permit().await?;
         let mut capacity = self.capacity.subscribe();
+        let mut failed_streams = 0_u8;
         loop {
             if self.token.is_cancelled() {
                 return Err(shutdown());
@@ -118,9 +119,13 @@ impl<C: StreamConnection> StreamPool<C> {
                             capacity: self.capacity.clone(),
                         }));
                     }
-                    Err(_) => {
+                    Err(error) => {
                         drop(guard);
                         self.remove(&slot);
+                        failed_streams += 1;
+                        if failed_streams > 1 {
+                            return Err(error);
+                        }
                         continue;
                     }
                 }

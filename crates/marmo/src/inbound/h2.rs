@@ -44,8 +44,23 @@ pub(crate) async fn serve(
     let connection_token = token.child_token();
     let mut tasks = JoinSet::new();
     loop {
+        while let Some(result) = tasks.try_join_next() {
+            if let Err(error) = result
+                && !error.is_cancelled()
+            {
+                context.metrics.record(MetricEvent::TaskPanicked);
+            }
+        }
         let next = tokio::select! {
             _ = token.cancelled() => break,
+            Some(result) = tasks.join_next(), if !tasks.is_empty() => {
+                if let Err(error) = result
+                    && !error.is_cancelled()
+                {
+                    context.metrics.record(MetricEvent::TaskPanicked);
+                }
+                continue;
+            }
             next = connection.accept_stream() => next,
         };
         let Some(result) = next else {

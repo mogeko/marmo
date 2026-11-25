@@ -13,9 +13,9 @@ use thiserror::Error;
 ///
 /// The constructor rejects empty names, names longer than 253 bytes, ASCII
 /// control characters, whitespace, and characters that cannot appear in an
-/// authority (`/`, `?`, `#`, `@`, `[`, `]`, `:`). Internationalized names are
-/// accepted as UTF-8 and converted to their ASCII/punycode form with IDNA, so
-/// routing rules and resolvers see one canonical name.
+/// authority (`/`, `?`, `#`, `@`, `[`, `]`, `:`, `*`). Internationalized names
+/// are accepted as UTF-8 and converted to their ASCII/punycode form with IDNA,
+/// so routing rules and resolvers see one canonical name.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct DomainName(Box<str>);
 
@@ -32,7 +32,7 @@ impl DomainName {
         if name.is_empty() {
             return Err(EndpointError::EmptyHost);
         }
-        if name.ends_with('.') {
+        if name.ends_with('.') || name.starts_with('.') || name.contains("..") {
             return Err(EndpointError::InvalidHost);
         }
         if name.len() > Self::MAX_LEN {
@@ -42,16 +42,36 @@ impl DomainName {
             if byte <= 0x20 || byte == 0x7f {
                 return Err(EndpointError::InvalidHost);
             }
-            if matches!(byte, b'/' | b'?' | b'#' | b'@' | b'[' | b']' | b':') {
+            if matches!(byte, b'/' | b'?' | b'#' | b'@' | b'[' | b']' | b':' | b'*') {
                 return Err(EndpointError::InvalidHost);
             }
         }
         let ascii = idna::domain_to_ascii(name).map_err(|_| EndpointError::InvalidHost)?;
+        // UTS-46 with an empty ASCII deny list maps compatibility forms such
+        // as U+FF0F (／) and U+3000 (　) to `/` and space. Accept only the
+        // host characters IDN output can legitimately contain; a DNS host is
+        // LDH plus underscore for service names.
+        if !ascii
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_'))
+        {
+            return Err(EndpointError::InvalidHost);
+        }
+        // IDNA maps U+3002 and other separators to `.`, which can leave a
+        // trailing root dot even when the input had none. Canonicalize one
+        // trailing dot again and reject a second one.
+        let ascii = ascii.strip_suffix('.').unwrap_or(&ascii);
         if ascii.is_empty() {
+            return Err(EndpointError::InvalidHost);
+        }
+        if ascii.ends_with('.') || ascii.starts_with('.') || ascii.contains("..") {
             return Err(EndpointError::InvalidHost);
         }
         if ascii.len() > Self::MAX_LEN {
             return Err(EndpointError::DomainTooLong);
+        }
+        if ascii.split('.').any(|label| label.len() > 63) {
+            return Err(EndpointError::InvalidHost);
         }
         Ok(Self(ascii.to_ascii_lowercase().into_boxed_str()))
     }
@@ -370,6 +390,22 @@ mod tests {
         let idn = DomainName::parse("例え.テスト").expect("idn");
         assert!(idn.as_str().is_ascii());
         assert!(idn.as_str().starts_with("xn--"));
+        assert_eq!(
+            DomainName::parse("example.com。")
+                .expect("ideographic full stop")
+                .as_str(),
+            "example.com"
+        );
+        assert!(DomainName::parse("_sip._tcp.example.com").is_ok());
+        assert!(DomainName::parse("\u{FF0F}example.com").is_err());
+        assert!(DomainName::parse("exam\u{3000}ple.com").is_err());
+        assert!(DomainName::parse("\u{FF20}example.com").is_err());
+        assert!(DomainName::parse(".example.com").is_err());
+        assert!(DomainName::parse("a..b").is_err());
+        assert!(DomainName::parse("。example.com").is_err());
+        assert!(DomainName::parse("a。。b").is_err());
+        let long_label = format!("{}.com", "a".repeat(64));
+        assert!(DomainName::parse(&long_label).is_err());
         assert_eq!(
             DomainName::parse("Example.COM").expect("domain").as_str(),
             "example.com"
