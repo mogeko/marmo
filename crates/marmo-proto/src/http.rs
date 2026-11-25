@@ -234,6 +234,18 @@ pub fn build_forward_head(
     if !is_token(method) || version > 1 {
         return Err(HttpError::BadRequest);
     }
+    // `AbsoluteTarget` has public fields. Reject control characters here so a
+    // caller cannot turn the request line or Host header into an injection.
+    if target.authority.is_empty()
+        || target.path.is_empty()
+        || target
+            .authority
+            .bytes()
+            .any(|byte| byte <= 0x20 || byte == 0x7f)
+        || target.path.bytes().any(|byte| byte <= 0x20 || byte == 0x7f)
+    {
+        return Err(HttpError::BadRequest);
+    }
     let mut head = Vec::with_capacity(FORWARD_HEAD_MAX);
     head.extend_from_slice(method.as_bytes());
     head.push(b' ');
@@ -475,6 +487,32 @@ mod tests {
         ];
         assert!(matches!(
             build_forward_head("POST", 1, &target, &headers),
+            Err(HttpError::BadRequest)
+        ));
+    }
+
+    #[test]
+    fn rejects_crafted_absolute_target_controls() {
+        let endpoint = Endpoint::from_domain("example.com", 80).expect("domain");
+        let injected = AbsoluteTarget {
+            endpoint: endpoint.clone(),
+            authority: "example.com\r\nX-Injected: yes",
+            path: "/",
+            needs_slash: false,
+        };
+        assert!(matches!(
+            build_forward_head("GET", 1, &injected, &[]),
+            Err(HttpError::BadRequest)
+        ));
+
+        let split = AbsoluteTarget {
+            endpoint: endpoint.clone(),
+            authority: "example.com",
+            path: "/ HTTP/1.1\r\nX-Injected: yes",
+            needs_slash: false,
+        };
+        assert!(matches!(
+            build_forward_head("GET", 1, &split, &[]),
             Err(HttpError::BadRequest)
         ));
     }

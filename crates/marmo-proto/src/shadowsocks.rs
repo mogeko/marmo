@@ -14,7 +14,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use marmo_net::Endpoint;
 use thiserror::Error;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// AEAD tag length.
 pub const TAG_LENGTH: usize = 16;
@@ -461,6 +461,12 @@ pub fn decode_udp_packet<'a>(
             .try_into()
             .map_err(|_| SsError::MalformedPacket)?,
     );
+    if expected_direction == Direction::ServerToClient
+        && expected_client_session.is_some_and(|client| client == session_id)
+    {
+        // Both directions would use the same key and nonce sequence.
+        return Err(SsError::ProtocolViolation);
+    }
 
     let mut subkey = derive_subkey(method, psk, &session_id);
     let mut nonce = [0_u8; NONCE_LENGTH];
@@ -654,12 +660,12 @@ pub fn decode_client_fixed(
         return Err(SsError::MalformedPacket);
     }
     let salt = &bytes[..salt_len];
-    let mut subkey = derive_subkey(method, psk, salt);
+    let subkey = Zeroizing::new(derive_subkey(method, psk, salt));
 
     let mut fixed = [0_u8; 11];
     let fixed_len = open(
         method,
-        &subkey,
+        &subkey[..],
         nonce_from_counter(0),
         &bytes[salt_len..salt_len + 11 + TAG_LENGTH],
         &mut fixed,
@@ -684,7 +690,6 @@ pub fn decode_client_fixed(
     salt_copy[..salt_len].copy_from_slice(salt);
     let mut recv_key = [0_u8; 32];
     recv_key[..method.key_len()].copy_from_slice(&subkey[..method.key_len()]);
-    subkey.zeroize();
 
     Ok(ClientRequestFixed {
         salt: salt_copy,
@@ -805,23 +810,22 @@ pub fn encode_client_request(
     fixed[1..9].copy_from_slice(&timestamp.to_be_bytes());
     fixed[9..11].copy_from_slice(&variable_len.to_be_bytes());
 
-    let mut subkey = derive_subkey(method, psk, salt);
+    let subkey = Zeroizing::new(derive_subkey(method, psk, salt));
     let mut position = salt.len();
     position += seal(
         method,
-        &subkey,
+        &subkey[..],
         nonce_from_counter(0),
         &fixed,
         &mut out[position..],
     )?;
     position += seal(
         method,
-        &subkey,
+        &subkey[..],
         nonce_from_counter(1),
         &variable[..offset],
         &mut out[position..],
     )?;
-    subkey.zeroize();
     Ok(position)
 }
 
@@ -893,11 +897,16 @@ pub fn decode_server_fixed(
         return Err(SsError::MalformedPacket);
     }
     let salt = &bytes[..salt_len];
-    let mut subkey = derive_subkey(method, psk, salt);
+    if salt == request_salt {
+        // Request and response keys must differ; reusing the salt would reuse
+        // the same key and nonce sequence in both directions.
+        return Err(SsError::ProtocolViolation);
+    }
+    let subkey = Zeroizing::new(derive_subkey(method, psk, salt));
     let mut fixed = [0_u8; 43];
     let opened = open(
         method,
-        &subkey,
+        &subkey[..],
         nonce_from_counter(0),
         &bytes[salt_len..salt_len + fixed_len + TAG_LENGTH],
         &mut fixed[..fixed_len],
@@ -928,7 +937,6 @@ pub fn decode_server_fixed(
     salt_copy[..salt_len].copy_from_slice(salt);
     let mut send_key = [0_u8; 32];
     send_key[..method.key_len()].copy_from_slice(&subkey[..method.key_len()]);
-    subkey.zeroize();
     Ok(ServerResponseFixed {
         salt: salt_copy,
         salt_len: salt_len as u8,
@@ -1019,23 +1027,22 @@ pub fn encode_server_response(
     fixed[9 + request_salt.len()..fixed_len].copy_from_slice(&first_len.to_be_bytes());
 
     out[..salt.len()].copy_from_slice(salt);
-    let mut subkey = derive_subkey(method, psk, salt);
+    let subkey = Zeroizing::new(derive_subkey(method, psk, salt));
     let mut position = salt.len();
     position += seal(
         method,
-        &subkey,
+        &subkey[..],
         nonce_from_counter(0),
         &fixed[..fixed_len],
         &mut out[position..],
     )?;
     position += seal(
         method,
-        &subkey,
+        &subkey[..],
         nonce_from_counter(1),
         first_payload,
         &mut out[position..],
     )?;
-    subkey.zeroize();
     Ok(position)
 }
 
@@ -1285,7 +1292,7 @@ mod tests {
 
         let server = UdpPacket {
             direction: Direction::ServerToClient,
-            session_id,
+            session_id: *b"server01",
             packet_id: 43,
             client_session_id: Some(session_id),
             destination: &destination,
@@ -1305,6 +1312,38 @@ mod tests {
         .expect("decode server");
         assert_eq!(decoded.client_session_id, Some(session_id));
         assert_eq!(decoded.payload, b"answer");
+    }
+
+    #[test]
+    fn udp_rejects_a_server_session_equal_to_the_client_session() {
+        let method = Method::Aes128Gcm;
+        let key = key(method);
+        let destination = Endpoint::from_ip(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 53);
+        let session_id = *b"session1";
+        let packet = UdpPacket {
+            direction: Direction::ServerToClient,
+            session_id,
+            packet_id: 1,
+            client_session_id: Some(session_id),
+            destination: &destination,
+            payload: b"x",
+            padding_len: 0,
+            timestamp: 100,
+        };
+        let mut encoded = [0_u8; 256];
+        let length = encode_udp_packet(method, &key, &packet, &mut encoded).expect("encode");
+        let mut plaintext = [0_u8; 256];
+        assert_eq!(
+            decode_udp_packet(
+                method,
+                &key,
+                &encoded[..length],
+                Direction::ServerToClient,
+                Some(session_id),
+                &mut plaintext,
+            ),
+            Err(SsError::ProtocolViolation)
+        );
     }
 
     #[test]
@@ -1548,6 +1587,29 @@ mod tests {
                 method,
                 &psk,
                 &[3_u8; 16],
+                &encoded[..length],
+                &mut plaintext,
+                1_000,
+            ),
+            Err(SsError::ProtocolViolation)
+        );
+    }
+
+    #[test]
+    fn tcp_response_salt_must_differ_from_the_request_salt() {
+        let method = Method::Aes128Gcm;
+        let psk = key(method);
+        let salt = [4_u8; 16];
+        let mut encoded = [0_u8; 512];
+        let length =
+            encode_server_response(method, &psk, &salt, &salt, 1_000, b"first", &mut encoded)
+                .expect("encode");
+        let mut plaintext = [0_u8; 512];
+        assert_eq!(
+            decode_server_response(
+                method,
+                &psk,
+                &salt,
                 &encoded[..length],
                 &mut plaintext,
                 1_000,

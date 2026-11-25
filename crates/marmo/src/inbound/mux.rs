@@ -352,6 +352,28 @@ async fn run_udp(session: SessionContext, mut receiver: mpsc::Receiver<Uplink>) 
                         break;
                     };
                     let destination = message.target.as_ref().unwrap_or(&session.target);
+                    // Keep frames may carry a per-packet destination. The
+                    // outbound was chosen for the session's first target, so
+                    // re-route every different target and keep only those that
+                    // select the same action. Otherwise a Mux client could use
+                    // an allowed first target to reach a destination a rule
+                    // would reject or send elsewhere.
+                    if destination != &session.target {
+                        let Some(next) = route(
+                            &session.context,
+                            &session.inbound,
+                            &session.source,
+                            destination,
+                            Network::Udp,
+                        )
+                        .await
+                        else {
+                            continue;
+                        };
+                        if next != action {
+                            continue;
+                        }
+                    }
                     if outbound.send_to(destination, &message.data).await.is_err() {
                         break;
                     }

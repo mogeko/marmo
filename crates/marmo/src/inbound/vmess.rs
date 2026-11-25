@@ -305,7 +305,7 @@ async fn handle_udp(
     let target = request.target.clone();
     let activity = Arc::new(Notify::new());
     let (sender, receiver) = mpsc::channel(UDP_QUEUE);
-    let reply = tokio::spawn(reply_loop(
+    let mut reply = tokio::spawn(reply_loop(
         frames,
         receiver,
         outbound,
@@ -331,12 +331,22 @@ async fn handle_udp(
         if payload.is_empty() {
             continue;
         }
-        if sender.send(payload).await.is_err() {
+        // A slow client must not block this loop while the bounded reply
+        // queue is full; dropping one datagram is preferable to pinning the
+        // connection permit indefinitely.
+        if sender.try_send(payload).is_err() {
             break;
         }
     }
     drop(sender);
-    let _ = reply.await;
+    let drain = context
+        .limits
+        .idle_timeout
+        .unwrap_or(context.limits.handshake_timeout);
+    if tokio::time::timeout(drain, &mut reply).await.is_err() {
+        reply.abort();
+        let _ = reply.await;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

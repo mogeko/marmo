@@ -441,7 +441,13 @@ fn compile_action(
 ///
 /// `www.example.com` matches `example.com`, but `notexample.com` does not.
 /// A suffix that starts with `.` is matched literally.
+///
+/// The comparison is byte-wise so a non-ASCII UTF-8 name cannot panic on a
+/// character boundary. `DomainName` accepts internationalized names, and those
+/// names arrive from unauthenticated inbounds.
 fn matches_suffix(domain: &str, suffix: &str) -> bool {
+    let domain = domain.as_bytes();
+    let suffix = suffix.as_bytes();
     if domain.len() == suffix.len() {
         return domain.eq_ignore_ascii_case(suffix);
     }
@@ -452,10 +458,10 @@ fn matches_suffix(domain: &str, suffix: &str) -> bool {
     if !domain[start..].eq_ignore_ascii_case(suffix) {
         return false;
     }
-    if suffix.starts_with('.') {
+    if suffix.starts_with(b".") {
         return true;
     }
-    domain.as_bytes()[start - 1] == b'.'
+    domain[start - 1] == b'.'
 }
 
 /// Why a rule set could not be compiled.
@@ -579,6 +585,27 @@ mod tests {
         assert!(!matches_suffix("notexample.com", "example.com"));
         assert!(!matches_suffix("example.com.evil", "example.com"));
         assert!(matches_suffix("WWW.Example.COM", "example.com"));
+    }
+
+    #[test]
+    fn suffix_matching_is_utf8_safe() {
+        // `DomainName` accepts internationalized names, so a suffix comparison
+        // must not slice through a multi-byte character.
+        assert!(!matches_suffix("é", "a"));
+        assert!(!matches_suffix("答え", "a"));
+        assert!(!matches_suffix("éxample.com", "example.com"));
+        assert!(matches_suffix("ése.example", "example"));
+        assert!(matches_suffix("é", "é"));
+    }
+
+    #[test]
+    fn non_ascii_domain_does_not_panic_suffix_route() {
+        let router = router(ROUTES);
+        let unicode = metadata(None, domain("é", 443), Network::Tcp);
+        assert_eq!(router.route(&unicode), Action::Direct);
+
+        let lookalike = metadata(None, domain("éxample.com", 443), Network::Tcp);
+        assert_eq!(router.route(&lookalike), Action::Direct);
     }
 
     #[test]

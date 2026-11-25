@@ -202,7 +202,7 @@ async fn handle_udp(
     };
     let activity = Arc::new(Notify::new());
     let (sender, receiver) = mpsc::channel(UDP_QUEUE);
-    let reply = tokio::spawn(reply_loop(
+    let mut reply = tokio::spawn(reply_loop(
         writer,
         receiver,
         Arc::clone(&context),
@@ -239,12 +239,22 @@ async fn handle_udp(
         else {
             continue;
         };
-        if sender.send((action, destination, payload)).await.is_err() {
+        // A slow client must not block this loop while the bounded reply
+        // queue is full; dropping one datagram is preferable to pinning the
+        // connection permit indefinitely.
+        if sender.try_send((action, destination, payload)).is_err() {
             break;
         }
     }
     drop(sender);
-    let _ = reply.await;
+    let drain = context
+        .limits
+        .idle_timeout
+        .unwrap_or(context.limits.handshake_timeout);
+    if tokio::time::timeout(drain, &mut reply).await.is_err() {
+        reply.abort();
+        let _ = reply.await;
+    }
 }
 
 async fn reply_loop(

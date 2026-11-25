@@ -266,6 +266,9 @@ struct WsStream<S> {
     read_pos: usize,
     flush: Vec<u8>,
     flush_pos: usize,
+    /// Plaintext bytes already encoded into `conn` but not yet reported as
+    /// accepted because flushing the frame returned `Pending`.
+    pending_write: usize,
     eof: bool,
 }
 
@@ -278,6 +281,7 @@ impl<S> WsStream<S> {
             read_pos: 0,
             flush: Vec::new(),
             flush_pos: 0,
+            pending_write: 0,
             eof: false,
         }
     }
@@ -401,13 +405,46 @@ where
             return Poll::Ready(Ok(0));
         }
         let me = self.get_mut();
+
+        // A previous write queued its frame but could not flush it. Keep the
+        // task registered on the socket and report the original byte count
+        // once the queued output drains. Re-encoding `buf` here would make
+        // `write_all` transmit the same plaintext again on every retry.
+        if me.pending_write > 0 {
+            return match me.poll_flush_output(cx) {
+                Poll::Ready(Ok(())) => {
+                    let accepted = me.pending_write;
+                    me.pending_write = 0;
+                    Poll::Ready(Ok(accepted))
+                }
+                Poll::Ready(Err(error)) => {
+                    me.pending_write = 0;
+                    Poll::Ready(Err(error))
+                }
+                Poll::Pending => Poll::Pending,
+            };
+        }
+
         ready!(me.poll_flush_output(cx))?;
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
         let length = buf.len().min(MAX_FRAME as usize);
         me.conn
             .send_binary(&buf[..length])
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
-        ready!(me.poll_flush_output(cx))?;
-        Poll::Ready(Ok(length))
+        me.pending_write = length;
+        match me.poll_flush_output(cx) {
+            Poll::Ready(Ok(())) => {
+                me.pending_write = 0;
+                Poll::Ready(Ok(length))
+            }
+            Poll::Ready(Err(error)) => {
+                me.pending_write = 0;
+                Poll::Ready(Err(error))
+            }
+            Poll::Pending => Poll::Pending,
+        }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
@@ -442,6 +479,57 @@ mod tests {
             subprotocols: protocols.iter().map(|value| value.to_string()).collect(),
             compression,
         })
+    }
+
+    #[tokio::test]
+    async fn backpressure_does_not_duplicate_stream_bytes() {
+        use std::time::Duration;
+
+        let (client_io, server_io) = duplex(1024);
+        let (go_tx, go_rx) = tokio::sync::oneshot::channel();
+        let server_task = tokio::spawn(async move {
+            let connection = server("/ws", &[], false)
+                .accept(Box::new(server_io))
+                .await
+                .expect("accept");
+            let mut stream = connection.stream;
+            go_rx.await.expect("go");
+            let mut total = 0_usize;
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = stream.read(&mut buffer).await.expect("read");
+                if read == 0 {
+                    break;
+                }
+                total += read;
+            }
+            total
+        });
+
+        let connection = client("/ws", &[], false)
+            .connect(Box::new(client_io))
+            .await
+            .expect("connect");
+        let mut stream = connection.stream;
+        let payload = vec![0x5a_u8; 256 * 1024];
+        let expected = payload.len();
+        let writer = tokio::spawn(async move {
+            stream.write_all(&payload).await.expect("write");
+            stream.shutdown().await.expect("shutdown");
+        });
+        // Let the writer fill the small duplex pipe and hit backpressure
+        // before the server starts draining it.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        go_tx.send(()).expect("signal");
+        tokio::time::timeout(Duration::from_secs(5), writer)
+            .await
+            .expect("writer timeout")
+            .expect("writer");
+        let total = tokio::time::timeout(Duration::from_secs(5), server_task)
+            .await
+            .expect("server timeout")
+            .expect("server");
+        assert_eq!(total, expected, "backpressure duplicated stream bytes");
     }
 
     #[tokio::test]
