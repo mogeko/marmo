@@ -191,7 +191,7 @@ impl InstanceBuilder {
         self
     }
 
-    /// Validates config, compiles rules, and rejects unsupported protocols.
+    /// Compiles rules and prepares inbound and outbound state.
     pub fn build(self) -> Result<Instance, BuildError> {
         let runtime = match self.runtime {
             Some(handle) => handle,

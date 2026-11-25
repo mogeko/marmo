@@ -4,16 +4,12 @@ use std::io;
 
 use thiserror::Error;
 
-use crate::config::ConfigError;
 use crate::routing::RoutingError;
 
 /// Why an instance could not be built.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum BuildError {
-    /// The configuration failed validation.
-    #[error(transparent)]
-    Config(#[from] ConfigError),
     /// The routing rules could not be compiled.
     #[error(transparent)]
     Routing(#[from] RoutingError),

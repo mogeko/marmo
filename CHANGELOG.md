@@ -28,6 +28,8 @@ and behavior may change between minor releases.
   `SecretString` credentials. The JSON `Limits` type is separate from the
   runtime `RuntimeLimits`, and the `ConfigLimits` alias is removed. `Config`
   is input-only: JSON parsing and the builder are the supported constructors.
+  `Config` no longer implements `Default`, and `BuildError::Config` is removed
+  because a `Config` value has already passed validation.
 - Shadowsocks request/response state has redacted `Debug` output and zeroizes
   retained subkeys; VMess body ciphers keep a zeroized raw-key copy.
 - The fuzz smoke job now runs the Mux.Cool target; the docs/CI matrix covers

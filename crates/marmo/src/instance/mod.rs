@@ -1,7 +1,7 @@
 //! Public instance lifecycle: build, bind, serve, shutdown.
 //!
 //! `Config::from_json` validates the document; `build` compiles the router,
-//! rejects protocols that are not implemented yet, and captures the tokio
+//! checks protocol-specific build constraints, and captures the tokio
 //! handle. `bind` performs the only startup I/O; `serve` owns every accept
 //! loop and drains connections on cancellation.
 

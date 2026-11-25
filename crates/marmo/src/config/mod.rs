@@ -214,22 +214,6 @@ impl Default for ConfigBuilder {
     }
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            inner: ConfigInner {
-                version: 2,
-                limits: Limits::default(),
-                process: Process::default(),
-                dns: None,
-                inbounds: Vec::new(),
-                outbounds: Vec::new(),
-                route: Route::default(),
-            },
-        }
-    }
-}
-
 impl Default for RawConfig {
     fn default() -> Self {
         Self {
