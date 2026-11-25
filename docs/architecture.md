@@ -278,9 +278,12 @@ pub trait Layer: Send + Sync {
 Layers are compiled from config into a `Vec<Arc<dyn Layer>>` in spec order (for
 example VLESS → TLS → WebSocket → TCP). Transport parameters (SNI, ALPN,
 `Host`, path, subprotocols, WebSocket origin allowlist) are bound when the
-layer is built, never read from globals. Inbound stacks mirror the same order. `accept` defaults to
-`LayerError::Unsupported` for client-only layers. `accept_stream` carries the
-TLS-selected ALPN through later layers; the HTTP/2 inbound requires `h2`.
+layer is built, never read from globals. The origin allowlist is the opt-in
+configuration recorded in the 2026-11-25 amendment to
+[ADR-0021](decisions/0021-websocket-backend.md). Inbound stacks mirror the same
+order. `accept` defaults to `LayerError::Unsupported` for client-only layers.
+`accept_stream` carries the TLS-selected ALPN through later layers; the HTTP/2
+inbound requires `h2`.
 
 ### 8.4 Inbound and metadata
 
@@ -960,7 +963,7 @@ initial implementation are ADR-0001 through ADR-0016 and remain in
 | [0018](decisions/0018-dependencies-and-crypto.md) | Dependencies and crypto backend | Accepted |
 | [0019](decisions/0019-workspace-and-packaging.md) | Workspace layout and packaging | Accepted |
 | [0020](decisions/0020-license.md) | License change | Accepted |
-| [0021](decisions/0021-websocket-backend.md) | WebSocket backend and permessage-deflate | Accepted |
+| [0021](decisions/0021-websocket-backend.md) | WebSocket backend and permessage-deflate | Accepted; amended |
 | [0022](decisions/0022-vless-http2-method.md) | VLESS HTTP/2 transport method | Accepted |
 | [0023](decisions/0023-tls-credentials-inline.md) | TLS credentials as inline configuration | Accepted |
 | [0024](decisions/0024-drop-testkit.md) | Drop the unused testkit crate | Accepted |

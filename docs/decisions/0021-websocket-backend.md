@@ -165,3 +165,30 @@ expensive.
       enabled).
 - [ ] Choose an alternative: keep `tokio-tungstenite` with `compression`
       rejected, or another backend.
+
+## Amendment (2026-11-25)
+
+The backend decision (`ws-net` 0.10 plus the tokio byte-stream pump) and the
+default `OriginPolicy::any_origin()` are unchanged. This amendment records the
+later origin configuration anticipated by the original decision.
+
+- Only a WebSocket inbound accepts `transport.origins`.
+- `transport.origins` absent (or `None`) keeps the existing `Any` policy for
+  compatibility.
+- A present, non-empty list is validated and passed to `OriginPolicy::allow`.
+  An explicitly empty list is a configuration error, not another spelling of
+  `Any`.
+- `marmo-transport` exposes the same policy through
+  `WsServerOptions::origins`. At that API level an empty `Vec` remains the
+  compatibility spelling of `Any`; configuration validation never produces an
+  empty list.
+- `OriginPolicy::allow` uses `allow_missing = true`: a non-browser client that
+  omits `Origin` is accepted. This is a browser CSRF/rebinding defense, not
+  authentication; the inner VLESS/VMess authentication remains the access
+  control.
+- Origin comparison is the exact serialized-origin comparison in `ws-net`
+  (scheme/host case-insensitive, no prefix or suffix matching); `null` never
+  matches.
+
+The decision to keep `Any` as the default is intentional. A deployment that
+wants browser origin restrictions must configure the allowlist explicitly.
