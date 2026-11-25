@@ -27,7 +27,9 @@ and behavior may change between minor releases.
   protocol-tagged enums carrying parsed endpoints, UUIDs, and zeroizing
   `SecretString` credentials. The JSON `Limits` type is separate from the
   runtime `RuntimeLimits`, and the `ConfigLimits` alias is removed. `Config`
-  is input-only: JSON parsing and the builder are the supported constructors.
+  is the supported input surface: JSON parsing and the builder are the
+  supported constructors, `Serialize` still emits the strict schema, and
+  `Deserialize` is not derived so callers cannot bypass validation.
   `Config` no longer implements `Default`, and `BuildError::Config` is removed
   because a `Config` value has already passed validation.
 - Shadowsocks request/response state has redacted `Debug` output and zeroizes

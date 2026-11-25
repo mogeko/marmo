@@ -247,3 +247,11 @@ fn parses_json_and_typed_accessors_agree() {
     assert_eq!(config.outbounds()[1].tag(), "group");
     assert_eq!(config.inbounds()[0].tag(), "in-vless");
 }
+
+#[test]
+fn serializes_back_to_the_strict_schema() {
+    let config = Config::from_json(FULL).expect("parse");
+    let encoded = serde_json::to_string(&config).expect("encode");
+    let decoded = Config::from_json(&encoded).expect("decode");
+    assert_eq!(decoded, config);
+}

@@ -8,6 +8,7 @@
 use std::fmt;
 use std::str::FromStr;
 
+use serde::Serialize;
 use thiserror::Error;
 
 mod raw;
@@ -225,6 +226,24 @@ impl Default for RawConfig {
             outbounds: Vec::new(),
             route: Route::default(),
         }
+    }
+}
+
+impl Serialize for Config {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let raw = RawConfig {
+            version: self.inner.version,
+            limits: self.inner.limits.clone(),
+            process: self.inner.process.clone(),
+            dns: self.inner.dns.clone(),
+            inbounds: self.inner.inbounds.iter().map(Inbound::to_raw).collect(),
+            outbounds: self.inner.outbounds.iter().map(Outbound::to_raw).collect(),
+            route: self.inner.route.clone(),
+        };
+        raw.serialize(serializer)
     }
 }
 
