@@ -4,7 +4,10 @@
 //! complete typed configuration can be built without JSON and that the builder
 //! rejects the same invalid documents as `Config::from_json`.
 
-use marmo::{Config, Endpoint, Inbound, Limits, Outbound, Route, Router};
+use marmo::{
+    Config, Endpoint, Inbound, Limits, Outbound, Route, Router, StreamNetwork, StreamTransport,
+    Uuid,
+};
 
 #[test]
 fn builds_a_config_programmatically() {
@@ -87,6 +90,45 @@ fn builder_rejects_duplicate_tags_and_unknown_targets() {
         .build()
         .expect_err("unknown target");
     assert!(unknown.to_string().contains("unknown 'missing'"));
+}
+
+#[test]
+fn builder_applies_protocol_specific_validation() {
+    let listen = Endpoint::parse("127.0.0.1:0").expect("listen");
+    let ws = StreamTransport {
+        network: StreamNetwork::Ws,
+        path: "/".into(),
+        ..StreamTransport::default()
+    };
+    let inbound = Config::builder()
+        .inbound(Inbound::Vmess {
+            tag: "vmess".into(),
+            listen,
+            uuid: Uuid::parse("00112233-4455-6677-8899-aabbccddeeff").expect("uuid"),
+            tls: None,
+            transport: Some(ws),
+            sniffing: None,
+        })
+        .outbound(Outbound::Direct {
+            tag: "direct".into(),
+        })
+        .build()
+        .expect_err("ws without TLS");
+    assert!(inbound.to_string().contains("inbounds[0].tls"));
+
+    let outbound = Config::builder()
+        .outbound(Outbound::Vless {
+            tag: "vless".into(),
+            server: Endpoint::parse("example.com:443").expect("server"),
+            uuid: Uuid::parse("00112233-4455-6677-8899-aabbccddeeff").expect("uuid"),
+            tls: None,
+            transport: None,
+            xudp: true,
+            mux: true,
+        })
+        .build()
+        .expect_err("mux and xudp");
+    assert!(outbound.to_string().contains("mutually exclusive"));
 }
 
 #[test]
