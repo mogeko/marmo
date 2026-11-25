@@ -196,6 +196,7 @@ impl BoundInstance {
 async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Result<(), ServeError> {
     let token = context.supervisor.token();
     let mut connections = JoinSet::new();
+    let mut shared = JoinSet::new();
     let mut reap = interval(Duration::from_secs(1));
     let mut fatal = None;
     let runtime = context.runtime.clone();
@@ -206,18 +207,29 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
         let udp_context = Arc::clone(&context);
         let tag = Arc::clone(&inbound.tag);
         let (method, key) = (*method, Arc::clone(key));
-        let _ = connections.spawn_on(
+        let _ = shared.spawn_on(
             inbound::shadowsocks_udp::serve(socket, udp_context, tag, method, key),
             &runtime,
         );
     }
 
     loop {
-        while connections.try_join_next().is_some() {}
+        reap_finished(&mut connections, &context.metrics);
         tokio::select! {
             _ = token.cancelled() => break,
             _ = reap.tick() => {
-                while connections.try_join_next().is_some() {}
+                reap_finished(&mut connections, &context.metrics);
+            }
+            Some(result) = shared.join_next(), if !shared.is_empty() => {
+                if token.is_cancelled() {
+                    break;
+                }
+                context.metrics.record(MetricEvent::TaskPanicked);
+                fatal = Some(ServeError::Task(match result {
+                    Ok(()) => "shared UDP listener stopped".into(),
+                    Err(error) => error.to_string(),
+                }));
+                break;
             }
             accepted = inbound.listener.accept() => {
                 let (stream, _peer) = match accepted {
@@ -364,6 +376,13 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
         }
     }
 
+    shared.abort_all();
+    while let Some(result) = shared.join_next().await {
+        if result.is_err() {
+            context.metrics.record(MetricEvent::TaskPanicked);
+        }
+    }
+
     let grace = context.limits.shutdown_grace;
     let drain = async { while connections.join_next().await.is_some() {} };
     if timeout(grace, drain).await.is_err() {
@@ -373,5 +392,13 @@ async fn serve_inbound(mut inbound: BoundInbound, context: Arc<Context>) -> Resu
     match fatal {
         Some(error) => Err(error),
         None => Ok(()),
+    }
+}
+
+fn reap_finished(tasks: &mut JoinSet<()>, metrics: &Metrics) {
+    while let Some(result) = tasks.try_join_next() {
+        if result.is_err() {
+            metrics.record(MetricEvent::TaskPanicked);
+        }
     }
 }

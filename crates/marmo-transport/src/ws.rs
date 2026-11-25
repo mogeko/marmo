@@ -12,7 +12,7 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use ws_net::{
     AcceptPolicy, Acceptor, ClientHandshake, Connection, DeflateConfig, Event, HeadReader, Limits,
-    OriginPolicy,
+    OriginPolicy, WsError as WsNetError,
 };
 
 use crate::BoxStream;
@@ -46,6 +46,17 @@ pub struct WsClientOptions {
     pub compression: bool,
 }
 
+/// Validates a configured WebSocket origin allowlist.
+pub fn validate_origins(origins: &[String]) -> Result<(), String> {
+    if origins.len() > 16 {
+        return Err("too many origins".into());
+    }
+    let values: Vec<&str> = origins.iter().map(String::as_str).collect();
+    OriginPolicy::allow(&values)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 /// Parameters for a WebSocket server.
 #[derive(Clone, Debug)]
 pub struct WsServerOptions {
@@ -55,6 +66,8 @@ pub struct WsServerOptions {
     pub subprotocols: Vec<String>,
     /// Accept permessage-deflate.
     pub compression: bool,
+    /// Allowed browser origins; empty keeps the compatibility `Any` policy.
+    pub origins: Vec<String>,
 }
 
 /// A connected WebSocket stream and its negotiated parameters.
@@ -165,8 +178,14 @@ impl WsServer {
 
     /// Performs the opening handshake over `inner`.
     pub async fn accept(&self, mut inner: BoxStream) -> Result<WsConnection, WsError> {
+        let origins = if self.options.origins.is_empty() {
+            OriginPolicy::any_origin()
+        } else {
+            let values: Vec<&str> = self.options.origins.iter().map(String::as_str).collect();
+            OriginPolicy::allow(&values).map_err(|error| WsError::Handshake(error.to_string()))?
+        };
         let mut policy = AcceptPolicy::new()
-            .with_origins(OriginPolicy::any_origin())
+            .with_origins(origins)
             .with_limits(connection_limits());
         let protocols: Vec<&str> = self
             .options
@@ -382,6 +401,15 @@ where
                         Poll::Pending => return Poll::Pending,
                     }
                 }
+                Err(WsNetError::UnexpectedEof) => {
+                    // A TCP FIN without a Close frame is a clean transport
+                    // EOF, not a malformed WebSocket stream. Let the relay
+                    // apply its half-close grace instead of discarding the
+                    // opposite direction.
+                    me.eof = true;
+                    let _ = me.poll_flush_output(cx);
+                    return Poll::Ready(Ok(()));
+                }
                 Err(error) => {
                     return Poll::Ready(Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -478,7 +506,15 @@ mod tests {
             path: path.into(),
             subprotocols: protocols.iter().map(|value| value.to_string()).collect(),
             compression,
+            origins: Vec::new(),
         })
+    }
+
+    #[test]
+    fn validates_origin_allowlist() {
+        assert!(validate_origins(&["https://app.example".into()]).is_ok());
+        assert!(validate_origins(&["https://app.example/".into()]).is_err());
+        assert!(validate_origins(&["app.example".into()]).is_err());
     }
 
     #[tokio::test]
@@ -530,6 +566,31 @@ mod tests {
             .expect("server timeout")
             .expect("server");
         assert_eq!(total, expected, "backpressure duplicated stream bytes");
+    }
+
+    #[tokio::test]
+    async fn tcp_eof_without_a_close_frame_is_a_clean_eof() {
+        let (client_io, server_io) = duplex(64 * 1024);
+        let server_task = tokio::spawn(async move {
+            let connection = server("/ws", &[], false)
+                .accept(Box::new(server_io))
+                .await
+                .expect("accept");
+            let mut stream = connection.stream;
+            let mut buffer = [0_u8; 1];
+            stream.read(&mut buffer).await.expect("read")
+        });
+
+        let connection = client("/ws", &[], false)
+            .connect(Box::new(client_io))
+            .await
+            .expect("connect");
+        drop(connection);
+        let read = tokio::time::timeout(std::time::Duration::from_secs(1), server_task)
+            .await
+            .expect("server timeout")
+            .expect("server");
+        assert_eq!(read, 0);
     }
 
     #[tokio::test]

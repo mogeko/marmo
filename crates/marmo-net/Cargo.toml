@@ -10,6 +10,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+idna.workspace = true
 serde = { workspace = true, optional = true }
 thiserror.workspace = true
 

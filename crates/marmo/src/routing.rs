@@ -4,12 +4,13 @@
 //! match wins. `OutboundId` is the index into `Config::outbounds`, so an
 //! `Instance` must build its outbound table in the same order.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
-use marmo_net::{Cidr, Endpoint, Network};
+use marmo_net::{Cidr, DomainName, Endpoint, Network};
 use thiserror::Error;
 
 use crate::config::Config;
@@ -59,7 +60,7 @@ pub enum RejectReason {
 }
 
 /// Immutable routing input for one connection or UDP session.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Metadata<'a> {
     /// Transport network.
     pub network: Network,
@@ -73,6 +74,31 @@ pub struct Metadata<'a> {
     pub inbound: Option<&'a str>,
     /// Local process identity, when a resolver supplied one.
     pub process: Option<ProcessInfo>,
+}
+
+struct RedactedEndpoint<'a>(&'a Endpoint);
+
+impl fmt::Debug for RedactedEndpoint<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0.ip() {
+            Some(address) => write!(formatter, "{address}:{}", self.0.port()),
+            None => write!(formatter, "<domain>:{}", self.0.port()),
+        }
+    }
+}
+
+impl fmt::Debug for Metadata<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Metadata")
+            .field("network", &self.network)
+            .field("source", &RedactedEndpoint(&self.source))
+            .field("destination", &RedactedEndpoint(&self.destination))
+            .field("domain_present", &self.domain.is_some())
+            .field("inbound", &self.inbound)
+            .field("process", &self.process)
+            .finish()
+    }
 }
 
 /// A compiled rule list and its final action.
@@ -232,7 +258,19 @@ impl CompiledRule {
             let Some(domain) = domain else {
                 return false;
             };
-            if !self.domain_sets.iter().any(|set| set.contains(domain)) {
+            // `DomainSet` is documented as receiving an ASCII-lowercased,
+            // trailing-dot-free name. Network metadata already satisfies that,
+            // but `Metadata` is public; normalize only when needed.
+            let domain = if domain.bytes().any(|byte| byte.is_ascii_uppercase()) {
+                Cow::Owned(domain.to_ascii_lowercase())
+            } else {
+                Cow::Borrowed(domain)
+            };
+            if !self
+                .domain_sets
+                .iter()
+                .any(|set| set.contains(domain.as_ref()))
+            {
                 return false;
             }
         }
@@ -321,8 +359,21 @@ fn compile_domains(values: Option<&[String]>) -> Vec<Box<str>> {
     values
         .unwrap_or(&[])
         .iter()
-        .map(|value| Box::<str>::from(value.to_ascii_lowercase()))
+        .map(|value| Box::<str>::from(canonical_domain(value)))
         .collect()
+}
+
+fn canonical_domain(value: &str) -> String {
+    let (prefix, body) = match value.strip_prefix('.') {
+        Some(body) => (".", body),
+        None => ("", value),
+    };
+    match DomainName::parse(body) {
+        Ok(name) => format!("{prefix}{name}"),
+        // Config validation owns rejection; keep a stable fallback for a
+        // provider-visible value that is not a full domain name.
+        Err(_) => value.to_ascii_lowercase(),
+    }
 }
 
 fn compile_keywords(
@@ -599,6 +650,32 @@ mod tests {
     }
 
     #[test]
+    fn metadata_debug_redacts_the_routing_domain() {
+        let metadata = metadata(Some("secret.example"), ip(1, 443), Network::Tcp);
+        let text = format!("{metadata:?}");
+        assert!(!text.contains("secret.example"));
+        assert!(text.contains("domain_present: true"));
+    }
+
+    #[test]
+    fn idn_domains_and_rules_are_canonicalized() {
+        let router = router(
+            r#"{
+              "outbounds": [{ "tag": "a", "protocol": "direct" }],
+              "route": {
+                "rules": [{ "domain_suffix": ["例え.テスト"], "outbound": "a" }],
+                "final": "direct"
+              }
+            }"#,
+        );
+        let metadata = metadata(None, domain("例え.テスト", 443), Network::Tcp);
+        assert_eq!(
+            router.route(&metadata),
+            Action::Route(OutboundId::from_index(0))
+        );
+    }
+
+    #[test]
     fn non_ascii_domain_does_not_panic_suffix_route() {
         let router = router(ROUTES);
         let unicode = metadata(None, domain("é", 443), Network::Tcp);
@@ -814,6 +891,13 @@ mod tests {
         let sites = metadata(None, domain("set.example", 443), Network::Tcp);
         assert_eq!(
             router.route(&sites),
+            Action::Route(OutboundId::from_index(3))
+        );
+
+        let mut upper = metadata(None, ip(1, 443), Network::Tcp);
+        upper.domain = Some("SET.Example");
+        assert_eq!(
+            router.route(&upper),
             Action::Route(OutboundId::from_index(3))
         );
 

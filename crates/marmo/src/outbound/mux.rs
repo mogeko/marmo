@@ -250,6 +250,27 @@ struct MuxConnection {
     tracker: TaskTracker,
 }
 
+/// Removes a pre-inserted UDP session if the open future is cancelled.
+struct SessionOpenGuard<'a> {
+    connection: &'a MuxConnection,
+    id: u16,
+    armed: bool,
+}
+
+impl SessionOpenGuard<'_> {
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SessionOpenGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.connection.remove(self.id);
+        }
+    }
+}
+
 impl MuxConnection {
     fn start(
         stream: BoxStream, parent: CancellationToken, tracker: TaskTracker, handshake: usize,
@@ -356,6 +377,14 @@ impl MuxConnection {
         let id = self.allocate()?;
         let (down, down_rx) = mpsc::channel(QUEUE_FRAMES);
         self.insert(id, SessionEntry::Udp { down });
+        // The sender await below is cancellation-safe. If the caller's
+        // handshake deadline drops this future, no MuxDatagram exists to run
+        // its Drop, so an RAII guard must remove the pre-inserted session.
+        let guard = SessionOpenGuard {
+            connection: self,
+            id,
+            armed: true,
+        };
         if self
             .writer
             .send(WriteCommand::New {
@@ -366,12 +395,12 @@ impl MuxConnection {
             .await
             .is_err()
         {
-            self.remove(id);
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "mux connection closed",
             ));
         }
+        guard.disarm();
         Ok(MuxDatagram {
             id,
             target: target.clone(),
@@ -463,7 +492,11 @@ async fn driver(
     } = state;
     if handshake > 0 {
         let mut response = vec![0_u8; handshake];
-        if read.read_exact(&mut response).await.is_err() || response.iter().any(|byte| *byte != 0) {
+        let read_result = tokio::select! {
+            _ = token.cancelled() => return,
+            result = read.read_exact(&mut response) => result,
+        };
+        if read_result.is_err() || response.iter().any(|byte| *byte != 0) {
             closed.store(true, Ordering::Release);
             token.cancel();
             return;
@@ -613,17 +646,23 @@ async fn writer_loop(
         let Some(command) = command else {
             break;
         };
-        let result = match command {
-            WriteCommand::New {
-                id,
-                target,
-                network,
-            } => writer.new_session(id, &target, network, &[]).await,
-            WriteCommand::Keep { id, target, data } => {
-                writer.keep(id, target.as_ref(), &data).await
+        let write = async {
+            match command {
+                WriteCommand::New {
+                    id,
+                    target,
+                    network,
+                } => writer.new_session(id, &target, network, &[]).await,
+                WriteCommand::Keep { id, target, data } => {
+                    writer.keep(id, target.as_ref(), &data).await
+                }
+                WriteCommand::End { id } => writer.end(id).await,
+                WriteCommand::KeepAlive => writer.keepalive().await,
             }
-            WriteCommand::End { id } => writer.end(id).await,
-            WriteCommand::KeepAlive => writer.keepalive().await,
+        };
+        let result = tokio::select! {
+            _ = token.cancelled() => break,
+            result = write => result,
         };
         if result.is_err() {
             break;

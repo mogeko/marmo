@@ -283,6 +283,15 @@ pub fn build_forward_head(
             has_content_length = true;
         }
         if header.name.eq_ignore_ascii_case("transfer-encoding") {
+            if has_transfer_encoding {
+                return Err(HttpError::BadRequest);
+            }
+            let Ok(value) = std::str::from_utf8(header.value) else {
+                return Err(HttpError::BadRequest);
+            };
+            if !value.trim().eq_ignore_ascii_case("chunked") {
+                return Err(HttpError::BadRequest);
+            }
             has_transfer_encoding = true;
         }
         if has_content_length && has_transfer_encoding {
@@ -485,6 +494,32 @@ mod tests {
                 value: b"chunked",
             },
         ];
+        assert!(matches!(
+            build_forward_head("POST", 1, &target, &headers),
+            Err(HttpError::BadRequest)
+        ));
+
+        for value in [b"chunked".as_slice(), b"identity".as_slice()] {
+            let headers = [
+                Header {
+                    name: "Transfer-Encoding",
+                    value: b"chunked",
+                },
+                Header {
+                    name: "Transfer-Encoding",
+                    value,
+                },
+            ];
+            assert!(matches!(
+                build_forward_head("POST", 1, &target, &headers),
+                Err(HttpError::BadRequest)
+            ));
+        }
+
+        let headers = [Header {
+            name: "Transfer-Encoding",
+            value: b"gzip, chunked",
+        }];
         assert!(matches!(
             build_forward_head("POST", 1, &target, &headers),
             Err(HttpError::BadRequest)

@@ -57,7 +57,7 @@ impl fmt::Debug for ProcessInfo {
 }
 
 /// The connection facts passed to a [`ProcessResolver`].
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ProcessRequest {
     /// Transport network.
     pub network: Network,
@@ -65,6 +65,28 @@ pub struct ProcessRequest {
     pub source: Endpoint,
     /// Requested destination.
     pub destination: Endpoint,
+}
+
+struct RedactedEndpoint<'a>(&'a Endpoint);
+
+impl fmt::Debug for RedactedEndpoint<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0.ip() {
+            Some(address) => write!(formatter, "{address}:{}", self.0.port()),
+            None => write!(formatter, "<domain>:{}", self.0.port()),
+        }
+    }
+}
+
+impl fmt::Debug for ProcessRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProcessRequest")
+            .field("network", &self.network)
+            .field("source", &RedactedEndpoint(&self.source))
+            .field("destination", &RedactedEndpoint(&self.destination))
+            .finish()
+    }
 }
 
 /// Looks up the local process behind a connection.
@@ -250,6 +272,15 @@ mod tests {
             source: Endpoint::from_ip("127.0.0.1".parse().expect("ip"), port),
             destination: Endpoint::from_ip("192.0.2.1".parse().expect("ip"), 80),
         }
+    }
+
+    #[test]
+    fn debug_redacts_the_destination_domain() {
+        let mut request = request(1000);
+        request.destination = Endpoint::from_domain("secret.example", 443).expect("domain");
+        let text = format!("{request:?}");
+        assert!(!text.contains("secret.example"));
+        assert!(text.contains("<domain>"));
     }
 
     #[test]

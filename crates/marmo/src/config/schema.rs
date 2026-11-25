@@ -181,6 +181,8 @@ pub struct StreamTransport {
     pub compression: bool,
     /// WebSocket subprotocols in preference order.
     pub subprotocols: Option<Vec<String>>,
+    /// Allowed browser origins for a WebSocket inbound; empty keeps `Any`.
+    pub origins: Option<Vec<String>>,
 }
 
 impl Default for StreamTransport {
@@ -191,6 +193,7 @@ impl Default for StreamTransport {
             host: None,
             compression: false,
             subprotocols: None,
+            origins: None,
         }
     }
 }

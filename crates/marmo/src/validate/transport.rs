@@ -11,10 +11,11 @@ pub(super) fn validate_transport_shape(
                 || transport.host.is_some()
                 || transport.compression
                 || transport.subprotocols.is_some()
+                || transport.origins.is_some()
             {
                 return Err(fail(
                     base.to_string(),
-                    "tcp does not take path, host, compression, or subprotocols",
+                    "tcp does not take path, host, compression, subprotocols, or origins",
                 ));
             }
         }
@@ -31,14 +32,23 @@ pub(super) fn validate_transport_shape(
                 return Err(fail(format!("{base}.host"), "invalid host"));
             }
             if transport.network == StreamNetwork::H2 {
-                if transport.compression || transport.subprotocols.is_some() {
+                if transport.compression
+                    || transport.subprotocols.is_some()
+                    || transport.origins.is_some()
+                {
                     return Err(fail(
                         base.to_string(),
-                        "compression and subprotocols only apply to ws",
+                        "compression, subprotocols, and origins only apply to ws",
                     ));
                 }
-            } else if let Some(protocols) = transport.subprotocols.as_deref() {
-                validate_subprotocols(protocols, base)?;
+            } else {
+                if let Some(protocols) = transport.subprotocols.as_deref() {
+                    validate_subprotocols(protocols, base)?;
+                }
+                if let Some(origins) = transport.origins.as_deref() {
+                    marmo_transport::ws::validate_origins(origins)
+                        .map_err(|message| fail(format!("{base}.origins"), message))?;
+                }
             }
         }
     }

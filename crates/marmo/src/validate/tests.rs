@@ -386,6 +386,12 @@ fn restricts_insecure_tls_to_loopback() {
             "password":"secret","tls":{"insecure":true}
         }]}"#;
     assert_path(error(public), "outbounds[0].tls.insecure");
+
+    let name = r#"{"outbounds":[{
+            "tag":"t","protocol":"trojan","server":"localhost:443",
+            "password":"secret","tls":{"insecure":true}
+        }]}"#;
+    assert_path(error(name), "outbounds[0].tls.insecure");
 }
 
 #[test]

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use marmo_net::Endpoint;
 use marmo_transport::h2::{H2Error, H2Server, H2ServerConnection, H2ServerOptions};
-use marmo_transport::{BoxFuture, BoxStream, Layer};
+use marmo_transport::{AcceptedStream, BoxFuture, BoxStream, Layer};
 use tokio::net::TcpStream;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -88,12 +88,24 @@ pub(crate) async fn serve(
 async fn handshake(
     client: TcpStream, layers: &[Arc<dyn Layer>], options: H2ServerOptions,
 ) -> io::Result<H2ServerConnection> {
-    let mut stream: BoxStream = Box::new(client);
+    let mut stream = AcceptedStream {
+        stream: Box::new(client),
+        alpn: None,
+    };
     for layer in layers {
-        stream = layer.accept(stream).await.map_err(io::Error::other)?;
+        stream = layer
+            .accept_stream(stream)
+            .await
+            .map_err(io::Error::other)?;
+    }
+    if stream.alpn.as_deref() != Some(b"h2") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "HTTP/2 inbound requires the h2 ALPN protocol",
+        ));
     }
     H2Server::new(options)
-        .accept_connection(stream)
+        .accept_connection(stream.stream)
         .await
         .map_err(|error| io::Error::other(error.to_string()))
 }

@@ -14,7 +14,8 @@ use thiserror::Error;
 /// The constructor rejects empty names, names longer than 253 bytes, ASCII
 /// control characters, whitespace, and characters that cannot appear in an
 /// authority (`/`, `?`, `#`, `@`, `[`, `]`, `:`). Internationalized names are
-/// accepted as UTF-8; IDNA conversion is the resolver's job.
+/// accepted as UTF-8 and converted to their ASCII/punycode form with IDNA, so
+/// routing rules and resolvers see one canonical name.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct DomainName(Box<str>);
 
@@ -45,7 +46,14 @@ impl DomainName {
                 return Err(EndpointError::InvalidHost);
             }
         }
-        Ok(Self(name.to_ascii_lowercase().into_boxed_str()))
+        let ascii = idna::domain_to_ascii(name).map_err(|_| EndpointError::InvalidHost)?;
+        if ascii.is_empty() {
+            return Err(EndpointError::InvalidHost);
+        }
+        if ascii.len() > Self::MAX_LEN {
+            return Err(EndpointError::DomainTooLong);
+        }
+        Ok(Self(ascii.to_ascii_lowercase().into_boxed_str()))
     }
 
     /// Returns the name as a string slice.
@@ -359,7 +367,9 @@ mod tests {
     #[test]
     fn validates_domains() {
         assert!(DomainName::parse("example.com").is_ok());
-        assert!(DomainName::parse("例え.テスト").is_ok());
+        let idn = DomainName::parse("例え.テスト").expect("idn");
+        assert!(idn.as_str().is_ascii());
+        assert!(idn.as_str().starts_with("xn--"));
         assert_eq!(
             DomainName::parse("Example.COM").expect("domain").as_str(),
             "example.com"

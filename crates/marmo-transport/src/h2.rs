@@ -43,6 +43,8 @@ pub struct H2ClientOptions {
     pub host: String,
     /// Request path, starting with `/`.
     pub path: String,
+    /// Whether the stream is carried over TLS.
+    pub tls: bool,
 }
 
 /// Parameters for an HTTP/2 server.
@@ -125,10 +127,10 @@ impl H2ClientConnection {
             .ready()
             .await
             .map_err(|error| H2Error::Handshake(error.to_string()))?;
-        let uri = format!(
-            "https://{}{}",
-            self.inner.options.host, self.inner.options.path
-        );
+        let options = &self.inner.options;
+        validate_options(options)?;
+        let scheme = if options.tls { "https" } else { "http" };
+        let uri = format!("{scheme}://{}{}", options.host, options.path);
         let request = Request::builder()
             .method(Method::PUT)
             .uri(uri)
@@ -467,6 +469,23 @@ impl AsyncWrite for H2Stream {
     }
 }
 
+fn validate_options(options: &H2ClientOptions) -> Result<(), H2Error> {
+    if options.host.is_empty()
+        || options
+            .host
+            .bytes()
+            .any(|byte| byte <= 0x20 || byte == 0x7f || matches!(byte, b'@' | b'/' | b'?' | b'#'))
+        || !options.path.starts_with('/')
+        || options
+            .path
+            .bytes()
+            .any(|byte| byte <= 0x20 || byte == 0x7f)
+    {
+        return Err(H2Error::Request("invalid authority or path".into()));
+    }
+    Ok(())
+}
+
 fn closed() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "HTTP/2 stream is closed")
 }
@@ -515,11 +534,28 @@ mod tests {
         H2Client::new(H2ClientOptions {
             host: "localhost".into(),
             path: path.into(),
+            tls: false,
         })
     }
 
     fn server(path: &str) -> H2Server {
         H2Server::new(H2ServerOptions { path: path.into() })
+    }
+
+    #[test]
+    fn rejects_authority_confusion() {
+        let bad_path = H2ClientOptions {
+            host: "localhost".into(),
+            path: "@evil/".into(),
+            tls: true,
+        };
+        assert!(validate_options(&bad_path).is_err());
+        let bad_host = H2ClientOptions {
+            host: "user@evil".into(),
+            path: "/h2".into(),
+            tls: true,
+        };
+        assert!(validate_options(&bad_host).is_err());
     }
 
     #[tokio::test]

@@ -35,6 +35,7 @@ type Writer = Arc<Mutex<MuxWriter<WriteHalf<BoxStream>>>>;
 struct Uplink {
     target: Option<Endpoint>,
     data: Vec<u8>,
+    _memory: OwnedSemaphorePermit,
 }
 
 struct Session {
@@ -194,9 +195,23 @@ impl State {
             },
         );
         if !frame.data.is_empty() {
+            let Some(memory) = self.context.supervisor.try_acquire_mux_memory() else {
+                let _ = self
+                    .writer
+                    .lock()
+                    .await
+                    .end_error(id, b"mux memory limit")
+                    .await;
+                if let Some(session) = self.sessions.remove(&id) {
+                    session.cancel.cancel();
+                    session.abort.abort();
+                }
+                return true;
+            };
             let _ = uplink.try_send(Uplink {
                 target: None,
                 data: frame.data.clone(),
+                _memory: memory,
             });
         }
         true
@@ -210,11 +225,25 @@ impl State {
         if frame.data.is_empty() {
             return true;
         }
+        let Some(memory) = self.context.supervisor.try_acquire_mux_memory() else {
+            if let Some(session) = self.sessions.remove(&id) {
+                session.cancel.cancel();
+                session.abort.abort();
+            }
+            let _ = self
+                .writer
+                .lock()
+                .await
+                .end_error(id, b"mux memory limit")
+                .await;
+            return true;
+        };
         if session
             .uplink
             .try_send(Uplink {
                 target: frame.meta.target,
                 data: frame.data,
+                _memory: memory,
             })
             .is_err()
         {

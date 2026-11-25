@@ -9,7 +9,7 @@ use marmo_proto::vless::{
     is_mux_target, request_progress,
 };
 use marmo_transport::h2::H2ServerOptions;
-use marmo_transport::{BoxFuture, BoxStream, Layer};
+use marmo_transport::{AcceptedStream, BoxFuture, BoxStream, Layer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::{Notify, mpsc};
@@ -102,11 +102,17 @@ struct Prepared {
 async fn prepare(
     client: TcpStream, layers: &[Arc<dyn Layer>], uuid: &Uuid,
 ) -> io::Result<Prepared> {
-    let mut stream: BoxStream = Box::new(client);
+    let mut stream = AcceptedStream {
+        stream: Box::new(client),
+        alpn: None,
+    };
     for layer in layers {
-        stream = layer.accept(stream).await.map_err(io::Error::other)?;
+        stream = layer
+            .accept_stream(stream)
+            .await
+            .map_err(io::Error::other)?;
     }
-    prepare_stream(stream, uuid).await
+    prepare_stream(stream.stream, uuid).await
 }
 
 async fn prepare_stream(mut stream: BoxStream, uuid: &Uuid) -> io::Result<Prepared> {

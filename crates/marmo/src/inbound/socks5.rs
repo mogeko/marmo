@@ -108,12 +108,14 @@ async fn connect_target(
     match context.connect(action, &destination).await {
         Ok(connected) => {
             if !replied
-                && send_reply(&mut stream, ReplyStatus::Succeeded, connected.bound)
+                && send_reply(&mut stream, ReplyStatus::Succeeded, None)
                     .await
                     .is_err()
             {
                 return Ok(None);
             }
+            // Do not expose the proxy's local egress address in BND.ADDR.
+            let _ = connected.bound;
             Ok(Some((stream, connected.stream)))
         }
         Err(error) => {

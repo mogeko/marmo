@@ -164,7 +164,10 @@ fn valid_uuid(text: &str) -> bool {
 }
 
 fn is_loopback(endpoint: &Endpoint) -> bool {
-    endpoint.ip().is_some_and(|ip| ip.is_loopback()) || endpoint.domain() == Some("localhost")
+    // Only a literal loopback IP is a test server. A name such as `localhost`
+    // is resolved later and can be pointed at a non-loopback address by hosts
+    // files, search domains, or a custom resolver.
+    endpoint.ip().is_some_and(|ip| ip.is_loopback())
 }
 
 fn valid_pem(text: &str) -> bool {

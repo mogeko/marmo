@@ -5,12 +5,17 @@ use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
+/// One Mux.Cool frame is at most 64 KiB; 1,024 permits cap queued mux frames
+/// at roughly 64 MiB per instance.
+const MUX_MEMORY_PERMITS: usize = 1_024;
+
 /// Owns the cancellation token and the connection permits for one listener.
 pub(crate) struct Supervisor {
     token: CancellationToken,
     permits: Arc<Semaphore>,
     streams: Arc<Semaphore>,
     mux_sessions: Arc<Semaphore>,
+    mux_memory: Arc<Semaphore>,
 }
 
 impl Supervisor {
@@ -25,6 +30,9 @@ impl Supervisor {
             // Mux.Cool logical sessions are also bounded separately from the
             // physical connection budget.
             mux_sessions: Arc::new(Semaphore::new(permits)),
+            // Aggregate in-flight Mux frame memory, independent of the
+            // per-session queue bound.
+            mux_memory: Arc::new(Semaphore::new(MUX_MEMORY_PERMITS)),
         }
     }
 
@@ -49,6 +57,11 @@ impl Supervisor {
     /// Returns `None` when the instance is at its Mux.Cool session limit.
     pub(crate) fn try_acquire_mux(&self) -> Option<OwnedSemaphorePermit> {
         self.mux_sessions.clone().try_acquire_owned().ok()
+    }
+
+    /// Returns `None` when the instance Mux frame memory budget is full.
+    pub(crate) fn try_acquire_mux_memory(&self) -> Option<OwnedSemaphorePermit> {
+        self.mux_memory.clone().try_acquire_owned().ok()
     }
 }
 
